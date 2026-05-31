@@ -1,6 +1,8 @@
 PETProject v0.1 — A C64-native BASIC and 6502 assembly IDE
 ===========================================================
 
+Download the IDE from https://gopherbrokesoftware.com/petproject
+
 PETProject is an integrated development environment that runs directly on
 a stock Commodore 64 with a 1541 disk drive.  No special hardware is
 required (REU optional, used only for the BASIC scripting subsystem).

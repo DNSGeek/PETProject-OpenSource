@@ -61,17 +61,15 @@ SOURCE LAYOUT
   make_petproject.sh  Full build script (edit paths before use)
   build_modules.sh    Build all modules only
 
-  Resources/      C64 ROM images (BASIC 901226-01, Kernal 901227-03,
-                  Character ROM 901225-01) — used only for reference
-                  (moddet.asm reads ROM at runtime; no ROM data compiled in)
-
 USAGE
   Boot from the .d64 image in VICE or on real hardware:
-    LOAD"*",8,1   (or use the autostart feature of your emulator)
+    LOAD"*",8   (or use the autostart feature of your emulator)
 
   Editor keys:
     F1            Settings (colors, drive number)
+    F2            Page Up
     F3            Load file
+    F4            Page Down
     F5            Save file
     F7            Quit to BASIC
     F8            Module picker (Assemble / Disassemble / Renumber / Disk Utility / Run Script)
@@ -86,5 +84,4 @@ LICENSE
   MIT License — see LICENSE.txt
 
 CREDITS
-  PETProject was designed and built by Tom Knox / Gopher Broke Software.
-  Architecture discussions with Greg Nacu (C64OS) and Dennis (VisionBASIC).
+  PETProject was designed and built by Thomas Knox / Gopher Broke Software.

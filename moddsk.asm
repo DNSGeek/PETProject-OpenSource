@@ -5,7 +5,7 @@
 ; Entry: JSR $C000 (first 3 bytes = JMP disk_main)
 ;
 ; Features:
-;   - Reads up to DSK_MAX_ENTRIES (100) directory entries into module RAM
+;   - Reads up to DSK_MAX_ENTRIES (34) directory entries into module RAM
 ;   - Displays 20 entries at a time in a scrollable popup
 ;   - RETURN  = open selected file (writes FNAME_BUF/FNAME_LEN, MOD_STATUS=$04)
 ;   - D       = delete selected file (confirm Y/N)
@@ -25,9 +25,7 @@
 ;
 ; Memory layout (within module at $C000):
 ;   $C000-$C002  JMP disk_main (entry trampoline)
-;   $C003-$C0FF  State variables and scratch
-;   $C100-$C8FF  Directory cache: DSK_MAX_ENTRIES × DSK_ENTRY_SIZE
-;   $C900-$CFFF  Code
+;   $C003+       Code (BSS follows after code, placed by linker)
 ;
 ; Directory cache entry (DSK_ENTRY_SIZE = 20 bytes):
 ;   Bytes  0-15  filename (PETSCII, space-padded, NOT NUL-terminated)
@@ -117,6 +115,8 @@ CLR_NORMAL  = $0E   ; light blue — unselected items
 CLR_SEL     = $01   ; white      — selected item (highlighted)
 CLR_LEGEND  = $0B   ; dark grey  — key legend row
 CLR_ERROR   = $02   ; red        — error display
+CLR_PROMPT  = $0E   ; light blue — @CMD: prompt label (was dark grey, invisible)
+CLR_INPUT   = $01   ; white      — command input characters
 
 ; ============================================================================
 ; Popup geometry
@@ -139,10 +139,13 @@ DSK_LEGEND_ROW  = 24
 ; Directory cache layout
 ; ============================================================================
 
-DSK_MAX_ENTRIES = 50       ; cache cap: 50×20=1000 bytes fits within 4K module limit
+DSK_MAX_ENTRIES = 34       ; cache cap: 34×20=680 bytes — fits 4K module with rawcmd code
 DSK_ENTRY_SIZE  = 20        ; 16 name + 1 type + 2 blocks + 1 pad
 
-; Directory cache: 50 entries × 20 bytes = 1000 bytes, placed by linker in BSS.
+; Directory cache: 34 entries × 20 bytes = 680 bytes, placed by linker in BSS.
+; Reduced from 50 to make room for DSK_CMD_BUF (32 bytes) added for the @
+; raw-command feature. 34 entries covers all practical project disk layouts;
+; the 1541 directory track holds 144 slots but real disks rarely approach that.
 ; All state variables are in BSS (after code), allocated by the linker.
 ; DSK_CACHE is the largest BSS item; it follows the scalar state vars.
 ;
@@ -167,7 +170,11 @@ DSK_NAMELEN_TMP: .res 1     ; scratch for rename/format input length
 DSK_INPUT_BUF:   .res 16    ; input buffer for prompts
 DSK_TRUNCATED:   .res 1     ; $FF if cache hit 100-entry cap
 DSK_ERROR_CODE:  .res 1     ; CBM error code from status channel
-DSK_CACHE:       .res 1000  ; directory cache: 50 entries × 20 bytes
+DSK_CMD_BUF:     .res 32    ; raw command input buffer (@-key feature)
+DSK_CMD_LEN:     .res 1     ; length of raw command in DSK_CMD_BUF
+DSK_PAGE:        .res 1     ; current page number (0-based); each page = DSK_MAX_ENTRIES
+DSK_SKIP:        .res 1     ; entries to skip on next dsk_read_entries call (= PAGE × MAX)
+DSK_CACHE:       .res 680   ; directory cache: 34 entries × 20 bytes
 
 .segment "CODE"
 ; DSK_CACHE is now a label rather than a constant -- references to it
@@ -226,6 +233,8 @@ disk_main:
     sta DSK_SEL
     sta DSK_VIEW_START
     sta DSK_TRUNCATED
+    sta DSK_PAGE
+    sta DSK_SKIP
 
     ; Read directory into cache
     jsr dsk_read_directory
@@ -272,31 +281,21 @@ disk_main:
 
 @try_ret:
     cmp #$0D                    ; RETURN = open
-    bne @try_del
+    bne @try_f4
     jsr dsk_do_open
     bcs @loop                   ; C=1: cancelled or error, stay in loop
     jmp dsk_exit                ; C=0: FNAME set, exit with status $04
 
-@try_del:
-    cmp #$04                    ; 'D' in PETSCII (screen code, but GETIN returns PETSCII)
-    bne @try_del2
-    jsr dsk_do_delete
-    jmp @loop
-@try_del2:
-    cmp #$44                    ; 'D' uppercase PETSCII
-    bne @try_ren
-    jsr dsk_do_delete
+@try_f4:
+    cmp #$8A                    ; F4 = next page (page down)
+    bne @try_f2
+    jsr dsk_page_next
     jmp @loop
 
-@try_ren:
-    cmp #$12                    ; 'R' PETSCII lowercase
-    bne @try_ren2
-    jsr dsk_do_rename
-    jmp @loop
-@try_ren2:
-    cmp #$52                    ; 'R' uppercase PETSCII
+@try_f2:
+    cmp #$89                    ; F2 = prev page (page up)
     bne @try_fmt
-    jsr dsk_do_rename
+    jsr dsk_page_prev
     jmp @loop
 
 @try_fmt:
@@ -306,8 +305,14 @@ disk_main:
     jmp @loop
 @try_fmt2:
     cmp #$46                    ; 'F' uppercase PETSCII
-    bne @loop
+    bne @try_rawcmd
     jsr dsk_do_format
+    jmp @loop
+
+@try_rawcmd:
+    cmp #$40                    ; '@' — raw command
+    bne @loop
+    jsr dsk_do_rawcmd
     jmp @loop
 
 @close:
@@ -507,6 +512,8 @@ dsk_read_header:
 ; dsk_read_entries — read all file entries into DSK_CACHE.
 ; Called after dsk_read_header; stream positioned at first entry line.
 ; Populates DSK_ENTRY_COUNT. DSK_FREE_LO/HI set to $FF (unknown).
+; If DSK_SKIP > 0, that many entries are consumed and discarded first
+; (used by the paging system to reach entries beyond page 0).
 ; C=0 always (errors silently truncate the listing).
 ; ============================================================================
 
@@ -514,6 +521,46 @@ dsk_read_entries:
     lda #$FF
     sta DSK_FREE_LO
     sta DSK_FREE_HI
+
+    ; --- Skip phase: drain DSK_SKIP entries without caching ---
+    lda DSK_SKIP
+    beq @entry_loop             ; nothing to skip
+
+    sta DSK_TMP                 ; DSK_TMP = skip counter
+@skip_loop:
+    ; Read and discard one complete directory entry line.
+    ; Structure: link(2) + blocks(2) + spaces/reverse + "filename" + type + EOL($00)
+    jsr READST
+    and #$02
+    bne @skip_done              ; hard error: give up skipping, proceed with what we have
+    jsr CHRIN
+    cmp #$00
+    beq @skip_done              ; null link = BLOCKS FREE line: no more entries
+    ; link hi
+    jsr dsk_chrin_safe
+    bcs @skip_done
+    ; blocks lo, hi
+    jsr dsk_chrin_safe
+    bcs @skip_done
+    jsr dsk_chrin_safe
+    bcs @skip_done
+    ; drain to end of line ($00 terminator)
+@skip_eol:
+    jsr dsk_chrin_safe
+    bcs @skip_done
+    cmp #$00
+    bne @skip_eol
+    ; one entry consumed
+    dec DSK_TMP
+    bne @skip_loop
+    ; set TRUNCATED so we know there's a previous page worth of data
+    lda #$FF
+    sta DSK_TRUNCATED
+    jmp @entry_loop
+
+@skip_done:
+    clc
+    rts
 
 @entry_loop:
     ; Read link lo using raw CHRIN to handle the case where the 1541 sets
@@ -975,6 +1022,51 @@ dsk_draw_info:
     lda DSK_FREE_HI
     sta DSK_TMP2
     jsr dsk_print_decimal       ; prints 4 digits into SCREEN+COLS+29
+
+    ; Page indicator at cols 33-39: "PG:N" where N is DSK_PAGE+1.
+    ; Always shown so user has a reference point even on page 1.
+    ; P=$10 G=$07 :=$3A
+    lda #$10
+    sta SCREEN+COLS+33
+    lda #$07
+    sta SCREEN+COLS+34
+    lda #$3A
+    sta SCREEN+COLS+35
+    lda DSK_PAGE
+    clc
+    adc #1                      ; display 1-based page number
+    cmp #10
+    bcc @pg_one_digit
+    ; Two-digit page (10+): write tens at col 36, units at col 37
+    ; Simple: subtract 10 repeatedly (page numbers stay small in practice)
+    ldx #0
+@pg_tens:
+    sec
+    sbc #10
+    inx
+    cmp #10
+    bcs @pg_tens
+    pha                         ; save units
+    txa
+    clc
+    adc #$30
+    sta SCREEN+COLS+36
+    pla
+    clc
+    adc #$30
+    sta SCREEN+COLS+37
+    jmp @pg_color
+@pg_one_digit:
+    clc
+    adc #$30
+    sta SCREEN+COLS+36
+@pg_color:
+    lda #CLR_CHROME
+    sta COLOR+COLS+33
+    sta COLOR+COLS+34
+    sta COLOR+COLS+35
+    sta COLOR+COLS+36
+    sta COLOR+COLS+37
     rts
 
 ; "FREE:" in screen codes: F=$06 R=$12 E=$05 E=$05 :=$3A
@@ -1037,13 +1129,19 @@ dsk_draw_legend:
 @done:
     rts
 
-; "RET=OPEN D=DEL R=REN F=FMT" screen codes
-; R=$12 E=$05 T=$14 ==$3D O=$0F P=$10 E=$05 N=$0E ...
+; "RET=OPEN F=FMT @=CMD F2=PG+ F4=PG-" screen codes
+; Each token hand-encoded in PETSCII screen codes.
+; R=$12 E=$05 T=$14 ==$3D O=$0F P=$10 E=$05 N=$0E space=$20
+; F=$06 ==$3D F=$06 M=$0D T=$14 space=$20
+; @=$00 ==$3D C=$03 M=$0D D=$04 space=$20
+; F=$06 2=$32 ==$3D P=$10 G=$07 +=$2B space=$20
+; F=$06 4=$34 ==$3D P=$10 G=$07 -=$2D
 dsk_legend_text:
-    .byte $12,$05,$14,$3D,$0F,$10,$05,$0E,$20
-    .byte $04,$3D,$04,$05,$0C,$20
-    .byte $12,$3D,$12,$05,$0E,$20
-    .byte $06,$3D,$06,$0D,$14
+    .byte $12,$05,$14,$3D,$0F,$10,$05,$0E,$20   ; RET=OPEN
+    .byte $06,$3D,$06,$0D,$14,$20               ; F=FMT
+    .byte $00,$3D,$03,$0D,$04,$20               ; @=CMD
+    .byte $06,$32,$3D,$10,$07,$2B,$20           ; F2=PG+
+    .byte $06,$34,$3D,$10,$07,$2D               ; F4=PG-
     .byte 0
 
 ; ============================================================================
@@ -1430,264 +1528,6 @@ dsk_do_open:
     rts
 
 ; ============================================================================
-; dsk_do_delete — D handler.
-;
-; Shows "DELETE? Y/N" on legend row, waits for keypress.
-; On Y: sends "S0:<filename>" to command channel, refreshes directory.
-; On N or STOP: restore legend, return.
-; ============================================================================
-
-dsk_do_delete:
-    lda DSK_ENTRY_COUNT
-    bne :+
-    rts
-:
-    ; Show confirm prompt on legend row
-    jsr dsk_clear_legend
-    ldy #0
-@lbl:
-    lda dsk_del_confirm,y
-    beq @wait
-    sta SCREEN+(24*COLS),y
-    iny
-    bne @lbl
-@wait:
-    jsr GETIN
-    beq @wait
-    cmp #$03                    ; STOP
-    beq @cancel
-    cmp #$59                    ; 'Y'
-    beq @do_del
-    cmp #$79                    ; 'y'
-    beq @do_del
-    jmp @cancel
-
-@do_del:
-    ; Build "S0:<filename>" and send to command channel
-    ; Open command channel: LA=15, device=DSK_DRIVE, SA=15
-    lda #15
-    ldx DSK_DRIVE
-    ldy #15
-    jsr SETLFS
-    lda #0
-    ldx #0
-    ldy #0
-    jsr SETNAM
-    jsr OPEN
-    bcc @cmd_ok
-    jmp @done
-@cmd_ok:
-    ldx #15
-    jsr CHKOUT
-    bcc @send_ok
-    lda #15
-    jsr CLOSE
-    jmp @done
-@send_ok:
-    ; Send "S0:" prefix
-    lda #$53                    ; 'S'
-    jsr CHROUT
-    lda #$30                    ; '0'
-    jsr CHROUT
-    lda #$3A                    ; ':'
-    jsr CHROUT
-    ; Send filename from selected cache entry
-    lda DSK_SEL
-    jsr dsk_entry_ptr
-    ldy #0
-@send_name:
-    lda (DSK_PTR),y
-    cmp #$20                    ; stop at trailing space
-    beq @send_done
-    jsr CHROUT
-    iny
-    cpy #16
-    bne @send_name
-@send_done:
-    ; Terminate with CR
-    lda #$0D
-    jsr CHROUT
-    jsr CLRCHN
-    lda #15
-    jsr CLOSE
-
-    ; Re-read directory and redraw
-    lda #0
-    sta DSK_ENTRY_COUNT
-    sta DSK_SEL
-    sta DSK_VIEW_START
-    jsr dsk_read_directory
-    jsr dsk_draw_full
-    rts
-
-@cancel:
-    jsr dsk_draw_legend
-@done:
-    rts
-
-; "DELETE? Y/N " in screen codes
-dsk_del_confirm:
-    .byte $04,$05,$0C,$05,$14,$05,$3F,$20,$19,$2F,$0E,$20, 0
-
-; ============================================================================
-; dsk_do_rename — R handler.
-;
-; Prompts for new name on legend row (inline input, 16 chars max).
-; Sends "R0:<newname>=<oldname>" to command channel.
-; Refreshes directory on success.
-; ============================================================================
-
-dsk_do_rename:
-    lda DSK_ENTRY_COUNT
-    bne :+
-    rts
-:
-    ; Show "NEW NAME:" prompt on legend row
-    jsr dsk_clear_legend
-    ldy #0
-@lbl:
-    lda dsk_ren_prompt,y
-    beq @input
-    sta SCREEN+(24*COLS),y
-    iny
-    bne @lbl
-
-@input:
-    lda #0
-    sta DSK_NAMELEN_TMP         ; new name length
-
-    ; Flush keyboard
-@flush:
-    jsr GETIN
-    bne @flush
-
-@inp_loop:
-    ; Blink cursor at col 9
-    lda JIFFY_LO
-    and #$10
-    beq @cur_off2
-    lda #$20 | $80
-    jmp @cur_draw2
-@cur_off2:
-    lda #$20
-@cur_draw2:
-    ldy DSK_NAMELEN_TMP
-    sta SCREEN+(24*COLS)+9,y
-
-    jsr GETIN
-    bne :+
-    jmp @inp_loop
-:    cmp #$03                    ; STOP = cancel
-    bne :+
-    jmp @cancel
-:
-    cmp #$0D                    ; RETURN = confirm
-    beq @confirm
-    cmp #$14                    ; DEL
-    bne @inp_char
-    lda DSK_NAMELEN_TMP
-    beq @inp_loop
-    ldy DSK_NAMELEN_TMP
-    dey
-    lda #$20
-    sta SCREEN+(24*COLS)+9,y
-    dec DSK_NAMELEN_TMP
-    jmp @inp_loop
-@inp_char:
-    cmp #$20
-    bcc @inp_loop
-    ldy DSK_NAMELEN_TMP
-    cpy #16
-    bcs @inp_loop
-    sta DSK_INPUT_BUF,y
-    jsr dsk_petscii_to_sc
-    sta SCREEN+(24*COLS)+9,y
-    inc DSK_NAMELEN_TMP
-    jmp @inp_loop
-
-@confirm:
-    lda DSK_NAMELEN_TMP
-    bne :+
-    jmp @cancel                 ; empty name — don't rename
-:
-    ; Open command channel
-    lda #15
-    ldx DSK_DRIVE
-    ldy #15
-    jsr SETLFS
-    lda #0
-    ldx #0
-    ldy #0
-    jsr SETNAM
-    jsr OPEN
-    bcc @cmd_ok2
-    jmp @done
-@cmd_ok2:
-    ldx #15
-    jsr CHKOUT
-    bcc @send_ren
-    lda #15
-    jsr CLOSE
-    jmp @done
-
-@send_ren:
-    ; Send "R0:<newname>=<oldname>\r"
-    lda #$52                    ; 'R'
-    jsr CHROUT
-    lda #$30                    ; '0'
-    jsr CHROUT
-    lda #$3A                    ; ':'
-    jsr CHROUT
-    ; New name from DSK_INPUT_BUF
-    ldy #0
-@new_name:
-    cpy DSK_NAMELEN_TMP
-    beq @sep
-    lda DSK_INPUT_BUF,y
-    jsr CHROUT
-    iny
-    jmp @new_name
-@sep:
-    lda #$3D                    ; '='
-    jsr CHROUT
-    ; Old name from cache entry
-    lda DSK_SEL
-    jsr dsk_entry_ptr
-    ldy #0
-@old_name:
-    lda (DSK_PTR),y
-    cmp #$20
-    beq @ren_done
-    jsr CHROUT
-    iny
-    cpy #16
-    bne @old_name
-@ren_done:
-    lda #$0D
-    jsr CHROUT
-    jsr CLRCHN
-    lda #15
-    jsr CLOSE
-
-    ; Refresh
-    lda #0
-    sta DSK_ENTRY_COUNT
-    sta DSK_SEL
-    sta DSK_VIEW_START
-    jsr dsk_read_directory
-    jsr dsk_draw_full
-    rts
-
-@cancel:
-    jsr dsk_draw_legend
-@done:
-    rts
-
-; "NEW NAME: " in screen codes
-dsk_ren_prompt:
-    .byte $0E,$05,$17,$20,$0E,$01,$0D,$05,$3A,$20, 0
-
-; ============================================================================
 ; dsk_do_format — F handler.
 ;
 ; Shows "FORMAT? Y/N" confirm, then prompts for disk name (max 16) and 2-char ID.
@@ -1780,9 +1620,12 @@ dsk_do_format:
 
 @fmt_refresh:
     lda #0
+    sta DSK_PAGE
+    sta DSK_SKIP
     sta DSK_ENTRY_COUNT
     sta DSK_SEL
     sta DSK_VIEW_START
+    sta DSK_TRUNCATED
     jsr dsk_read_directory
     jsr dsk_draw_full
     rts
@@ -1971,6 +1814,305 @@ dsk_fmt_id_prompt:
 ; "FORMATTING...   " in screen codes
 dsk_formatting_msg:
     .byte $06,$0F,$12,$0D,$01,$14,$14,$09,$0E,$07,$2E,$2E,$2E,$20,$20,$20, 0
+
+; ============================================================================
+; dsk_page_next — F4 handler: advance to the next page of directory entries.
+;
+; Only acts if DSK_TRUNCATED=$FF (meaning there are more entries beyond the
+; current cache).  Increments DSK_PAGE, recomputes DSK_SKIP, resets the
+; viewport and selection, re-reads the directory, and redraws.
+; ============================================================================
+
+dsk_page_next:
+    lda DSK_TRUNCATED
+    cmp #$FF
+    bne @at_end                 ; not truncated: already on last page
+    inc DSK_PAGE
+    jmp dsk_page_reload
+@at_end:
+    rts
+
+; ============================================================================
+; dsk_page_prev — F2 handler: go back to the previous page.
+;
+; Only acts if DSK_PAGE > 0.  Decrements DSK_PAGE, recomputes DSK_SKIP,
+; resets viewport and selection, re-reads, redraws.
+; ============================================================================
+
+dsk_page_prev:
+    lda DSK_PAGE
+    beq @at_start               ; already on page 0
+    dec DSK_PAGE
+    jmp dsk_page_reload
+@at_start:
+    rts
+
+; ============================================================================
+; dsk_page_reload — common tail for page_next/page_prev.
+;
+; Computes DSK_SKIP = DSK_PAGE × DSK_MAX_ENTRIES via repeated addition,
+; resets cache state, and re-reads + redraws the directory.
+; ============================================================================
+
+dsk_page_reload:
+    ; Compute DSK_SKIP = DSK_PAGE * DSK_MAX_ENTRIES
+    lda #0
+    sta DSK_SKIP
+    ldx DSK_PAGE
+    beq @skip_done              ; page 0: skip = 0
+@mul_loop:
+    lda DSK_SKIP
+    clc
+    adc #DSK_MAX_ENTRIES
+    sta DSK_SKIP
+    dex
+    bne @mul_loop
+@skip_done:
+    ; Reset viewport and cache; preserve DSK_PAGE and DSK_SKIP
+    lda #0
+    sta DSK_ENTRY_COUNT
+    sta DSK_SEL
+    sta DSK_VIEW_START
+    sta DSK_TRUNCATED
+    jsr dsk_read_directory
+    jsr dsk_draw_full
+    rts
+
+; ============================================================================
+; dsk_do_rawcmd — @ handler: send a raw command string to the drive.
+;
+; Shows "@CMD:" prompt on the legend row and reads up to 32 PETSCII chars
+; from the keyboard.  On RETURN the string is sent verbatim to LA=15/SA=15
+; followed by CR.  The status channel is then read back and displayed on
+; row 0 for ~2 seconds.  The directory is always reloaded afterwards,
+; whether the command succeeded or not (a CD changes the directory; a UI
+; reset, I initialize, etc. all warrant a fresh listing).
+;
+; Useful for CMD HD / FD / RAMLink path navigation:
+;   CD/GAMES        — change into sub-directory GAMES
+;   CD//            — back to root
+;   CD←             — up one level  (← = $5F PETSCII, left-arrow)
+;   /               — query current path (result shown on row 0)
+;   UI              — soft reset drive
+;   I               — initialize
+;
+; Input is raw PETSCII stored in DSK_CMD_BUF (32 bytes).
+; The screen shows screen-code equivalents so the user can see what they
+; typed; the buffer holds the original PETSCII for transmission.
+;
+; Cancel with STOP — restores legend, does NOT reload directory.
+; ============================================================================
+
+dsk_do_rawcmd:
+    ; Show "@CMD: " prompt on legend row in CLR_PROMPT color.
+    ; Written inline (not loop) because '@' screen code = $00 which
+    ; collides with the null terminator a loop would use.
+    jsr dsk_clear_legend
+    lda #$00                    ; '@' screen code
+    sta SCREEN+(24*COLS)+0
+    lda #$03                    ; 'C'
+    sta SCREEN+(24*COLS)+1
+    lda #$0D                    ; 'M'
+    sta SCREEN+(24*COLS)+2
+    lda #$04                    ; 'D'
+    sta SCREEN+(24*COLS)+3
+    lda #$3A                    ; ':'
+    sta SCREEN+(24*COLS)+4
+    lda #$20                    ; ' '
+    sta SCREEN+(24*COLS)+5
+    ; Paint all 6 prompt chars CLR_PROMPT in color RAM
+    lda #CLR_PROMPT
+    sta COLOR+(24*COLS)+0
+    sta COLOR+(24*COLS)+1
+    sta COLOR+(24*COLS)+2
+    sta COLOR+(24*COLS)+3
+    sta COLOR+(24*COLS)+4
+    sta COLOR+(24*COLS)+5
+
+@setup_input:
+    lda #0
+    sta DSK_CMD_LEN
+
+    ; Flush keyboard buffer
+@flush:
+    jsr GETIN
+    bne @flush
+
+    ; Input loop — cursor blinks at legend col 6 + DSK_CMD_LEN
+@inp_loop:
+    lda JIFFY_LO
+    and #$10
+    beq @cur_off
+    lda #$20 | $80              ; reverse-space = blinking cursor
+    jmp @cur_draw
+@cur_off:
+    lda #$20
+@cur_draw:
+    ldy DSK_CMD_LEN
+    sta SCREEN+(24*COLS)+6,y
+    lda #CLR_INPUT
+    sta COLOR+(24*COLS)+6,y
+
+    jsr GETIN
+    beq @inp_loop
+
+    cmp #$03                    ; STOP = cancel
+    bne :+
+    jmp @cancel
+:
+    cmp #$0D                    ; RETURN = execute
+    bne :+
+    jmp @execute
+:
+    cmp #$14                    ; DEL = backspace
+    bne @inp_char
+    lda DSK_CMD_LEN
+    beq @inp_loop               ; nothing to delete
+    ldy DSK_CMD_LEN
+    dey
+    lda #$20
+    sta SCREEN+(24*COLS)+6,y   ; erase char on screen
+    dec DSK_CMD_LEN
+    jmp @inp_loop
+
+@inp_char:
+    ; Accept printable chars ($20-$FE) up to 32 chars.
+    cmp #$20
+    bcc @inp_loop               ; control chars: ignore
+    ldy DSK_CMD_LEN
+    cpy #32
+    bcs @inp_loop               ; buffer full: ignore
+    ; Store raw PETSCII in buffer, display as screen code in CLR_INPUT
+    sta DSK_CMD_BUF,y
+    jsr dsk_petscii_to_sc
+    sta SCREEN+(24*COLS)+6,y
+    lda #CLR_INPUT
+    sta COLOR+(24*COLS)+6,y
+    inc DSK_CMD_LEN
+    jmp @inp_loop
+
+@execute:
+    lda DSK_CMD_LEN
+    bne @send                   ; non-empty: proceed
+    jmp @cancel                 ; empty command: cancel silently
+
+@send:
+    ; Open command channel LA=15, device=DSK_DRIVE, SA=15
+    lda #15
+    ldx DSK_DRIVE
+    ldy #15
+    jsr SETLFS
+    lda #0
+    ldx #0
+    ldy #0
+    jsr SETNAM
+    jsr OPEN
+    bcc @cmd_ok
+    jmp @reload                 ; OPEN failed — reload anyway
+
+@cmd_ok:
+    ldx #15
+    jsr CHKOUT
+    bcc @send_bytes
+    lda #15
+    jsr CLOSE
+    jmp @reload
+
+@send_bytes:
+    ; Send DSK_CMD_BUF[0..DSK_CMD_LEN-1] then CR
+    ldy #0
+@send_loop:
+    cpy DSK_CMD_LEN
+    beq @send_cr
+    lda DSK_CMD_BUF,y
+    jsr CHROUT
+    iny
+    bne @send_loop
+@send_cr:
+    lda #$0D
+    jsr CHROUT
+    jsr CLRCHN
+
+    ; Read status response from command channel into row 0.
+    ; Status format: "NN,message,TT,SS" e.g. "00, OK,00,00"
+    ; We display raw bytes as screen codes until CR ($0D) or 40 chars.
+    ldx #15
+    jsr CHKIN
+    bcc @read_status
+    lda #15
+    jsr CLOSE
+    jmp @reload
+
+@read_status:
+    ; Clear row 0 first
+    ldy #0
+    lda #$20
+@clr_row0:
+    sta SCREEN,y
+    lda #CLR_CHROME
+    sta COLOR,y
+    lda #$20
+    iny
+    cpy #COLS
+    bne @clr_row0
+
+    ; Read status bytes, display as screen codes on row 0
+    ldy #0
+@read_loop:
+    cpy #COLS
+    beq @read_drain             ; row full — drain rest silently
+    jsr CHRIN
+    cmp #$0D                    ; CR = end of status line
+    beq @status_done
+    pha
+    jsr dsk_petscii_to_sc
+    sta SCREEN,y
+    lda #CLR_TITLE
+    sta COLOR,y
+    pla
+    iny
+    jmp @read_loop
+
+@read_drain:
+    jsr CHRIN
+    cmp #$0D
+    bne @read_drain
+
+@status_done:
+    jsr CLRCHN
+    lda #15
+    jsr CLOSE
+
+    ; Pause ~2 seconds (120 jiffies) so user can read the status.
+    ; Use BNE comparison: works correctly even when target wraps past $FF
+    ; because we're comparing for inequality until the jiffy clock catches up.
+    lda JIFFY_LO
+    clc
+    adc #120
+    sta DSK_TMP
+@pause:
+    lda JIFFY_LO
+    cmp DSK_TMP
+    bne @pause
+
+@reload:
+    ; After any raw command, always reset to page 0 and reload.
+    ; A CD command changes the directory entirely so the old page offset
+    ; is meaningless. UI/I/format also warrant a fresh listing from the top.
+    lda #0
+    sta DSK_PAGE
+    sta DSK_SKIP
+    sta DSK_ENTRY_COUNT
+    sta DSK_SEL
+    sta DSK_VIEW_START
+    sta DSK_TRUNCATED
+    jsr dsk_read_directory
+    jsr dsk_draw_full
+    rts
+
+@cancel:
+    jsr dsk_draw_legend
+    rts
 
 ; ============================================================================
 ; dsk_clear_legend — blank the legend row before showing a prompt.

@@ -28,11 +28,13 @@ PROMPT_BLINK_MASK = $10
 IO_LA             = 2         ; logical file number we'll use for I/O
 
 ; ============================================================================
-; do_load_file — F3 handler
+; do_load_file — F3 handler. Loads a PRG: BASIC PRGs are detokenized, ML PRGs
+; are disassembled, other content shown as text (existing behavior).
 ; ============================================================================
 
 do_load_file:
     lda #0
+    sta LOAD_AS_SOURCE      ; F3 = normal PRG load (with type detection)
     sta FNAME_LEN
     sta PROMPT_IS_SAVE
     sta IS_BASIC            ; clear until we know otherwise
@@ -45,7 +47,32 @@ do_load_file:
     bcc :+
     rts                             ; cancelled — nothing to redraw, just return
 :
-    ; fall through into load body
+    jmp load_body                   ; into shared load body
+
+; ============================================================================
+; do_load_source_file — F6 handler. Loads a raw SEQ text source file (e.g. an
+; externally-created assembly source). Opens with ",S,R" so genuine SEQ files
+; open, and treats the content as plain text — no BASIC/ML detection. This is
+; the counterpart to F3: F3 for programs, F6 for source.
+; ============================================================================
+
+do_load_source_file:
+    lda #1
+    sta LOAD_AS_SOURCE      ; F6 = force SEQ source load, no detection
+    lda #0
+    sta FNAME_LEN
+    sta PROMPT_IS_SAVE
+    sta IS_BASIC
+
+    lda #<prompt_lbl_load
+    sta LPTR
+    lda #>prompt_lbl_load
+    sta LPTR+1
+    jsr draw_filename_prompt        ; C=1 → cancelled
+    bcc :+
+    rts
+:
+    jmp load_body                   ; into shared body (keeps LOAD_AS_SOURCE=1)
 
 ; ============================================================================
 ; do_load_file_from_fname — load body only, no filename prompt.
@@ -56,6 +83,9 @@ do_load_file:
 ; ============================================================================
 
 do_load_file_from_fname:
+    lda #0
+    sta LOAD_AS_SOURCE      ; module-driven loads use normal PRG behavior
+load_body:
     lda #0
     sta IS_BASIC            ; clear until we know otherwise
     sta IS_NEW_FILE         ; file came from disk -- not new
@@ -81,10 +111,22 @@ do_load_file_from_fname:
     jsr SETLFS
 
     ; ---- SETNAM ----
+    ; F6 (LOAD_AS_SOURCE=1): open as SEQ via "<name>,S,R" so genuine SEQ source
+    ; files open. F3 (=0): bare name, which opens PRG files as before.
+    lda LOAD_AS_SOURCE
+    bne @name_seq
     lda FNAME_LEN
     ldx #<FNAME_BUF
     ldy #>FNAME_BUF
     jsr SETNAM
+    jmp @name_done
+@name_seq:
+    jsr build_load_name             ; IO_NAME_BUF = "<FNAME_BUF>,S,R"
+    lda IO_NAME_BUF_LEN
+    ldx #<IO_NAME_BUF
+    ldy #>IO_NAME_BUF
+    jsr SETNAM
+@name_done:
 
     ; ---- OPEN ----
     jsr OPEN
@@ -154,6 +196,24 @@ do_load_file_from_fname:
     jsr CLOSE
 
     ; BUF_PTR now one past the last loaded byte.
+
+    ; F6 source load: skip all PRG detection — the file is text by request.
+    lda LOAD_AS_SOURCE
+    beq @basic_detect
+    ; ---- Set up as plain text (no detokenize, no disassemble) ----
+    lda #0
+    sta IS_BASIC
+    sta IS_NEW_FILE
+    sta IS_DIRTY
+    lda BUF_PTR
+    sta GAP_START
+    lda BUF_PTR+1
+    sta GAP_START+1
+    lda #<work_buf_end
+    sta GAP_END
+    lda #>work_buf_end
+    sta GAP_END+1
+    jmp @load_viewport
 
 @basic_detect:
     ; Check first two bytes of work_buf for PRG load address $0801 ($01 $08).
@@ -716,6 +776,40 @@ build_save_name:
     adc #3
     sta IO_NAME_BUF_LEN
     rts
+
+; ============================================================================
+; build_load_name — write "<FNAME_BUF>,S,R" into IO_NAME_BUF for a SEQ read.
+; Used by the F6 "load source" path so genuine SEQ files open (a bare name with
+; SA 2 will not match a SEQ file). No "@0:" prefix — that is a save directive.
+; Stores total length in IO_NAME_BUF_LEN and returns it in A.
+; ============================================================================
+
+build_load_name:
+    ldy #0
+@cp:
+    cpy FNAME_LEN
+    beq @suffix
+    lda FNAME_BUF,y
+    sta IO_NAME_BUF,y
+    iny
+    jmp @cp
+@suffix:
+    tya
+    tax                             ; X = name length = write index
+    ldy #0
+@sfx:
+    lda load_src_suffix,y
+    sta IO_NAME_BUF,x
+    inx
+    iny
+    cpy #4
+    bne @sfx
+    stx IO_NAME_BUF_LEN             ; total = namelen + 4
+    txa
+    rts
+
+load_src_suffix:
+    .byte ",S,R"                    ; SEQ, read
 
 ; ============================================================================
 ; draw_filename_prompt

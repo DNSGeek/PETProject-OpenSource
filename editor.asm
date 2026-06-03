@@ -282,7 +282,7 @@ main_loop:
 @try_f6:
     cmp #KEY_F6
     bne @try_f7
-    jmp main_loop                  ; SHIFT+F5 — ignore
+    jmp @do_load_source            ; F6 (SHIFT+F5) = load raw source (SEQ) file
 @try_f7:
     cmp #KEY_F7
     bne @try_f8
@@ -457,6 +457,9 @@ main_loop:
     jmp main_loop
 @do_load:
     jsr do_load_file
+    jmp main_loop
+@do_load_source:
+    jsr do_load_source_file
     jmp main_loop
 @do_save:
     jsr do_save_file
@@ -910,7 +913,7 @@ render_status:
 status_text:
     ; Must fit in COLS (40) columns. render_status now clamps overflow, but
     ; keep it short so nothing spills onto content row 1.
-    .byte "f1=set f3=load f5=save f7=quit f8=mod", 0
+    .byte "f3=load f5=save f6=src f7=quit f8=mod", 0
 
 ; Add the load/save routines
 .include "loadsave.asm"
@@ -2993,10 +2996,12 @@ FNAME_BUF:       .res 16            ; filename entered by user (PETSCII, not NUL
 FNAME_LEN:       .res 1             ; length of FNAME_BUF content
 IO_STATUS:       .res 1             ; ST value captured after file operations
 PROMPT_IS_SAVE:  .res 1
+LOAD_AS_SOURCE:  .res 1             ; F6 load: 1 = force SEQ source (",S,R", no
+                                   ; BASIC/ML detection); 0 = normal F3 behavior
 IO_END_LO:       .res 1
 IO_END_HI:       .res 1
 IO_SCRATCH:      .res 1
-IO_NAME_BUF:     .res 19
+IO_NAME_BUF:     .res 24            ; "@0:"+name(16)+",S,W" worst case = 23
 IO_NAME_BUF_LEN: .res 1
 IS_BASIC:        .res 1   ; $FF = BASIC program, $00 = plain text
 IS_NEW_FILE:     .res 1   ; $FF = new unsaved file

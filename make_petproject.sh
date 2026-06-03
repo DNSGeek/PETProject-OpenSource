@@ -30,14 +30,14 @@ rm -f "${SRC}/*.vsf"
 # ── Build editor ──────────────────────────────────────────────────────────────
 echo "Building editor..."
 ${CA65} -v -t c64 \
-    -o "${BUILD}/editor.o" \
-    -g "${SRC}/editor.asm" || exit 1
+  -o "${BUILD}/editor.o" \
+  -g "${SRC}/editor.asm" || exit 1
 
 ${LD65} -v -C "${SRC}/petproject.cfg" \
-    -o "${BUILD}/editor.prg" \
-    --mapfile "${BUILD}/editor.map" \
-    --dbgfile "${BUILD}/editor.dbg" \
-    "${BUILD}/editor.o" || exit 1
+  -o "${BUILD}/editor.prg" \
+  --mapfile "${BUILD}/editor.map" \
+  --dbgfile "${BUILD}/editor.dbg" \
+  "${BUILD}/editor.o" || exit 1
 
 echo "✓ ${BUILD}/editor.prg"
 
@@ -46,10 +46,10 @@ bash "${SRC}/build_modules.sh" || exit 1
 
 # ── Create disk image ─────────────────────────────────────────────────────────
 python3 "${SRC}/make_disk.py" \
-    --build-dir "${BUILD}" \
-    --name petproject \
-    --id pp \
-    "${SRC}/petproject.d64" || exit 1
+  --build-dir "${BUILD}" \
+  --name petproject \
+  --id pp \
+  "${SRC}/petproject.d64" || exit 1
 
 echo ""
 echo "Build complete: ${SRC}/petproject.d64"

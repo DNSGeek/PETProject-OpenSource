@@ -12,6 +12,8 @@ DerivedData/
 *.d64
 *.lst
 *.dbg
+*.reu
+*.vsf
 
 # OS junk
 .DS_Store
@@ -39,4 +41,3 @@ Package.resolved
 
 # C64 IDE build output
 build/
-*.vcf

@@ -25,6 +25,7 @@ mkdir -p "${BUILD}"
 # ── Clean previous build artifacts ───────────────────────────────────────────
 rm -f "${SRC}/petproject.d64"
 rm -f "${BUILD}"/*.o "${BUILD}"/*.prg "${BUILD}"/*.dbg "${BUILD}"/*.map
+rm -f "${SRC}/*.vsf"
 
 # ── Build editor ──────────────────────────────────────────────────────────────
 echo "Building editor..."
@@ -56,3 +57,4 @@ echo "Build complete: ${SRC}/petproject.d64"
 # ── Optional: launch in VICE ──────────────────────────────────────────────────
 # Uncomment and adjust path to auto-launch after building:
 # x64sc -basicload -autostart "${SRC}/petproject.d64"
+/opt/homebrew/bin/x64sc -basicload -autostart petproject.d64

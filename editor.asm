@@ -30,6 +30,10 @@ FA           = $BA                 ; current device number (kernal ZP)
 ; ============================================================================
 
 JIFFY_LO     = $A2                 ; jiffy counter low byte (updated by IRQ)
+RPTFLG       = $028A               ; KERNAL key-repeat control: $80 = all keys
+                                   ; repeat, $40 = none, $00 = cursor/space/del
+                                   ; only (the power-on default)
+RPTFLG_ALL   = $80                 ; value that makes every key auto-repeat
 NMI_VEC      = $0318               ; NMI indirect vector (lo)
 NMI_VEC_HI   = $0319               ; NMI indirect vector (hi)
 
@@ -103,6 +107,15 @@ DEFAULT_STATUS_COLOR = $01        ; white  (status row — not user-adjustable y
 DEFAULT_BORDER_COLOR = $06        ; blue
 DEFAULT_BG_COLOR     = $00        ; black
 
+; ---- Modal prompt ("attention") bar ------------------------------------
+; A modal prompt repaints the whole status row as a reverse-video bar so it
+; is impossible to mistake for the ambient (idle) status line. Reverse video
+; (screen-code bit 7 set) renders each cell as a solid block in the color-RAM
+; color with the glyph knocked out in the screen background color — i.e. a
+; bright bar with dark lettering. modal_exit calls render_status to restore.
+MODAL_BAR_COLOR      = $07        ; yellow — the alert bar color
+SCR_REVERSE          = $80        ; OR into a screen code for reverse video
+
 BUF_SIZE     = $6000              ; 24 K working buffer
 
 ; ============================================================================
@@ -175,6 +188,12 @@ start:
     ldx #$FF
     txs
     jsr build_screen_lookup
+
+    ; Enable auto-repeat on ALL keys. The KERNAL default ($00) repeats only the
+    ; cursor keys, space, and INST/DEL, so a held letter would emit just one
+    ; character. An editor wants every key to repeat while held.
+    lda #RPTFLG_ALL
+    sta RPTFLG
 
     jsr load_settings
 
@@ -439,11 +458,23 @@ main_loop:
     jmp main_loop                   ; user cancelled — back to editing
 
 @quit_now:
-    ; Clear screen before handing off to BASIC warm start.
-    ; Without this, BASIC prints READY. wherever the cursor happens to be.
+    ; Clear screen before handing back to BASIC.
     lda #$93                        ; PETSCII clear-screen character
     jsr $FFD2                       ; CHROUT
-    jmp $E37B                       ; BASIC warm start: prints READY., resets state
+    ; Hand back to BASIC via its COLD-start entry ($E394), NOT warm start.
+    ;
+    ; At boot we did `ldx #$FF / txs`, discarding BASIC's call stack, and the
+    ; editor has overwritten zero page (gap pointers, $3A, etc.) and page 2
+    ; throughout the session. BASIC's warm start ($E37B) assumes its stack and
+    ; ZP pointers are still valid, so resuming through it left BASIC with a
+    ; corrupted expression stack — the next evaluation (e.g. LOAD"$",8) failed
+    ; with ?FORMULA TOO COMPLEX. Cold start runs JSR $E3BF (re-init BASIC RAM:
+    ; rebuilds the stack, ZP pointers, and vectors), giving a clean machine.
+    ;
+    ; Trade-off: this resets BASIC fully (banner shown, any BASIC program in
+    ; memory is cleared). That is the correct, safe contract for a SYS-launched
+    ; tool that took over the machine.
+    jmp $E394                       ; BASIC cold start (per ($A000) in this ROM)
 
 ; ============================================================================
 ; do_new_file — CTRL+N handler: clear buffer, optionally saving first.
@@ -457,16 +488,10 @@ main_loop:
 do_new_file:
     lda IS_DIRTY
     beq @clear
-    ; Prompt
-    ldy #0
-@lbl:
-    lda new_dirty_text,y
-    beq @wait
-    sta STATUS_ROW,y
-    lda #DEFAULT_STATUS_COLOR
-    sta COLOR,y
-    iny
-    jmp @lbl
+    ; Prompt — reverse-video alert bar so it can't be mistaken for idle status.
+    lda #<new_dirty_text
+    ldx #>new_dirty_text
+    jsr modal_draw_text
 @wait:
     jsr GETIN
     beq @wait
@@ -518,6 +543,7 @@ do_new_file:
     jsr render_viewport
     jsr draw_cursor
 @cancel:
+    jsr modal_exit              ; STOP: restore idle status bar before returning
     rts
 
 new_dirty_text:
@@ -531,19 +557,13 @@ new_dirty_text:
 ; If Y: calls do_save_file, then returns C=0 (proceed to quit).
 ; If N: returns C=0 (quit without saving).
 ; If STOP: returns C=1 (cancel quit, back to editor).
-; Clobbers: A, Y.
+; Clobbers: A, X, Y.
 ; ============================================================================
 
 quit_dirty_prompt:
-    ldy #0
-@lbl:
-    lda quit_dirty_text,y
-    beq @wait
-    sta STATUS_ROW,y
-    lda #DEFAULT_STATUS_COLOR
-    sta COLOR,y
-    iny
-    jmp @lbl
+    lda #<quit_dirty_text
+    ldx #>quit_dirty_text
+    jsr modal_draw_text
 @wait:
     jsr GETIN
     beq @wait
@@ -566,6 +586,7 @@ quit_dirty_prompt:
     clc
     rts
 @cancel:
+    jsr modal_exit                  ; restore idle status bar (caller returns to editor)
     sec
     rts
 
@@ -755,9 +776,64 @@ setup_screen_blank:
     sta IS_BASIC            ; test buffer is BASIC - colorize on launch
     rts
 
+; ============================================================================
+; modal_draw_text — paint the entire status row as a reverse-video alert bar.
+;
+; Used by every modal prompt (CTRL+N "save before new", quit confirm, etc.)
+; so a blocking prompt is visually unmistakable from the idle status line.
+;
+; Entry:  A = lo byte, X = hi byte of a NUL-terminated *screen-code* string
+;             (raw screen codes, NOT PETSCII — same format as new_dirty_text).
+; Exit:   Whole status row painted: string chars + trailing fill, all in
+;             reverse video, color MODAL_BAR_COLOR. A, X, Y clobbered.
+;
+; Pair with modal_exit (calls render_status) when the prompt is dismissed.
+;
+; Cursor parking hook: if you later want the editor's block cursor moved onto
+; the prompt, do it in the caller after this returns — this routine owns the
+; row's screen/color RAM only, not CURSOR_ROW/COL.
+; ============================================================================
+modal_draw_text:
+    sta WORK_PTR
+    stx WORK_PTR+1
+    ldy #0
+@mdt_str:
+    lda (WORK_PTR),y
+    beq @mdt_fill                 ; NUL -> fill remainder of the row
+    ora #SCR_REVERSE              ; reverse video for the alert bar
+    sta STATUS_ROW,y
+    lda #MODAL_BAR_COLOR
+    sta COLOR,y
+    iny
+    cpy #COLS
+    bne @mdt_str
+    rts                           ; string filled the whole row exactly
+@mdt_fill:
+    ; Remainder of the row: reversed space = solid color block.
+    cpy #COLS
+    beq @mdt_done
+    lda #SCR_SPACE | SCR_REVERSE
+    sta STATUS_ROW,y
+    lda #MODAL_BAR_COLOR
+    sta COLOR,y
+    iny
+    bne @mdt_fill                 ; Y < 40, always taken
+@mdt_done:
+    rts
+
+; ============================================================================
+; modal_exit — dismiss a modal prompt and restore the idle status bar.
+; Single choke point so the restore (and any future cursor un-park) lives in
+; one place. Clobbers A, X (via render_status).
+; ============================================================================
+modal_exit:
+    jmp render_status             ; tail-call: repaints the whole status row
+
 render_status:
     ldx #0
 @loop:
+    cpx #COLS                      ; never write past the 40-column row, even if
+    beq @done                      ; status_text is too long (clamps overflow)
     lda status_text,x
     beq @pad
     jsr lookup_screen
@@ -765,23 +841,26 @@ render_status:
     lda #DEFAULT_STATUS_COLOR
     sta COLOR,x
     inx
-    bne @loop
+    bne @loop                      ; X < 40 always, so this is just "loop"
 @pad:
     ; Blank the rest of the status row
     lda #SCR_SPACE
 @pad_loop:
     cpx #COLS
-    beq @done
-    sta STATUS_ROW,x
+    bcs @done                      ; stop at or past COLS (bcs, not beq: if X
+    sta STATUS_ROW,x               ; somehow entered >= COLS we still terminate)
     lda #DEFAULT_STATUS_COLOR
     sta COLOR,x
+    lda #SCR_SPACE
     inx
     bne @pad_loop
 @done:
     rts
 
 status_text:
-    .byte "petproject v0.1  f1=set f3=load f5=save f7=quit", 0
+    ; Must fit in COLS (40) columns. render_status now clamps overflow, but
+    ; keep it short so nothing spills onto content row 1.
+    .byte "f1=set f3=load f5=save f7=quit f8=mod", 0
 
 ; Add the load/save routines
 .include "loadsave.asm"

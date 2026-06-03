@@ -79,6 +79,17 @@ CLR_LCOL    = COL_SAVE      ; logical column (0 = first char of line)
 CLR_SCOL    = TMP           ; screen columns written so far (0..COLS)
 CLR_TMP     = TMP+1         ; scratch byte
 
+; ── Colorizer-owned storage ──────────────────────────────────────────────────
+; CLR_PREVLET is declared HERE, in the same file as its only uses, so it can
+; never drift out of sync with the colorizer (it must always travel with this
+; file). It is the word-start flag for the keyword-scan optimization: 1 means
+; the previous character was a keyword letter, so the current letter is mid-word
+; and cannot begin a keyword — letting us skip the table scan for it.
+.pushseg
+.bss
+CLR_PREVLET: .res 1
+.popseg
+
 ; ── Color constants (adjust to taste) ───────────────────────────────────────
 
 COL_LINENUM     = 7         ; yellow
@@ -357,6 +368,7 @@ colorize_row:
     lda #0
     sta CLR_LCOL
     sta CLR_SCOL
+    sta CLR_PREVLET         ; no previous letter at line start
 
     ; ------------------------------------------------------------------
     ; Main character loop — one iteration per logical buffer character.
@@ -480,17 +492,73 @@ colorize_row:
 
     ; String literal?
     cmp #$22                        ; $22 = '"'
-    bne @n_check_token
+    bne @n_classify
     ldx #STATE_STRING
+    lda #0
+    sta CLR_PREVLET
     lda SETTING_FG
     jsr clr_emit
     jsr clr_advance
     jmp @loop
 
+    ; --------------------------------------------------------------
+    ; Decide whether a keyword match is even worth attempting here.
+    ;
+    ;   Letter ($41-$5A): attempt ONLY at a word start, i.e. when the
+    ;                     previous char was not a letter (CLR_PREVLET=0).
+    ;                     Mid-identifier letters can't begin a keyword,
+    ;                     so skip the whole table scan for them.
+    ;   Operator (+ - * / ^ > = <): single-char keywords; always attempt
+    ;                     (cheap, and never "mid-word").
+    ;   Anything else:    plain literal.
+    ;
+    ; This collapses col_match_kw from once-per-char to once-per-word,
+    ; which is the dominant cost on a typical line.
+    ; --------------------------------------------------------------
+@n_classify:
+    ; A = current char. Is it a letter?
+    cmp #$41
+    bcc @n_not_letter               ; < 'A'
+    cmp #$5A+1
+    bcs @n_not_letter               ; > 'Z'
+    ; Letter. Word start?
+    ldy CLR_PREVLET
+    bne @n_midword_letter           ; prev was a letter -> not a word start
+    jmp @n_try_kw                   ; word start -> attempt match
+@n_midword_letter:
+    ; Mid-identifier letter: literal, and we are still inside a word.
+    lda #1
+    sta CLR_PREVLET
+    jmp @n_emit_literal
+
+@n_not_letter:
+    ; Not a letter — clear the word flag, then check operator chars.
+    ldy #0
+    sty CLR_PREVLET
+    ; Operator single-char keywords: + - * / ^ > = <
+    cmp #'+'
+    beq @n_try_kw
+    cmp #'-'
+    beq @n_try_kw
+    cmp #'*'
+    beq @n_try_kw
+    cmp #'/'
+    beq @n_try_kw
+    cmp #'^'
+    beq @n_try_kw
+    cmp #'>'
+    beq @n_try_kw
+    cmp #'='
+    beq @n_try_kw
+    cmp #'<'
+    beq @n_try_kw
+    ; Plain literal char.
+    jmp @n_emit_literal
+
     ; BASIC keyword? (buffer is plain text; match keyword strings, not tokens)
-@n_check_token:
+@n_try_kw:
     jsr col_match_kw                ; C=1 -> CLR_KWLEN=len, KW_TOKEN=token
-    bcc @n_literal
+    bcc @n_no_match
 
     ; Matched: paint CLR_KWLEN cells with the keyword color and advance past
     ; the whole keyword. col_match_kw clobbered X (state); we restore it after.
@@ -503,6 +571,11 @@ colorize_row:
     dec CLR_TMP
     bne @n_kw_loop
 
+    ; We just advanced past a complete keyword; clr_advance left BUF_PTR on
+    ; the following char, so the next char is, by definition, a word start.
+    lda #0
+    sta CLR_PREVLET
+
     ; REM ($8F)? rest of line is a comment.
     ldx #STATE_NORMAL
     lda KW_TOKEN
@@ -512,7 +585,20 @@ colorize_row:
 @n_kw_done:
     jmp @loop
 
+@n_no_match:
+    ; col_match_kw failed. If this char was a letter it still starts an
+    ; identifier word, so mark CLR_PREVLET so the rest of the word is skipped.
+    ldy #0
+    lda (BUF_PTR),y
+    cmp #$41
+    bcc @n_emit_literal
+    cmp #$5A+1
+    bcs @n_emit_literal
+    lda #1
+    sta CLR_PREVLET
+
     ; Plain PETSCII char — emit default foreground color
+@n_emit_literal:
 @n_literal:
     ldx #STATE_NORMAL
     lda SETTING_FG
@@ -622,7 +708,8 @@ clr_at_eof:
 ;   C=0  no match
 ; Clobbers A, X, Y, CLR_CTMP, CLR_TMP. Preserves BUF_PTR.
 ; ============================================================================
-COL_PEEK_LEN = 8
+COL_PEEK_LEN = 9                ; fill 9: 8 for the longest keyword + 1 trailing
+                                ; boundary char (so PRINTER won't match PRINT)
 
 col_match_kw:
     ; ---- Fill COL_PEEK[0..7] with logical lookahead, gap-aware ----
@@ -698,6 +785,23 @@ col_match_kw:
     iny
     cpy CLR_KWLEN
     bcc @mk_cmp
+    ; ---- Full character match. Reject if this is an alphabetic keyword
+    ; that runs straight into another letter (PRINTER must not match PRINT).
+    ; Operators (+, =, etc.) are non-alphabetic and always accepted. ----
+    lda COL_PEEK            ; first char of the candidate
+    cmp #$41
+    bcc @mk_accept          ; not a letter -> operator/etc., accept
+    cmp #$5A+1
+    bcs @mk_accept
+    ; Alphabetic keyword: Y == CLR_KWLEN, so COL_PEEK,y is the trailing char.
+    lda COL_PEEK,y
+    cmp #$41
+    bcc @mk_accept          ; trailing char not a letter -> real boundary
+    cmp #$5A+1
+    bcs @mk_accept
+    ; Trailing letter -> this was a longer identifier; reject this candidate.
+    jmp @mk_miss
+@mk_accept:
     ; full match — KW_TOKEN and CLR_KWLEN already set
     sec
     rts

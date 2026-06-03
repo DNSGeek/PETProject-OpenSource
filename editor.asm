@@ -307,21 +307,25 @@ main_loop:
     ; ---- Cursor movement ----
     cmp #KEY_CRSR_RT
     bne @try_lt
+    jsr move_begin
     jsr cursor_right
     jmp @moved
 @try_lt:
     cmp #KEY_CRSR_LT
     bne @try_dn
+    jsr move_begin
     jsr cursor_left
     jmp @moved
 @try_dn:
     cmp #KEY_CRSR_DN
     bne @try_up
+    jsr move_begin
     jsr cursor_down
     jmp @moved
 @try_up:
     cmp #KEY_CRSR_UP
     bne @try_return
+    jsr move_begin
     jsr cursor_up
     jmp @moved
 
@@ -332,14 +336,14 @@ main_loop:
     jsr insert_return
     lda #$FF
     sta IS_DIRTY
-    jmp @moved
+    jmp @moved_render
 @try_del:
     cmp #$14                       ; INST/DEL — backspace
     bne @try_ctrl_l
     jsr do_backspace
     lda #$FF
     sta IS_DIRTY
-    jmp @moved
+    jmp @moved_render
 @try_ctrl_l:
     cmp #KEY_CTRL_L                 ; CTRL+L — force full screen redraw
     bne @try_ctrl_r
@@ -396,6 +400,36 @@ main_loop:
     jmp main_loop
 
 @moved:
+    ; Cursor-movement fast path. A pure cursor move changes nothing on screen
+    ; except which cell is highlighted, so when the viewport does not scroll we
+    ; skip the full 24-row render+recolor entirely: the old cursor cell was
+    ; already cleared by move_begin, the content rows are still correct, so we
+    ; only need to draw the cursor at its new position. This is what made
+    ; arrow-key movement slow (especially in asm mode, where the per-row
+    ; colorizer cost is higher) — every keypress was repainting the whole screen.
+    jsr ensure_cursor_visible
+    lda TOP_LINE
+    cmp FP_TOP_SAVE
+    bne @cmoved_full
+    lda TOP_LINE+1
+    cmp FP_TOP_SAVE+1
+    bne @cmoved_full
+    lda LEFT_COL
+    cmp FP_LEFT_SAVE
+    bne @cmoved_full
+    ; No scroll — just draw the cursor at the new cell. No re-render.
+    jsr draw_cursor
+    jmp main_loop
+@cmoved_full:
+    ; Viewport scrolled — full redraw (this also clears the old cursor cell).
+    jsr render_viewport
+    jsr draw_cursor
+    jmp main_loop
+
+; Unconditional full-render path for content-changing or always-scrolling keys
+; (RETURN, INST/DEL, page up/down). These don't go through move_begin, so the
+; scroll-detection snapshot isn't valid for them; they always repaint fully.
+@moved_render:
     jsr ensure_cursor_visible
     jsr render_viewport
     jsr draw_cursor
@@ -442,11 +476,11 @@ main_loop:
 
 @do_page_up:
     jsr page_up
-    jmp @moved
+    jmp @moved_render
 
 @do_page_down:
     jsr page_down
-    jmp @moved
+    jmp @moved_render
 
 @quit:
 @check_is_dirty:
@@ -475,6 +509,22 @@ main_loop:
     ; memory is cleared). That is the correct, safe contract for a SYS-launched
     ; tool that took over the machine.
     jmp $E394                       ; BASIC cold start (per ($A000) in this ROM)
+
+; ============================================================================
+; move_begin — preamble shared by all cursor-movement keys.
+; Snapshots the viewport origin (for scroll detection in the @moved fast path)
+; and erases the cursor at its CURRENT cell BEFORE the move routine changes
+; CURSOR_ROW/COL, so the no-scroll fast path leaves no stale highlight behind.
+; Clobbers A, X, Y (erase_cursor), WORK_PTR.
+; ============================================================================
+move_begin:
+    lda TOP_LINE
+    sta FP_TOP_SAVE
+    lda TOP_LINE+1
+    sta FP_TOP_SAVE+1
+    lda LEFT_COL
+    sta FP_LEFT_SAVE
+    jmp erase_cursor               ; tail-call: erases old cell, then rts
 
 ; ============================================================================
 ; do_new_file — CTRL+N handler: clear buffer, optionally saving first.

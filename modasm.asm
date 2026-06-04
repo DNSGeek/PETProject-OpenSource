@@ -61,7 +61,9 @@ MOD_STATUS       = $021E
 SETLFS  = $FFBA
 SETNAM  = $FFBD
 OPEN    = $FFC0
+CHKIN   = $FFC6
 CHKOUT  = $FFC9
+CHRIN   = $FFCF
 CHROUT  = $FFD2
 CLOSE   = $FFC3
 CLRCHN  = $FFCC
@@ -202,6 +204,9 @@ SRC_KIND_FILE   = 1
 
 LINE_BUF        = $BF40   ; one shared line buffer for the active file frame
 LINE_BUF_MAX    = 80      ; ($BF40..$BF8F); longer lines truncate with error
+LINE_BUF_END    = $BF31   ; lo byte of address past last content byte (hi=$BF always)
+                          ; set by fill_line_buf; used by @file_skip to detect line end
+INC_LFN_BASE    = 5       ; LFN for depth-1 include; depth-N uses LFN (INC_LFN_BASE+N-1)
 
 
 ; ============================================================================
@@ -2006,7 +2011,14 @@ skip_to_next_line:
     rts
 
 @file_skip:
-    ; Step 2+ will fill this in.  Unreachable until .include push is wired.
+    ; A line from an included file was just parsed.  Load the next one.
+    ; If the file is exhausted, close it and pop the frame so the parent
+    ; source (buffer or outer include) resumes seamlessly.
+    jsr fill_line_buf           ; C=0: line ready, SRC_PTR = LINE_BUF
+    bcc @file_done              ; C=1: EOF
+    ; EOF: close channel, pop frame, restore parent SRC_PTR
+    jsr pop_src_frame
+@file_done:
     rts
 
 ; upcase_a: if A is lowercase PETSCII (a-z), convert to uppercase. Preserves flags except N/Z.
@@ -2191,12 +2203,188 @@ outfile_prompt:
     .byte $0F,$15,$14,$10,$15,$14,$3A,$20, 0
 
 ; ============================================================================
+; fill_line_buf  -  read one line from the current include file into LINE_BUF.
+;
+; The current top frame must be KIND=FILE with an open LFN.
+; Reads via CHKIN/CHRIN until CR, EOF, or LINE_BUF_MAX chars.
+; Appends a CR terminator so the parser sees a normal line ending.
+; Sets SRC_PTR = LINE_BUF (start of new line).
+; Sets LINE_BUF_END = lo byte of address past last content char (points at CR).
+;
+; Returns: C=0 line ready; C=1 EOF (file exhausted, nothing written).
+;
+; Clobbers: A, X, Y, TMP, TMP2  (TMP3 = frame pointer, already set by caller
+;           in skip_to_next_line; we recompute it here to be self-contained).
+;
+; IRQ is disabled throughout (SEI is in effect from assemble entry).
+; CHKIN/CHRIN are Kernal calls that need IRQ OFF — already satisfied.
+; ============================================================================
+
+fill_line_buf:
+    ; Compute current frame base into TMP2 (TMP3 may be in use by caller).
+    lda SRC_DEPTH
+    asl
+    sta TMP2
+    asl
+    clc
+    adc TMP2
+    clc
+    adc #<SRC_STACK
+    sta TMP2
+    lda #>SRC_STACK
+    adc #0
+    sta TMP2+1                  ; TMP2 = base of top frame
+
+    ; Get LFN from frame
+    ldy #SRC_FRAME_LFN
+    lda (TMP2),y                ; A = LFN
+
+    ; CHKIN: direct the input channel to this file.
+    ; Needs IRQ enabled for serial bus timing — but we're running with SEI.
+    ; On real hardware the Kernal uses the CIA timer, not IRQ, for serial;
+    ; CHKIN itself just sets the input flag in the Kernal tables and returns.
+    ; Serial byte transfer happens in CHRIN.  Both work with SEI on the C64.
+    tax                         ; CHKIN takes LFN in X
+    jsr CHKIN
+    bcs @io_err                 ; C=1 = Kernal error (file not open etc.)
+
+    ; Read loop: fill LINE_BUF one char at a time
+    ldy #0                      ; Y = index into LINE_BUF
+@read_loop:
+    jsr CHRIN                   ; A = next byte from file
+    ; Check status immediately after each byte
+    pha
+    jsr READST                  ; A = serial status byte
+    and #$42                    ; bit 6 = EOF, bit 1 = read error
+    sta TMP                     ; save status
+    pla                         ; restore char
+    bit TMP
+    bne @check_eof_or_err       ; non-zero status: EOF or error
+
+    ; Normal byte
+    cmp #$0D                    ; CR = end of line
+    beq @end_of_line
+
+    ; Store byte if room remains
+    cpy #LINE_BUF_MAX
+    bcs @overflow               ; Y >= 80: line too long, keep draining
+    sta LINE_BUF,y
+    iny
+    jmp @read_loop
+
+@overflow:
+    ; Line exceeds LINE_BUF_MAX: drain chars until CR/EOF, report error
+    jsr set_err_truncate
+    ; keep reading to consume the rest of the line
+    jmp @read_loop
+
+@check_eof_or_err:
+    lda TMP
+    and #$02                    ; bit 1 = read error
+    bne @io_err
+    ; bit 6 = EOF.  The last CHRIN may have returned the final byte
+    ; before the EOF status, so treat A (already restored) as valid
+    ; if Y==0 (no bytes yet, pure EOF) we return C=1.
+    ; If Y>0 the final partial line gets flushed normally below.
+    cpy #0
+    beq @eof_empty              ; nothing read at all → pure EOF
+    ; fall through: flush partial line as a valid line
+
+@end_of_line:
+    ; Terminate LINE_BUF with CR (parser expects it)
+    lda #$0D
+    sta LINE_BUF,y              ; write CR terminator
+    ; LINE_BUF_END = lo byte of &LINE_BUF[y] (hi is always $BF)
+    tya
+    clc
+    adc #<LINE_BUF
+    sta LINE_BUF_END            ; points at the CR byte
+
+    jsr CLRCHN                  ; release input channel
+
+    ; Point SRC_PTR at start of LINE_BUF
+    lda #<LINE_BUF
+    sta SRC_PTR
+    lda #>LINE_BUF
+    sta SRC_PTR+1
+
+    clc                         ; C=0: line ready
+    rts
+
+@eof_empty:
+    jsr CLRCHN
+    sec                         ; C=1: EOF, no line
+    rts
+
+@io_err:
+    jsr CLRCHN
+    jsr set_err_io
+    sec                         ; treat I/O error as EOF to avoid infinite loop
+    rts
+
+; ============================================================================
+; pop_src_frame  -  close current include file, pop the frame stack,
+; restore SRC_PTR and ASM_LINE from the parent frame's saved values.
+;
+; Called when fill_line_buf returns C=1 (EOF on include file).
+; After return, SRC_PTR points back into the parent source (buffer or outer
+; include) at the instruction after the .include directive.
+; ============================================================================
+
+pop_src_frame:
+    ; Compute frame base of current top frame into TMP2
+    lda SRC_DEPTH
+    asl
+    sta TMP2
+    asl
+    clc
+    adc TMP2
+    clc
+    adc #<SRC_STACK
+    sta TMP2
+    lda #>SRC_STACK
+    adc #0
+    sta TMP2+1
+
+    ; Close the file: CLOSE(LFN)
+    ldy #SRC_FRAME_LFN
+    lda (TMP2),y
+    jsr CLOSE                   ; Kernal CLOSE — always succeeds (ignores bad LFN)
+
+    ; Restore ASM_LINE from frame (per-file line counter)
+    ldy #SRC_FRAME_LLO
+    lda (TMP2),y
+    sta ASM_LINE_LO
+    ldy #SRC_FRAME_LHI
+    lda (TMP2),y
+    sta ASM_LINE_HI
+
+    ; Restore SRC_PTR from frame (resume position in parent source)
+    ldy #SRC_FRAME_SLO
+    lda (TMP2),y
+    sta SRC_PTR
+    ldy #SRC_FRAME_SHI
+    lda (TMP2),y
+    sta SRC_PTR+1
+
+    ; Decrement depth
+    dec SRC_DEPTH
+    rts
+
+; ============================================================================
 ; Error helpers
 ; ============================================================================
 
 ; set_err_*  -  record error if none already recorded.
 ; All check ASM_ERR first; only first error is kept.
 ; Each routine: loads message address into TMP/TMP+1, falls into set_err_common.
+
+set_err_truncate:
+    lda #<err_truncate_txt
+    sta TMP
+    lda #>err_truncate_txt
+    sta TMP+1
+    jmp set_err_common
 
 set_err_syntax:
     lda #<err_syntax_txt
@@ -2318,6 +2506,8 @@ err_range_txt:
     .byte $02,$12,$01,$0E,$03,$08,$20,$12,$01,$0E,$07,$05, 0       ; BRANCH RANGE
 err_io_txt:
     .byte $09,$2F,$0F,$20,$05,$12,$12,$0F,$12, 0                    ; I/O ERROR
+err_truncate_txt:
+    .byte $0C,$09,$0E,$05,$20,$14,$0F,$0F,$20,$0C,$0F,$0E,$07, 0   ; LINE TOO LONG
 
 ; ============================================================================
 ; Opcode table (526 bytes)

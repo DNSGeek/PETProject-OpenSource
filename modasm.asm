@@ -1551,10 +1551,13 @@ parse_directive:
     beq @word_advance
     lda TMP
     jsr emit_byte
-    bcs @err
-    lda TMP+1
+    bcc :+
+    jmp @err
+:   lda TMP+1
     jsr emit_byte
-    bcs @err
+    bcc :+
+    jmp @err
+:
 @word_advance:
     ; Always advance PC by 2, in BOTH passes.
     lda ASM_PC_LO
@@ -1576,23 +1579,23 @@ parse_directive:
 @try_text:
     lda ASM_MNEM+0
     cmp #'T'
-    bne @unknown_dir
+    bne @try_include
     lda ASM_MNEM+1
     cmp #'E'
-    bne @unknown_dir
+    bne @try_include
     lda ASM_MNEM+2
     cmp #'X'
-    bne @unknown_dir
+    bne @try_include
     ; .text "string": emit PETSCII bytes
     jsr src_peek
     cmp #'"'
-    bne @err
+    bne @dir_err_near
     jsr src_advance             ; consume opening '"'
 @text_loop:
     jsr src_peek
-    beq @err
+    beq @dir_err_near
     cmp #$0D
-    beq @err
+    beq @dir_err_near
     cmp #'"'
     beq @text_done
     ; Pass 2: emit the byte. PC advance happens below in BOTH passes.
@@ -1600,7 +1603,9 @@ parse_directive:
     beq @text_advance
     jsr src_peek
     jsr emit_byte
-    bcs @err
+    bcc :+
+    jmp @dir_err_near
+:
 @text_advance:
     ; Always advance both source and PC, in BOTH passes.
     jsr src_advance
@@ -1612,6 +1617,148 @@ parse_directive:
     jsr src_advance             ; consume closing '"'
     rts
 
+; Local trampoline: .text section error targets can't reach the bottom @err
+@dir_err_near:
+    jmp @err
+
+@try_include:
+    ; .include "filename"  -  dispatch key is first 4 chars = INCL
+    lda ASM_MNEM+0
+    cmp #'I'
+    bne @inc_bad_dir
+    lda ASM_MNEM+1
+    cmp #'N'
+    bne @inc_bad_dir
+    lda ASM_MNEM+2
+    cmp #'C'
+    bne @inc_bad_dir
+    lda ASM_MNEM+3
+    cmp #'L'
+    bne @inc_bad_dir
+
+    ; Expect opening '"'
+    jsr src_peek
+    cmp #'"'
+    bne @inc_bad_syn
+    jsr src_advance             ; consume '"'
+
+    ; Read filename into LINE_BUF (max 16 chars).
+    ; LINE_BUF is safe scratch here: fill_line_buf overwrites it only
+    ; AFTER SETNAM+OPEN have already consumed the pointer.
+    ldx #0                      ; X = filename length
+@inc_fname:
+    jsr src_peek
+    beq @inc_bad_syn            ; NUL = unterminated
+    cmp #$0D
+    beq @inc_bad_syn            ; CR  = unterminated
+    cmp #'"'
+    beq @inc_fname_done         ; closing quote
+    cpx #16
+    bcs @inc_bad_syn            ; filename > 16 chars = syntax error
+    sta LINE_BUF,x
+    jsr src_advance
+    inx
+    jmp @inc_fname
+@inc_fname_done:
+    jsr src_advance             ; consume closing '"'
+    cpx #0
+    beq @inc_bad_syn            ; empty filename = syntax error
+    ; Depth check: if SRC_DEPTH >= SRC_MAX_DEPTH, can't push another frame
+    lda SRC_DEPTH
+    cmp #SRC_MAX_DEPTH
+    bcc @inc_depth_ok           ; depth < max: OK to push
+    jsr set_err_include
+    rts
+@inc_depth_ok:
+    jmp @inc_push               ; skip the stubs
+@inc_bad_dir:
+    jmp @unknown_dir
+@inc_bad_syn:
+    jmp @err
+
+@inc_push:
+    ; Compute address of the NEW frame (at index SRC_DEPTH) into TMP2.
+    ; Same N*6 multiply used in src_at_end / skip_to_next_line.
+    ; At this point SRC_DEPTH is the index of the frame we're about to write
+    ; (it gets incremented AFTER the frame is set up).
+    lda SRC_DEPTH
+    asl                         ; *2
+    sta TMP2
+    asl                         ; *4
+    clc
+    adc TMP2                    ; *6
+    clc
+    adc #<SRC_STACK
+    sta TMP2
+    lda #>SRC_STACK
+    adc #0
+    sta TMP2+1                  ; TMP2 = base of new frame
+
+    ; Fill frame fields
+    lda #SRC_KIND_FILE
+    ldy #SRC_FRAME_KIND
+    sta (TMP2),y
+
+    ; LFN = INC_LFN_BASE + SRC_DEPTH  (depth 1 -> LFN 5, depth 2 -> LFN 6, ...)
+    lda SRC_DEPTH
+    clc
+    adc #INC_LFN_BASE
+    ldy #SRC_FRAME_LFN
+    sta (TMP2),y                ; save LFN in frame
+    sta TMP3                    ; keep LFN in TMP3 for SETLFS
+
+    ; Save current SRC_PTR (resume position after .include line is done)
+    lda SRC_PTR
+    ldy #SRC_FRAME_SLO
+    sta (TMP2),y
+    lda SRC_PTR+1
+    ldy #SRC_FRAME_SHI
+    sta (TMP2),y
+
+    ; Save current ASM_LINE (so error messages show correct line in parent)
+    lda ASM_LINE_LO
+    ldy #SRC_FRAME_LLO
+    sta (TMP2),y
+    lda ASM_LINE_HI
+    ldy #SRC_FRAME_LHI
+    sta (TMP2),y
+
+    ; SETLFS: LFN=TMP3, device=MOD_DRIVE, SA=2 (sequential read)
+    ; X holds filename length from parse loop — save it before SETLFS clobbers X
+    stx TMP2                    ; TMP2 lo = filename length (hi not needed)
+    lda TMP3                    ; LFN
+    ldx MOD_DRIVE               ; device number
+    ldy #2                      ; SA=2: read channel
+    jsr SETLFS
+
+    ; SETNAM: length from saved TMP2, addr=LINE_BUF
+    lda TMP2                    ; filename length
+    ldx #<LINE_BUF
+    ldy #>LINE_BUF
+    jsr SETNAM
+
+    ; OPEN the file
+    jsr OPEN
+    bcc @inc_opened
+    ; OPEN failed (file not found etc.)
+    jsr set_err_io
+    rts
+
+@inc_opened:
+    ; Increment depth now that the frame is fully set up and file is open
+    inc SRC_DEPTH
+
+    ; Load the first line of the included file.
+    ; fill_line_buf does CHKIN/CHRIN and sets SRC_PTR = LINE_BUF.
+    jsr fill_line_buf
+    bcc @inc_done               ; C=0: got a line, ready to parse
+    ; C=1: file was empty — pop the frame immediately (CLOSE + restore)
+    jsr pop_src_frame
+@inc_done:
+    rts
+
+@dir_unknown:
+@dir_err:
 @unknown_dir:
 @err:
     jsr set_err_syntax
@@ -2379,6 +2526,13 @@ pop_src_frame:
 ; All check ASM_ERR first; only first error is kept.
 ; Each routine: loads message address into TMP/TMP+1, falls into set_err_common.
 
+set_err_include:
+    lda #<err_include_txt
+    sta TMP
+    lda #>err_include_txt
+    sta TMP+1
+    jmp set_err_common
+
 set_err_truncate:
     lda #<err_truncate_txt
     sta TMP
@@ -2508,6 +2662,8 @@ err_io_txt:
     .byte $09,$2F,$0F,$20,$05,$12,$12,$0F,$12, 0                    ; I/O ERROR
 err_truncate_txt:
     .byte $0C,$09,$0E,$05,$20,$14,$0F,$0F,$20,$0C,$0F,$0E,$07, 0   ; LINE TOO LONG
+err_include_txt:
+    .byte $09,$0E,$03,$0C,$20,$14,$0F,$0F,$20,$04,$05,$05,$10, 0   ; INCL TOO DEEP
 
 ; ============================================================================
 ; Opcode table (526 bytes)

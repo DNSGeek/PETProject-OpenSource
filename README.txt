@@ -71,6 +71,7 @@ USAGE
     F3            Load file
     F4            Page Down
     F5            Save file
+    F6            Load SEQ (text / source code) file
     F7            Quit to BASIC
     F8            Module picker (Assemble / Disassemble / Renumber / Disk Utility / Run Script)
     CTRL+F        Search and replace

@@ -186,6 +186,29 @@ disassemble:
     lda DIS_BUF_HI
     sta DST_PTR+1
 
+    ; Emit ".org $XXXX\r" as the first output line, using the PRG load address
+    ; stored in DIS_PC_LO/HI.  This is essential: without it MODASM reassembles
+    ; from PC=$0801, making every branch target wrong and out-of-range.
+    ; Format: ".org $XXXX\r"  (10 bytes + CR)
+    lda #$2E                    ; '.'
+    jsr emit_dst
+    lda #$4F                    ; 'O'
+    jsr emit_dst
+    lda #$52                    ; 'R'
+    jsr emit_dst
+    lda #$47                    ; 'G'
+    jsr emit_dst
+    lda #$20                    ; ' '
+    jsr emit_dst
+    lda #$24                    ; '$'
+    jsr emit_dst
+    lda DIS_PC_HI
+    jsr emit_hex_byte           ; hi byte of load address
+    lda DIS_PC_LO
+    jsr emit_hex_byte           ; lo byte of load address
+    lda #$0D                    ; CR
+    jsr emit_dst
+
     ; Init activity spinner
     lda #0
     sta DIS_SPINNER

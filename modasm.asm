@@ -146,6 +146,14 @@ ASM_OPC_PTR_HI  = $C057   ; saved opcode table pointer hi
 ASM_LOAD_LO     = $C058   ; PRG load address lo
 ASM_LOAD_HI     = $C059   ; PRG load address hi
 
+; Activity spinner — same corner cell and toggle mechanic as MODDIS.
+ASM_SPINNER     = $C05A   ; 8-bit line counter; every 16 lines → color flip
+ASM_SPIN_IDX    = $C05B   ; current color value written to SPIN_CELL
+
+SPIN_CELL       = $D800   ; color RAM col 0, row 0 (top-left corner)
+SPIN_COLOR_A    = $01     ; white
+SPIN_COLOR_B    = $00     ; black
+
 ; ---- Symbol table ----
 SYM_TABLE       = $C060   ; 10 bytes/entry: 8-char name + 2-byte value
 SYM_ENTRY_SIZE  = 10
@@ -153,6 +161,48 @@ SYM_MAX         = 400
 
 ; ---- Output file ----
 ASM_OUT_LA_VAL  = 4       ; logical file 4 for output
+
+; ============================================================================
+; Include / source-stack state
+; ----------------------------------------------------------------------------
+; The assembler reads source through a stack of "frames". Frame 0 is the
+; editor's in-memory gap buffer (the normal, no-include case). A .include
+; directive pushes a FILE frame that streams the included file from disk one
+; line at a time into LINE_BUF, so SRC_PTR always points at real RAM and the
+; parser's rewind-on-lookahead (check_for_label) keeps working unchanged.
+;
+; Placed at fixed addresses high in MAIN ($BFxx). Code ends well below $B000,
+; so this free RAM is in the same always-visible bank ($01=$36) as the code —
+; no banking concerns, and it doesn't touch the packed $C0xx state or the
+; symbol table.
+;
+; Frame layout (SRC_FRAME_SIZE bytes each):
+;   +0  KIND      0 = buffer (frame 0 only), 1 = file
+;   +1  LFN       KERNAL logical file number (file frames)
+;   +2  SRC_LO    saved SRC_PTR lo  (resume position)
+;   +3  SRC_HI    saved SRC_PTR hi
+;   +4  LINE_LO   saved ASM_LINE counter lo (per-file line numbers)
+;   +5  LINE_HI   saved ASM_LINE counter hi
+; ============================================================================
+SRC_FRAME_SIZE  = 6
+SRC_MAX_DEPTH   = 8       ; >=8 deep .include nesting -> ?INCLUDE TOO DEEP
+
+SRC_DEPTH       = $BF00   ; current top frame index (0 = buffer only)
+SRC_STACK       = $BF01   ; SRC_MAX_DEPTH * SRC_FRAME_SIZE = 48 bytes ($BF01..$BF30)
+
+SRC_FRAME_KIND  = 0       ; field offsets within a frame
+SRC_FRAME_LFN   = 1
+SRC_FRAME_SLO   = 2
+SRC_FRAME_SHI   = 3
+SRC_FRAME_LLO   = 4
+SRC_FRAME_LHI   = 5
+
+SRC_KIND_BUFFER = 0
+SRC_KIND_FILE   = 1
+
+LINE_BUF        = $BF40   ; one shared line buffer for the active file frame
+LINE_BUF_MAX    = 80      ; ($BF40..$BF8F); longer lines truncate with error
+
 
 ; ============================================================================
 ; Module entry point
@@ -310,6 +360,9 @@ assemble:
     sta MOD_STATUS
 
 @restore_zp:
+    ; Restore spinner cell to default color before returning
+    lda #SPIN_COLOR_A
+    sta SPIN_CELL
     ; NOTE: Do NOT restore $01 here  -  we're still executing in $A000-$BFFF range.
     ; Restoring BASIC ROM ($01=$37) while executing here would immediately
     ; put BASIC ROM under the CPU, causing a JAM on the very next fetch.
@@ -343,15 +396,53 @@ run_pass:
     lda ASM_BUF_HI
     sta SRC_PTR+1
 
+    ; Init activity spinner (once per pass; two passes = two blink cycles)
+    lda #0
+    sta ASM_SPINNER
+    lda #SPIN_COLOR_A
+    sta ASM_SPIN_IDX
+    sta SPIN_CELL               ; show initial color immediately
+
+    ; Init source frame stack: depth=0, frame 0 = buffer kind.
+    ; Frame 0 is never popped; the SRC/LINE fields are unused for it.
+    ; This lays the groundwork for .include without changing behaviour.
+    lda #0
+    sta SRC_DEPTH
+    sta SRC_STACK + SRC_FRAME_LFN
+    sta SRC_STACK + SRC_FRAME_SLO
+    sta SRC_STACK + SRC_FRAME_SHI
+    sta SRC_STACK + SRC_FRAME_LLO
+    sta SRC_STACK + SRC_FRAME_LHI
+    lda #SRC_KIND_BUFFER
+    sta SRC_STACK + SRC_FRAME_KIND
+
 @line_loop:
     ; Bounds check: done if SRC_PTR >= BUF_END (or GAP_START, skipping gap)
     jsr src_at_end
     bne @done_pass
 
+    ; Secondary check: treat a NUL byte as end-of-source.
+    ; The editor buffer tail past the last CR may be NUL-filled.
+    ; src_at_end only checks the address bounds; without this, the line loop
+    ; would spin forever on NUL bytes between the last CR and BUF_END.
+    jsr src_peek
+    beq @done_pass
+
     ; Increment line counter
     inc ASM_LINE_LO
     bne :+
     inc ASM_LINE_HI
+:
+
+    ; Activity spinner: tick every 16 lines, toggle color cell
+    inc ASM_SPINNER
+    lda ASM_SPINNER
+    and #$0F
+    bne :+
+    lda ASM_SPIN_IDX
+    eor #(SPIN_COLOR_A ^ SPIN_COLOR_B)
+    sta ASM_SPIN_IDX
+    sta SPIN_CELL
 :
 
     ; Save SRC_PTR before parse_line (not needed now, remove later)
@@ -1803,8 +1894,36 @@ src_advance:
     inc SRC_PTR+1
 :   rts
 
-; src_at_end  -  returns A=$FF if SRC_PTR >= effective end, else A=0
+; src_at_end  -  returns A=$FF if current source frame is exhausted, else A=0.
+; Frame-aware: checks SRC_DEPTH and current frame KIND.
+;   KIND=BUFFER (frame 0): gap-buffer end check (original logic).
+;   KIND=FILE: LINE_BUF end check (step 2+; placeholder for now).
 src_at_end:
+    ; Compute base address of current top frame into TMP3.
+    ; TMP3 = SRC_STACK + SRC_DEPTH * SRC_FRAME_SIZE
+    lda SRC_DEPTH
+    beq @buf_frame               ; depth=0 is always the buffer frame (fast path)
+    ; General case: index into stack.  Depth is small (<=8), so multiply by 6
+    ; with shift-and-add: N*6 = N*4 + N*2.
+    asl                          ; A = depth*2
+    sta TMP3                     ; save depth*2
+    asl                          ; A = depth*4
+    clc
+    adc TMP3                     ; A = depth*6
+    clc
+    adc #<SRC_STACK
+    sta TMP3                     ; TMP3 lo = frame base lo
+    lda #>SRC_STACK
+    adc #0
+    sta TMP3+1                   ; TMP3 hi = frame base hi
+    ; Read KIND field
+    ldy #SRC_FRAME_KIND
+    lda (TMP3),y
+    cmp #SRC_KIND_FILE
+    beq @file_frame
+
+@buf_frame:
+    ; Original gap-buffer end logic (inline, no JSR overhead):
     ; First: if SRC_PTR == gap_s, jump to gap_e
     lda SRC_PTR+1
     cmp ASM_GAP_S_HI
@@ -1818,20 +1937,23 @@ src_at_end:
     sta SRC_PTR+1
 :
     ; 16-bit: if SRC_PTR >= ASM_END → at end
-    ; Compare hi bytes first
     lda SRC_PTR+1
     cmp ASM_END_HI
-    bcc @not_end        ; SRC_PTR hi < END hi → not at end
-    bne @at_end         ; SRC_PTR hi > END hi → at end
-    ; hi bytes equal: compare lo bytes
+    bcc @not_end
+    bne @at_end
     lda SRC_PTR
     cmp ASM_END_LO
-    bcc @not_end        ; SRC_PTR lo < END lo → not at end
-    ; SRC_PTR lo >= END lo → at end
+    bcc @not_end
 @at_end:
     lda #$FF
     rts
 @not_end:
+    lda #0
+    rts
+
+@file_frame:
+    ; Step 2+ will fill this in.  Unreachable until .include push is wired.
+    ; For now: never at end (safe placeholder; step 2 replaces this).
     lda #0
     rts
 
@@ -1845,7 +1967,32 @@ skip_spaces:
 @done:
     rts
 
+; skip_to_next_line  -  advance SRC_PTR past the current line's CR.
+; Frame-aware: KIND=BUFFER uses gap-buffer scan (original logic).
+;              KIND=FILE uses LINE_BUF (step 2+; placeholder for now).
 skip_to_next_line:
+    ; Fast path: depth=0 is always the buffer frame.
+    lda SRC_DEPTH
+    beq @buf_skip
+    ; Compute frame base into TMP3 (same multiply as src_at_end).
+    asl
+    sta TMP3
+    asl
+    clc
+    adc TMP3
+    clc
+    adc #<SRC_STACK
+    sta TMP3
+    lda #>SRC_STACK
+    adc #0
+    sta TMP3+1
+    ldy #SRC_FRAME_KIND
+    lda (TMP3),y
+    cmp #SRC_KIND_FILE
+    beq @file_skip
+
+@buf_skip:
+    ; Original scan-for-CR logic:
 @loop:
     jsr src_peek
     beq @done
@@ -1856,6 +2003,10 @@ skip_to_next_line:
 @found_cr:
     jsr src_advance             ; consume CR
 @done:
+    rts
+
+@file_skip:
+    ; Step 2+ will fill this in.  Unreachable until .include push is wired.
     rts
 
 ; upcase_a: if A is lowercase PETSCII (a-z), convert to uppercase. Preserves flags except N/Z.

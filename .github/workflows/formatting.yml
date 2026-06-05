@@ -80,7 +80,7 @@ jobs:
         if: steps.find_shell.outputs.found == 'true'
         run: |
           echo "Formatting shell scripts with shfmt..."
-          cat /tmp/shell_files.txt | xargs shfmt -w -i 2 -ci -bn
+          cat /tmp/shell_files.txt | xargs shfmt -w -i 4 -ci -bn
       
       - name: Install C tools
         run: |

@@ -824,6 +824,12 @@ run_sel_load_err:
 ; ============================================================================
 
 mpop_show_error:
+    ; If MODASM set ASM_ERR ($C007=$FF), show rich "ERR NNNN: MSGTEXT" display.
+    ; Other modules don't touch $C007, so $FF unambiguously means MODASM failed.
+    lda $C007                       ; ASM_ERR flag written by MODASM's set_err_common
+    cmp #$FF
+    beq asm_show_err                ; MODASM error → rich display, includes wait
+    ; Generic "MODULE ERROR" for all other module failures
     ldy #0
 @wr:
     lda mpop_err_text,y
@@ -842,6 +848,175 @@ mpop_show_error:
     lda JIFFY_LO
     cmp IO_SCRATCH
     bne @spin
+    rts
+
+; ============================================================================
+; asm_show_err — rich MODASM error display.
+;
+; Reads ASM_ERR_LINE_LO/HI ($C008/$C009) and ASM_ERR_MSG ($C00A, screen codes,
+; zero-terminated) written by MODASM's set_err_common, and formats:
+;
+;   ERR NNNN: MSGTEXT
+;
+; directly onto STATUS_ROW in red, then waits ~1.5 s.
+;
+; Uses: A, X, Y, TMP (ZP 2-byte), AN_CUR, AN_TMP, AN_NEXT (BSS).
+; Does NOT call do_insert — writes screen codes straight to screen/color RAM.
+; ============================================================================
+
+; Screen-code constants for the fixed prefix "ERR "
+; E=$05  R=$12  space=$20  colon=$3A (in $20-$5F range, ASCII=screen 1:1)
+asm_err_prefix_txt:
+    .byte $05,$12,$12,$20           ; "ERR "
+
+ASM_ERR_LINE_LO = $C008
+ASM_ERR_LINE_HI = $C009
+ASM_ERR_MSG     = $C00A
+
+asm_show_err:
+    ; --- 1. Write "ERR " prefix ---
+    ldy #0
+@prefix:
+    lda asm_err_prefix_txt,y
+    sta STATUS_ROW,y
+    lda #2                          ; red
+    sta COLOR,y
+    iny
+    cpy #4
+    bne @prefix
+    ; Y = 4 (first digit position)
+
+    ; --- 2. Write line number as decimal, no leading zeros ---
+    ; Load 16-bit line number into AN_CUR (reuse existing BSS scratch).
+    ; an_emit_number writes via do_insert; we can't use it here.
+    ; Instead: same repeated-subtraction algorithm, writing to STATUS_ROW,Y.
+    lda $C008                       ; ASM_ERR_LINE_LO
+    sta AN_CUR
+    lda $C009                       ; ASM_ERR_LINE_HI
+    sta AN_CUR+1
+
+    ; Reuse an_div_lo/an_div_hi table from editor.asm (same link unit).
+    ; AN_LEADING: 0 = still suppressing leading zeros, $FF = digit emitted.
+    lda #0
+    sta AN_LEADING
+    ldx #0                          ; divisor index 0..3 (10000,1000,100,10)
+@digit:
+    lda an_div_lo,x
+    sta AN_NEXT
+    lda an_div_hi,x
+    sta AN_NEXT+1
+    lda #0
+    sta AN_TMP                      ; AN_TMP = quotient digit
+@sub:
+    lda AN_CUR+1
+    cmp AN_NEXT+1
+    bcc @emit
+    bne @do_sub
+    lda AN_CUR
+    cmp AN_NEXT
+    bcc @emit
+@do_sub:
+    lda AN_CUR
+    sec
+    sbc AN_NEXT
+    sta AN_CUR
+    lda AN_CUR+1
+    sbc AN_NEXT+1
+    sta AN_CUR+1
+    inc AN_TMP
+    jmp @sub
+@emit:
+    lda AN_TMP
+    bne @nonzero
+    lda AN_LEADING
+    beq @skip_digit                 ; suppress leading zero
+    lda #$30                        ; screen code '0'
+    sta STATUS_ROW,y
+    lda #2
+    sta COLOR,y
+    iny
+    jmp @skip_digit
+@nonzero:
+    lda #$FF
+    sta AN_LEADING
+    lda AN_TMP
+    ora #$30                        ; screen code for digit (digits $30-$39 same as PETSCII)
+    sta STATUS_ROW,y
+    lda #2
+    sta COLOR,y
+    iny
+@skip_digit:
+    inx
+    cpx #4
+    bne @digit
+    ; Units digit — always emit (even if zero)
+    lda AN_CUR
+    ora #$30
+    sta STATUS_ROW,y
+    lda #2
+    sta COLOR,y
+    iny
+
+    ; --- 3. Write ": " separator ---
+    lda #$3A                        ; ':' screen code ($3A, ASCII range → same)
+    sta STATUS_ROW,y
+    lda #2
+    sta COLOR,y
+    iny
+    lda #$20                        ; space
+    sta STATUS_ROW,y
+    lda #2
+    sta COLOR,y
+    iny
+
+    ; --- 4. Copy ASM_ERR_MSG (screen codes, zero-terminated) ---
+    ; TMP walks the message; Y is the screen column.
+    ; Same trick as mpop_draw_item: save Y in MOD_TMP, use Y=0 to read (TMP),y,
+    ; restore Y. Advance TMP after each byte.
+    lda #<ASM_ERR_MSG
+    sta TMP
+    lda #>ASM_ERR_MSG
+    sta TMP+1
+@msg:
+    cpy #COLS                       ; guard against overflow past col 39
+    bcs @msg_done
+    sty MOD_TMP                     ; save screen column
+    ldy #0
+    lda (TMP),y                     ; read next message byte
+    tax                             ; stash char; tax sets Z flag correctly
+    ldy MOD_TMP                     ; restore screen column
+    txa                             ; restore A, Z flag now reflects char
+    beq @msg_done                   ; zero terminator
+    sta STATUS_ROW,y
+    lda #2
+    sta COLOR,y
+    iny
+    ; Advance TMP by 1
+    inc TMP
+    bne @msg
+    inc TMP+1
+    jmp @msg
+@msg_done:
+
+    ; --- 5. Clear remainder of status row ---
+    lda #$20
+@clr:
+    cpy #COLS
+    bcs @clr_done
+    sta STATUS_ROW,y
+    iny
+    jmp @clr
+@clr_done:
+
+    ; --- 6. Wait ~1.5 s (90 jiffies) then return ---
+    lda JIFFY_LO
+    clc
+    adc #90
+    sta IO_SCRATCH
+@wait:
+    lda JIFFY_LO
+    cmp IO_SCRATCH
+    bne @wait
     rts
 
 mpop_show_load_error:

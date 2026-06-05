@@ -26,6 +26,7 @@ DerivedData/
 *.swp
 *.swo
 *~
+PETProject/
 xcuserdata/
 *.xccheckout
 *.moved-aside

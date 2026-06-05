@@ -12,29 +12,29 @@ BUILD=build
 mkdir -p "${BUILD}"
 
 build_module() {
-  local name=${1}
-  local cfg
-  echo "Building ${name}..."
-  if [[ -f "${name}.cfg" ]]; then
-    cfg="${name}.cfg"
-    echo "  Using: ${cfg}"
-  else
-    cfg=module.cfg
-  fi
-  if ! ${CA65} -t none -g -o "${BUILD}/${name}.o" "${name}.asm"; then
-    echo "✗ Assembly failed: ${name}"
-    return 1
-  fi
-  if ! ${LD65} -C "${cfg}" -o "${BUILD}/${name}.prg" \
-    --mapfile "${BUILD}/${name}.map" \
-    --dbgfile "${BUILD}/${name}.dbg" \
-    "${BUILD}/${name}.o"; then
-    echo "✗ Link failed: ${name}"
-    return 1
-  fi
-  local bytes
-  bytes=$(wc -c <"${BUILD}/${name}.prg")
-  echo "✓ ${BUILD}/${name}.prg  ${bytes} bytes"
+    local name=${1}
+    local cfg
+    echo "Building ${name}..."
+    if [[ -f "${name}.cfg" ]]; then
+        cfg="${name}.cfg"
+        echo "  Using: ${cfg}"
+    else
+        cfg=module.cfg
+    fi
+    if ! ${CA65} -t none -g -o "${BUILD}/${name}.o" "${name}.asm"; then
+        echo "✗ Assembly failed: ${name}"
+        return 1
+    fi
+    if ! ${LD65} -C "${cfg}" -o "${BUILD}/${name}.prg" \
+        --mapfile "${BUILD}/${name}.map" \
+        --dbgfile "${BUILD}/${name}.dbg" \
+        "${BUILD}/${name}.o"; then
+        echo "✗ Link failed: ${name}"
+        return 1
+    fi
+    local bytes
+    bytes=$(wc -c <"${BUILD}/${name}.prg")
+    echo "✓ ${BUILD}/${name}.prg  ${bytes} bytes"
 }
 
 build_module moddet || exit 1

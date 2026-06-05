@@ -438,12 +438,14 @@ hnd_scratch:
     jmp BASIC_NEWSTT
 
 ; ---- ONERR line — set error-handler line number (16-bit) ----
-; BASIC_GETINT ($B7F7) evaluates a numeric expression and stores the
-; result as an unsigned 16-bit integer: hi byte in $14, lo byte in $15.
-; This gives the full 0-63999 line number range, not just 0-255.
-BASIC_GETINT    = $B7F7     ; evaluate expr → unsigned int in $14 (hi), $15 (lo)
+; FRMNUM ($AD9E) evaluates the numeric expression into FAC1.
+; AYINT ($B1AA) converts FAC1 to a signed 16-bit integer stored
+; big-endian in $14 (hi) and $15 (lo). Range: 0-32767.
+BASIC_FRMNUM    = $AD9E     ; evaluate numeric expression → FAC1
+BASIC_AYINT     = $B1AA     ; convert FAC1 → 16-bit int: $14=hi, $15=lo
 hnd_onerr:
-    jsr BASIC_GETINT        ; $14=hi, $15=lo
+    jsr BASIC_FRMNUM        ; evaluate argument into FAC1
+    jsr BASIC_AYINT         ; convert to integer: $14=hi, $15=lo
     lda $15
     sta hnd_onerr_lo
     lda $14
@@ -533,8 +535,156 @@ hnd_exists:
     jmp BASIC_NEWSTT
 
 hnd_dir:
-    ; TODO: open "$", read and display directory
+    ; Open the directory stream: SETLFS LA=2, device=hnd_cur_drive, SA=0
+    lda #2
+    ldx hnd_cur_drive
+    ldy #0                  ; SA=0
+    jsr $FFBA               ; SETLFS
+    lda #1                  ; filename length = 1 ("$")
+    ldx #<hnd_dir_fname
+    ldy #>hnd_dir_fname
+    jsr $FFBD               ; SETNAM
+    jsr $FFC0               ; OPEN
+    bcs @dir_open_err
+
+    ldx #2
+    jsr $FFC6               ; CHKIN — set LA=2 as input channel
+    bcs @dir_close_err
+
+    ; Discard the 2-byte PRG load address the drive sends first ($01 $08)
+    jsr $FFCF               ; CHRIN — discard lo
+    jsr $FFCF               ; CHRIN — discard hi
+
+@line_loop:
+    ; Each directory line = [link_lo][link_hi][blkcount_lo][blkcount_hi][PETSCII...][00]
+
+    ; Read and discard link_lo
+    jsr $FFB7               ; READST
+    and #$42
+    bne @dir_eof
+    jsr $FFCF               ; discard link lo
+
+    ; Read and discard link_hi
+    jsr $FFB7
+    and #$42
+    bne @dir_eof
+    jsr $FFCF               ; discard link hi
+
+    ; Read blkcount_lo
+    jsr $FFB7
+    and #$42
+    bne @dir_eof
+    jsr $FFCF
+    sta hnd_scratch_lo      ; block count lo
+
+    ; Read blkcount_hi
+    jsr $FFB7
+    and #$42
+    bne @dir_eof
+    jsr $FFCF
+    sta hnd_scratch_hi      ; block count hi
+    jmp @blk_print          ; skip trampolines
+
+    ; Local trampolines — all branch targets above that were out of range
+@dir_eof:       jmp @dir_done
+@dir_open_err:  jmp @open_err
+@dir_close_err: jmp @close_err
+
+@blk_print:
+
+    ; Print block count as decimal (16-bit, up to 65535), no leading zeros,
+    ; followed by a space.
+    ; hnd_scratch_lo/hi = value to print (consumed as remainder).
+    ; hnd_jmp_lo/hi     = current divisor (borrowed; both free here).
+    ; hnd_cmd_len       = leading-zero suppress flag (0=suppressing, $FF=seen).
+    lda #0
+    sta hnd_cmd_len         ; 0 = still suppressing leading zeros
+    ldx #0                  ; divisor table index 0..3 (10000,1000,100,10)
+@blk_digit:
+    lda dir_div_lo,x
+    sta hnd_jmp_lo
+    lda dir_div_hi,x
+    sta hnd_jmp_hi
+    ldy #0                  ; Y = quotient digit for this position
+@blk_sub:
+    ; if scratch < divisor, stop subtracting
+    lda hnd_scratch_hi
+    cmp hnd_jmp_hi
+    bcc @blk_emit           ; scratch_hi < div_hi → done
+    bne @blk_do_sub         ; scratch_hi > div_hi → subtract
+    lda hnd_scratch_lo
+    cmp hnd_jmp_lo
+    bcc @blk_emit           ; scratch_lo < div_lo → done
+@blk_do_sub:
+    lda hnd_scratch_lo
+    sec
+    sbc hnd_jmp_lo
+    sta hnd_scratch_lo
+    lda hnd_scratch_hi
+    sbc hnd_jmp_hi
+    sta hnd_scratch_hi
+    iny
+    jmp @blk_sub
+@blk_emit:
+    tya
+    bne @blk_nonzero
+    ; digit is zero
+    lda hnd_cmd_len
+    beq @blk_skip           ; still suppressing
+    lda #$30                ; emit '0' after a nonzero digit
+    jsr $FFD2
+    jmp @blk_skip
+@blk_nonzero:
+    lda #$FF
+    sta hnd_cmd_len         ; mark: nonzero digit seen
+    tya
+    ora #$30
+    jsr $FFD2               ; emit digit
+@blk_skip:
+    inx
+    cpx #4
+    bne @blk_digit
+    ; Units digit — always emit (remainder 0..9 in hnd_scratch_lo)
+    lda hnd_scratch_lo
+    ora #$30
+    jsr $FFD2
+    ; Space separator after block count
+    lda #$20
+    jsr $FFD2
+
+    ; Print PETSCII content bytes until $00 line terminator
+@char_loop:
+    jsr $FFB7               ; READST
+    and #$42
+    bne @dir_done           ; EOF/error — close and exit
+    jsr $FFCF               ; CHRIN
+    beq @end_of_line        ; $00 = end of this line
+    jsr $FFD2               ; CHROUT
+    jmp @char_loop
+
+@end_of_line:
+    lda #$0D
+    jsr $FFD2               ; newline after each entry
+    jmp @line_loop
+
+@dir_done:
+    jsr $FFCC               ; CLRCHN
+    lda #2
+    jsr $FFC3               ; CLOSE 2
     jmp BASIC_NEWSTT
+
+@close_err:
+    jsr $FFCC
+@open_err:
+    lda #2
+    jsr $FFC3               ; CLOSE 2 (harmless if not open)
+    jmp BASIC_NEWSTT
+
+hnd_dir_fname:
+    .byte "$"
+
+dir_div_lo: .byte <10000, <1000, <100, <10
+dir_div_hi: .byte >10000, >1000, >100, >10
 
 hnd_assemble:
     ; TODO: load MODASM from disk, call it, reload MODSCRH handlers

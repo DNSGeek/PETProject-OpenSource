@@ -265,16 +265,72 @@ hnd_end_script:
 
 ; ============================================================================
 ; hnd_error — IERROR handler (BASIC runtime error).
-; If ONERR is set, resume at that line (TODO). Otherwise restore IDE.
+; If ONERR is set, scan the BASIC program for the target line and resume
+; execution there. Otherwise restore the IDE.
+;
+; BASIC program walk: each line = [link_lo][link_hi][lineno_lo][lineno_hi]
+;   [tokens...][00]. Link word = address of next line. $0000 link = end.
+; TXTPTR convention: points to the byte BEFORE the first token, so NEWSTT's
+;   initial CHRGET increments it and loads the first real token byte.
+;   → set TXTPTR = line_start + 3  (lineno_hi position; first token is at +4)
 ; ============================================================================
 
 hnd_error:
     lda hnd_onerr_lo
     ora hnd_onerr_hi
-    beq @no_onerr
-    ; TODO v2: GOTO hnd_onerr_lo/hi line number
+    beq @no_onerr           ; ONERR not set → restore IDE
+
+    ; Walk the BASIC program looking for the target line number.
+    ; Use HND_TMP as the scan pointer (ZP $3C/$3D).
+    lda TXTTAB
+    sta HND_TMP
+    lda TXTTAB+1
+    sta HND_TMP+1
+
+@search:
+    ; Read link word lo/hi (offset 0/1 from line start)
+    ldy #0
+    lda (HND_TMP),y
+    iny
+    ora (HND_TMP),y         ; both zero = end-of-program
+    beq @not_found
+
+    ; Read line number lo/hi (offset 2/3)
+    ldy #2
+    lda (HND_TMP),y
+    cmp hnd_onerr_lo
+    bne @next_line
+    ldy #3
+    lda (HND_TMP),y
+    cmp hnd_onerr_hi
+    bne @next_line
+
+    ; Found the target line. Set TXTPTR = line_start + 3.
+    ; NEWSTT does CHRGET first (INC TXTPTR then LDA (TXTPTR),Y), so this
+    ; positions TXTPTR one byte before the first token (at lineno_hi).
+    lda HND_TMP
+    clc
+    adc #3
+    sta BASIC_TXTPTR
+    lda HND_TMP+1
+    adc #0
+    sta BASIC_TXTPTR+1
+    jmp BASIC_NEWSTT        ; resume script at the ONERR target line
+
+@next_line:
+    ; Advance HND_TMP to next line via link word (stored at offset 0/1)
+    ldy #0
+    lda (HND_TMP),y
+    tax                     ; save new lo
+    ldy #1
+    lda (HND_TMP),y         ; new hi
+    sta HND_TMP+1
+    stx HND_TMP
+    jmp @search
+
+@not_found:
 @no_onerr:
-    jmp hnd_end_script  ; restore IDE and re-enter; never returns here
+    jmp hnd_end_script      ; restore IDE and re-enter; never returns here
 
 ; ============================================================================
 ; Implemented keyword handlers
@@ -381,11 +437,16 @@ hnd_scratch:
     jsr hnd_send_command
     jmp BASIC_NEWSTT
 
-; ---- ONERR line — set error-handler line number ----
+; ---- ONERR line — set error-handler line number (16-bit) ----
+; BASIC_GETINT ($B7F7) evaluates a numeric expression and stores the
+; result as an unsigned 16-bit integer: hi byte in $14, lo byte in $15.
+; This gives the full 0-63999 line number range, not just 0-255.
+BASIC_GETINT    = $B7F7     ; evaluate expr → unsigned int in $14 (hi), $15 (lo)
 hnd_onerr:
-    jsr BASIC_GETBYT    ; X = line lo (0-255, hi assumed 0 for now)
-    stx hnd_onerr_lo
-    lda #0
+    jsr BASIC_GETINT        ; $14=hi, $15=lo
+    lda $15
+    sta hnd_onerr_lo
+    lda $14
     sta hnd_onerr_hi
     jmp BASIC_NEWSTT
 

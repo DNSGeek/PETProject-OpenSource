@@ -46,4 +46,4 @@ On long running tasks, the IDE will flash the top left character to let you know
 
 Your experience will be much improved if you use a fastloader cartridge with this software.
 
-To use just run LOAD"*",8 and then RUN.
+To use just run LOAD"\*",8 and then RUN.

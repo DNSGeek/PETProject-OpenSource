@@ -42,3 +42,6 @@ Package.resolved
 
 # C64 IDE build output
 build/
+
+# Stuff we don't want to send to git
+publish.sh

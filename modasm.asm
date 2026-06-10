@@ -46,6 +46,15 @@
 MOD_MAGIC        = $0212
 MOD_MAGIC_VAL    = $4D
 MOD_COMMAND      = $0213
+
+; ---- Batch invocation (MOD_COMMAND = ASM_CMD_BATCH) ----
+; Set by MODSCRH's ASSEMBLE keyword handler. In batch mode there is no
+; keyboard and no status-bar prompt: the output filename is passed in the
+; unused page-2 area $02C0-$02D0 instead. Keep these three definitions in
+; sync with modscrh.asm.
+ASM_CMD_BATCH       = $01
+ASM_BATCH_FNAME_LEN = $02C0   ; output filename length (1-16)
+ASM_BATCH_FNAME     = $02C1   ; output filename (16 bytes max)
 MOD_BUF_LO       = $0214
 MOD_BUF_HI       = $0215
 MOD_GAP_START_LO = $0216
@@ -303,13 +312,40 @@ assemble:
     lda #$08
     sta ASM_LOAD_HI
 
+    ; Output filename: interactive prompt, or batch param area when invoked
+    ; by the script runner (MODSCRH ASSEMBLE keyword - no keyboard available).
+    lda MOD_COMMAND
+    cmp #ASM_CMD_BATCH
+    bne @name_interactive
+
+    ; ---- Batch: filename was placed at ASM_BATCH_FNAME by the caller ----
+    lda ASM_BATCH_FNAME_LEN
+    beq @name_bad               ; empty name  -  refuse
+    cmp #17
+    bcs @name_bad               ; >16 chars won't fit ASM_FNAME
+    sta ASM_FNAME_LEN
+    tay
+@name_copy:
+    dey
+    lda ASM_BATCH_FNAME,y
+    sta ASM_FNAME,y
+    cpy #0
+    bne @name_copy
+    jmp @name_done
+
+@name_bad:
+    lda #$01
+    sta MOD_STATUS              ; report error to caller
+    jmp @restore_zp
+
+@name_interactive:
     ; Prompt for output filename  -  needs IRQ for keyboard scan (GETIN)
     cli
     jsr prompt_outfile          ; fills ASM_FNAME/ASM_FNAME_LEN; C=1 if cancelled
     sei
-    bcc :+
+    bcc @name_done
     jmp @restore_zp             ; cancelled  -  return with MOD_STATUS unchanged ($FF)
-:
+@name_done:
 
     ; ---- Pass 1: build symbol table ----
     lda #0

@@ -47,3 +47,4 @@ build_module modsfr || exit 1
 build_module modsct || exit 1
 build_module modscr || exit 1
 build_module modscrh || exit 1
+rm -f "${BUILD}"/*.o

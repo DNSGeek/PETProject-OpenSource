@@ -739,38 +739,20 @@ run_sel_loaded:
     ; natural place to resume editing. ensure_cursor_visible (run on the next
     ; redraw) scrolls so the cursor is on screen.
     ;
-    ; Sentinel CRs are written INTO the gap (from MOD_NEW_END upward) so that
-    ; scrolling past the last line shows blanks, not stale bytes. Because they
-    ; sit between GAP_START and GAP_END they are gap scratch, not content.
+    ; Place the gap at MOD_NEW_END. Content occupies work_buf..MOD_NEW_END-1;
+    ; the gap (free space) runs from MOD_NEW_END to work_buf_end. BUF_PTR is
+    ; set equal to GAP_START so buf_ptr_warp fires immediately in render_viewport
+    ; and the renderer sees EOF at the correct position.
     lda MOD_NEW_END_LO
     sta GAP_START
+    sta BUF_PTR
     lda MOD_NEW_END_HI
     sta GAP_START+1
+    sta BUF_PTR+1
     lda #<work_buf_end
     sta GAP_END
     lda #>work_buf_end
     sta GAP_END+1
-
-    ; Fill the gap with sentinel CRs (decorative; overwritten as the user types)
-    lda MOD_NEW_END_LO
-    sta BUF_PTR
-    lda MOD_NEW_END_HI
-    sta BUF_PTR+1
-    lda #CONTENT_ROWS
-    sta MOD_TMP
-@sentinel:
-    lda BUF_PTR+1               ; stop at/past work_buf_end
-    cmp #>work_buf_end
-    bcs @sent_done
-    lda #PET_CR
-    ldy #0
-    sta (BUF_PTR),y
-    inc BUF_PTR
-    bne :+
-    inc BUF_PTR+1
-:   dec MOD_TMP
-    bne @sentinel
-@sent_done:
     ; The gap (= cursor) is at the end of the renumbered content. Reconcile the
     ; viewport NOW so the displayed cursor matches the real position on the
     ; first redraw — otherwise the cursor is drawn at row 0 and then snaps to

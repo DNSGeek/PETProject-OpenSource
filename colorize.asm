@@ -1051,7 +1051,7 @@ colorize_row_asm:
     cmp #$22                ; '"' → string
     bne @operand_not_string
     ldx #STATE_ASM_STRING
-    lda SETTING_FG          ; quote itself is default color
+    lda #COL_ASM_STRING     ; opening " is green like the rest of the string
     jsr clr_emit
     jsr clr_advance
     jmp @asm_loop

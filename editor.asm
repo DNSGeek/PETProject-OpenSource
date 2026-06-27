@@ -3129,10 +3129,7 @@ do_tab_complete:
 
 @scan_next:
     ; Advance WORK_PTR past this keyword's chars; bump token.
-    lda KW_TOKEN
-    sec
-    sbc #$80
-    tax
+    ; X = KW_TOKEN - $80 is still valid from @scan_try_cont on both paths here.
     lda kw_len_tab,x
     clc
     adc WORK_PTR
@@ -3145,18 +3142,14 @@ do_tab_complete:
 
 ; ---- Match: insert the full keyword into the gap --------------------------
 ; WORK_PTR points to the keyword's start in kw_strtab; KW_TOKEN is the token.
+; X = KW_TOKEN - $80 on entry (set by @scan_try_cont, not clobbered by @cmp_loop).
 @match:
     lda KW_TOKEN
     sta COMPL_TOK
+    lda kw_len_tab,x        ; X still = KW_TOKEN - $80; lda/sta below don't touch X
+    sta TC_DELCNT               ; down-counter for insert loop
     lda #$FF
     sta COMPL_ACTIVE
-    ; Get keyword length (= number of chars to insert).
-    lda COMPL_TOK
-    sec
-    sbc #$80
-    tax
-    lda kw_len_tab,x
-    sta TC_DELCNT               ; down-counter for insert loop
     ; Insert loop: ldy #0 each iteration because do_insert clobbers Y.
 @ins_loop:
     lda TC_DELCNT
@@ -3212,6 +3205,7 @@ do_tab_complete:
 ; Clobbers: A, X
 ; ============================================================================
 tc_rewind_gap:
+    beq @rw_done        ; A=0: nothing to rewind (guard against 256-decrement wrap)
     tax
 @rw_loop:
     lda GAP_START
@@ -3221,6 +3215,7 @@ tc_rewind_gap:
     dec GAP_START
     dex
     bne @rw_loop
+@rw_done:
     rts
     
 .include "modules.asm"

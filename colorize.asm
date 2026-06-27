@@ -496,7 +496,7 @@ colorize_row:
     ldx #STATE_STRING
     lda #0
     sta CLR_PREVLET
-    lda SETTING_FG
+    lda #COL_STRING             ; opening " is green like the rest of the string
     jsr clr_emit
     jsr clr_advance
     jmp @loop

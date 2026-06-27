@@ -37,6 +37,7 @@
 - CTRL-L: Redraw the screen
 - CTRL-N: New file. Clears out the editor and starts fresh
 - CTRL-R: Shortcut for Run Script
+- TAB: Complete the keyword. Pressing TAB will cycle through all of the completions.
 
 If you attempt to do something destructive (new file, load file, quit) with unsaved changes, you will be prompted if you want to save first.
 

@@ -412,24 +412,32 @@ emit_line:
 :   jmp @op_done                ; should not reach
 
 @op_imp:
-    ; implied: no operand, 3 spaces to align
+    ; implied: no operand, 7 spaces to align with widest mode
     lda #$20
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
     jsr emit_dst
     jsr emit_dst
     jsr emit_dst
     jmp @op_done
 
 @op_acc:
-    ; accumulator: "A  "
+    ; accumulator: "A      " (7 chars)
     lda #$41                    ; 'A'
     jsr emit_dst
     lda #$20
     jsr emit_dst
     jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
     jmp @op_done
 
 @op_imm:
-    ; immediate: "#$XX"
+    ; immediate: "#$XX   " (7 chars)
     ldy #1
     lda (SRC_PTR),y
     tax
@@ -442,10 +450,11 @@ emit_line:
     lda #$20
     jsr emit_dst
     jsr emit_dst
+    jsr emit_dst
     jmp @op_done
 
 @op_zp:
-    ; zero page: "$XX"
+    ; zero page: "$XX    " (7 chars)
     ldy #1
     lda (SRC_PTR),y
     tax
@@ -457,10 +466,11 @@ emit_line:
     jsr emit_dst
     jsr emit_dst
     jsr emit_dst
+    jsr emit_dst
     jmp @op_done
 
 @op_zpx:
-    ; zero page,X: "$XX,X"
+    ; zero page,X: "$XX,X  " (7 chars)
     ldy #1
     lda (SRC_PTR),y
     tax
@@ -472,10 +482,13 @@ emit_line:
     jsr emit_dst
     lda #$58                    ; 'X'
     jsr emit_dst
+    lda #$20
+    jsr emit_dst
+    jsr emit_dst
     jmp @op_done
 
 @op_zpy:
-    ; zero page,Y: "$XX,Y"
+    ; zero page,Y: "$XX,Y  " (7 chars)
     ldy #1
     lda (SRC_PTR),y
     tax
@@ -487,10 +500,13 @@ emit_line:
     jsr emit_dst
     lda #$59                    ; 'Y'
     jsr emit_dst
+    lda #$20
+    jsr emit_dst
+    jsr emit_dst
     jmp @op_done
 
 @op_abs:
-    ; absolute: "$XXXX"
+    ; absolute: "$XXXX  " (7 chars)
     ldy #1
     lda (SRC_PTR),y
     sta TMP+1                   ; save lo (reuse, mnem_idx no longer needed)
@@ -504,6 +520,7 @@ emit_line:
     lda TMP+1
     jsr emit_hex_byte           ; then lo byte
     lda #$20
+    jsr emit_dst
     jsr emit_dst
     jmp @op_done
 
@@ -644,11 +661,12 @@ emit_line:
     jsr emit_hex_byte
     lda #$20
     jsr emit_dst
+    jsr emit_dst
     ; fall through to @op_done
 
 @op_done:
-    ; Pad operand field to fixed width, then emit comment with PC and bytes
-    ; Comment: " ;XXXX:XX [XX [XX]]"
+    ; Operand field is padded to 7 chars by each handler above.
+    ; Emit " ;XXXX:XX [XX [XX]]" — semicolon lands at column 16 on every line.
     lda #$20
     jsr emit_dst
     lda #$3B                    ; ';'
@@ -698,7 +716,7 @@ emit_illegal:
     lda (SRC_PTR),y
     sta TMP                     ; opcode byte
 
-    ; "    .BYTE $XX           ;XXXX:XX\r"
+    ; "    .BYTE $XX   ;XXXX:XX\r" — semicolon at column 16
     lda #$20
     jsr emit_dst
     jsr emit_dst
@@ -722,8 +740,6 @@ emit_illegal:
     jsr emit_hex_byte
     ; pad + comment
     lda #$20
-    jsr emit_dst
-    jsr emit_dst
     jsr emit_dst
     jsr emit_dst
     jsr emit_dst

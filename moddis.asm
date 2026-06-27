@@ -345,12 +345,8 @@ disassemble:
 ; ============================================================================
 
 emit_line:
-    ; 8 spaces indent
+    ; 4 spaces indent
     lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
     jsr emit_dst
     jsr emit_dst
     jsr emit_dst
@@ -702,12 +698,8 @@ emit_illegal:
     lda (SRC_PTR),y
     sta TMP                     ; opcode byte
 
-    ; "        .BYTE $XX           ;XXXX:XX\r"
+    ; "    .BYTE $XX           ;XXXX:XX\r"
     lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
     jsr emit_dst
     jsr emit_dst
     jsr emit_dst

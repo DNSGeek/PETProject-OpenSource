@@ -92,6 +92,7 @@ KEY_CRSR_LT  = $9D
 KEY_CRSR_DN  = $11
 KEY_CRSR_UP  = $91
 KEY_CTRL_F   = $06                 ; CTRL+F — search / replace (loads MODSFR)
+KEY_CTRL_I   = $09                 ; CTRL+I — keyword tab completion
 KEY_CTRL_N   = $0E                 ; CTRL+N — new file
 KEY_CTRL_L   = $0C                 ; CTRL+L — force full screen redraw
 KEY_CTRL_R   = $12                 ; CTRL+R - Run a script
@@ -256,6 +257,18 @@ main_loop:
     bne @has_key
     jmp @no_key
 @has_key:
+    ; ---- CTRL+I (TAB) — keyword completion --------------------------------
+    ; Must be checked BEFORE clearing COMPL_ACTIVE so the cycling state
+    ; survives to the next press.  Every other key goes through @not_tab,
+    ; which clears COMPL_ACTIVE unconditionally.
+    cmp #KEY_CTRL_I
+    bne @not_tab
+    jmp @do_tab
+@not_tab:
+    pha
+    lda #$00
+    sta COMPL_ACTIVE
+    pla
     ; ---- Function keys ----
     ; Physical keys: F1=settings, F3=load, F5=save, F7=quit.
     ; Shifted variants (F2/F4/F6/F8) are consumed silently to prevent
@@ -452,6 +465,9 @@ main_loop:
     jmp main_loop
 
     ; ---- Function key handlers (stubs until feature implemented) ----
+@do_tab:
+    jsr do_tab_complete
+    jmp main_loop
 @do_settings:
     jsr do_settings_popover
     jmp main_loop
@@ -2931,6 +2947,281 @@ do_backspace:
 :   dec GAP_START
 @done:
     rts
+
+; ============================================================================
+; do_tab_complete — CTRL+I keyword completion
+;
+; Completes the alphabetic word immediately before the cursor to the next
+; BASIC keyword whose name starts with that prefix (scanning kw_strtab in
+; token order, $80..$D8).  Successive CTRL+I presses cycle through all
+; matching keywords, wrapping at the end.  When the scan exhausts all
+; matches the previously-completed keyword is silently restored and the
+; cycling session ends (COMPL_ACTIVE cleared), so the next CTRL+I starts
+; fresh from $80 again.
+;
+; Only completes when the cursor is immediately AFTER the partial word
+; with no alphabetic char immediately to the right (guards against
+; completing mid-word).
+;
+; State (BSS):
+;   COMPL_ACTIVE  $FF = cycling; $00 = idle (cleared by main_loop on any
+;                 non-CTRL+I key, so cursor moves, edits, etc. end a session)
+;   COMPL_PFXLEN  length of the original typed prefix (1..8), preserved
+;                 across cycling so the comparison stays anchored
+;   COMPL_TOK     token of the last completion ($80..$D8)
+;   TC_DELCNT     chars removed from GAP_START; used to restore on no-match
+;
+; ZP used:  WORK_PTR (backward scan + kw_strtab walk),
+;           TMP      (pointer to prefix chars in gap, for comparison),
+;           KW_TOKEN ($3A, current token during scan; safe to alias here
+;                     because tab completion never overlaps colorization)
+; Clobbers: A, X, Y
+; ============================================================================
+
+do_tab_complete:
+    lda COMPL_ACTIVE
+    bne @cycling
+
+; ---- Fresh: count the alphabetic prefix immediately before GAP_START ------
+@fresh:
+    lda GAP_START
+    sta WORK_PTR
+    lda GAP_START+1
+    sta WORK_PTR+1
+    lda #0
+    sta COMPL_PFXLEN
+
+@pfx_loop:
+    ; Stop at BOF
+    lda WORK_PTR
+    cmp #<work_buf
+    bne @pfx_dec
+    lda WORK_PTR+1
+    cmp #>work_buf
+    beq @pfx_done
+@pfx_dec:
+    lda WORK_PTR
+    bne @pfx_noh
+    dec WORK_PTR+1
+@pfx_noh:
+    dec WORK_PTR
+    ldy #0
+    lda (WORK_PTR),y
+    cmp #$41                    ; < 'A'?
+    bcc @pfx_done
+    cmp #$5B                    ; > 'Z' (i.e. $5A)?
+    bcs @pfx_done
+    inc COMPL_PFXLEN
+    jmp @pfx_loop
+
+@pfx_done:
+    lda COMPL_PFXLEN
+    bne @pfx_nonzero
+    jmp @tc_rts                 ; nothing to complete
+@pfx_nonzero:
+
+    ; Guard: don't complete if cursor is mid-word (alpha char right of cursor)
+    lda GAP_END
+    cmp #<work_buf_end
+    bne @chk_trail
+    lda GAP_END+1
+    cmp #>work_buf_end
+    beq @fresh_go               ; at EOF, no trailing char
+@chk_trail:
+    ldy #0
+    lda (GAP_END),y
+    cmp #$41
+    bcc @fresh_go
+    cmp #$5B
+    bcs @fresh_go               ; >= $5B: not a letter, proceed
+    jmp @tc_rts                 ; $41..$5A: trailing letter, bail
+
+@fresh_go:
+    ; Rewind GAP_START by COMPL_PFXLEN to expose the prefix chars for comparison.
+    ; They remain physically in the buffer at [new GAP_START .. GAP_START + PFXLEN - 1].
+    lda COMPL_PFXLEN
+    sta TC_DELCNT
+    jsr tc_rewind_gap
+    lda #$80
+    sta COMPL_TOK
+    jmp @do_scan
+
+; ---- Cycling: undo current completion, step to the next token -------------
+@cycling:
+    ; Delete count = full length of the currently-displayed keyword.
+    lda COMPL_TOK
+    sec
+    sbc #$80
+    tax
+    lda kw_len_tab,x
+    sta TC_DELCNT
+    jsr tc_rewind_gap
+    ; Advance COMPL_TOK, wrapping $D8 -> $80.
+    inc COMPL_TOK
+    lda COMPL_TOK
+    cmp #$D9
+    bcc @do_scan
+    lda #$80
+    sta COMPL_TOK
+    ; fall through into @do_scan
+
+; ---- Scan kw_strtab from COMPL_TOK onward for a prefix match --------------
+@do_scan:
+    ; TMP = GAP_START = first byte of the exposed prefix (in the gap hole).
+    lda GAP_START
+    sta TMP
+    lda GAP_START+1
+    sta TMP+1
+
+    ; WORK_PTR = kw_strtab base; KW_TOKEN ($3A) walks token bytes $80..$D8.
+    lda #<kw_strtab
+    sta WORK_PTR
+    lda #>kw_strtab
+    sta WORK_PTR+1
+    lda #$80
+    sta KW_TOKEN
+
+    ; Skip entries that precede COMPL_TOK.
+@scan_skip:
+    lda KW_TOKEN
+    cmp COMPL_TOK
+    beq @scan_try
+    sec
+    sbc #$80
+    tax
+    lda kw_len_tab,x
+    clc
+    adc WORK_PTR
+    sta WORK_PTR
+    bcc @scan_skip_noh
+    inc WORK_PTR+1
+@scan_skip_noh:
+    inc KW_TOKEN
+    jmp @scan_skip
+
+    ; Try matching KW_TOKEN's keyword against the prefix.
+@scan_try:
+    lda KW_TOKEN
+    cmp #$D9                    ; past last keyword?
+    bcc @scan_try_cont
+    jmp @no_match
+@scan_try_cont:
+    sec
+    sbc #$80
+    tax
+    lda kw_len_tab,x            ; keyword length
+    cmp COMPL_PFXLEN
+    bcs @scan_try_cmp           ; length >= pfxlen, proceed to compare
+    jmp @scan_next              ; shorter than prefix — impossible match
+@scan_try_cmp:
+
+    ; Compare first COMPL_PFXLEN chars of keyword against prefix in gap.
+    ; WORK_PTR -> keyword, TMP -> prefix chars (both uppercase PETSCII).
+    ldy #0
+@cmp_loop:
+    cpy COMPL_PFXLEN
+    beq @match                  ; all prefix chars matched
+    lda (WORK_PTR),y            ; keyword char
+    cmp (TMP),y                 ; prefix char in buffer
+    bne @scan_next              ; mismatch
+    iny
+    jmp @cmp_loop
+
+@scan_next:
+    ; Advance WORK_PTR past this keyword's chars; bump token.
+    lda KW_TOKEN
+    sec
+    sbc #$80
+    tax
+    lda kw_len_tab,x
+    clc
+    adc WORK_PTR
+    sta WORK_PTR
+    bcc @scan_nxt_noh
+    inc WORK_PTR+1
+@scan_nxt_noh:
+    inc KW_TOKEN
+    jmp @scan_try
+
+; ---- Match: insert the full keyword into the gap --------------------------
+; WORK_PTR points to the keyword's start in kw_strtab; KW_TOKEN is the token.
+@match:
+    lda KW_TOKEN
+    sta COMPL_TOK
+    lda #$FF
+    sta COMPL_ACTIVE
+    ; Get keyword length (= number of chars to insert).
+    lda COMPL_TOK
+    sec
+    sbc #$80
+    tax
+    lda kw_len_tab,x
+    sta TC_DELCNT               ; down-counter for insert loop
+    ; Insert loop: ldy #0 each iteration because do_insert clobbers Y.
+@ins_loop:
+    lda TC_DELCNT
+    beq @ins_done
+    ldy #0
+    lda (WORK_PTR),y
+    jsr do_insert
+    inc WORK_PTR
+    bne @ins_noh
+    inc WORK_PTR+1
+@ins_noh:
+    dec TC_DELCNT
+    jmp @ins_loop
+
+@ins_done:
+    lda #$FF
+    sta IS_DIRTY
+    ; Fast-path render: if LEFT_COL didn't change, repaint only the cursor row.
+    lda LEFT_COL
+    sta FP_LEFT_SAVE            ; borrow the existing scroll-detect scratch
+    jsr ensure_cursor_visible
+    lda LEFT_COL
+    cmp FP_LEFT_SAVE
+    bne @full_render
+    jsr render_cursor_row
+    jsr draw_cursor
+    rts
+@full_render:
+    jsr render_viewport
+    jsr draw_cursor
+    rts
+
+; ---- No match: restore GAP_START; reset cycling state ---------------------
+@no_match:
+    ; The chars are still physically in the buffer.  Re-advancing GAP_START
+    ; by TC_DELCNT bytes restores the previous visible state with zero copies.
+    lda TC_DELCNT
+    clc
+    adc GAP_START
+    sta GAP_START
+    bcc @nm_noh
+    inc GAP_START+1
+@nm_noh:
+    lda #$00
+    sta COMPL_ACTIVE
+@tc_rts:
+    rts
+
+; ============================================================================
+; tc_rewind_gap — decrement GAP_START by A bytes.
+; Equivalent to A calls to do_backspace, no BOF check needed since
+; COMPL_PFXLEN was measured from actual buffer content.
+; Clobbers: A, X
+; ============================================================================
+tc_rewind_gap:
+    tax
+@rw_loop:
+    lda GAP_START
+    bne @rw_noh
+    dec GAP_START+1
+@rw_noh:
+    dec GAP_START
+    dex
+    bne @rw_loop
+    rts
     
 .include "modules.asm"
 
@@ -3016,6 +3307,12 @@ AN_CUR:          .res 2     ; current line number N (then computed next number)
 AN_NEXT:         .res 2     ; next line number M (also divisor scratch in emit)
 AN_TMP:          .res 2     ; 16-bit scratch (gap, mul10 temp)
 AN_LEADING:      .res 1     ; 0 = suppressing leading zeros in an_emit_number
+
+; ---- Tab completion state ----
+COMPL_ACTIVE: .res 1    ; $FF = cycling in progress, $00 = idle
+COMPL_PFXLEN: .res 1    ; length of the original typed prefix (1..8)
+COMPL_TOK:    .res 1    ; BASIC token of the last completion ($80..$D8)
+TC_DELCNT:    .res 1    ; chars removed from gap (used to restore on no-match)
 
 ; ---- Editor buffer ----
 work_buf:      .res BUF_SIZE

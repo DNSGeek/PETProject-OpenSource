@@ -3236,8 +3236,6 @@ test_buffer:
     .byte "30   print i, i*i, i*i*i", PET_CR
     .byte "40 next i", PET_CR
     .byte "50 goto 10", PET_CR
-    .byte PET_CR
-    .byte "rem a longer line for testing horizontal scroll later on.", PET_CR
     .byte "60 end", PET_CR
     .byte PET_CR
 buffer_end:

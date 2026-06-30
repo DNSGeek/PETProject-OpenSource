@@ -5,7 +5,7 @@
 - Supports BASIC and Assembly
 - Full syntax highlighting for both BASIC and assembly
 - Built in assembler
-- Auto-disassembly if opening machine language files
+- Auto-disassembly if opening machine language files, with full illegal opcode support
 - Line renumbering, including GOTO and GOSUB targets
 - Disk browser: View directory, format disks, open files, send raw commands
 - Built in search/replace with toggleable case sensitivity

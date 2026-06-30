@@ -16,13 +16,29 @@
 ;   MOD_STATUS = $02 on success, $01 on error
 ;
 ; Source format per instruction (fits 40 cols):
-;   "        MNEM OPERAND   ;XXXX:XX XX XX\r"
-;    ^8sp    ^4   ^varies   ^comment
+;   "    MNEM OPERAND   ;XXXX:XX XX XX |ccc|\r"
+;    ^4sp ^4   ^varies   ^comment      ^PETSCII hint (raw bytes, 3 chars)
 ;
 ; Labels: not generated in v1 - branches/jumps show target address.
 ;
-; Staging: $A300-$AFFF (~3.5KB). Output copied back to work_buf when done.
+; Illegal/undocumented NMOS opcodes are fully decoded (no more falling back
+; to .BYTE) - see mnem_tab/mode_tab and the appended mnem_strs entries.
+;
+; Output is written into the gap region (starting at DIS_SRC_END), then
+; relocated down to work_buf+0 in one pass at the very end - see
+; relocate_output. This keeps input and output in disjoint memory for the
+; whole disassembly loop. (An earlier version wrote output starting at
+; work_buf+0 directly, the same base SRC_PTR reads from - since output runs
+; ~15-30x longer than the source bytes it's decoded from, that overwrote
+; unread input within the first instruction, every run, on every program.)
 ; ZP usage: $FB/$FC = SRC_PTR, $3A-$3F = scratch (saved/restored).
+;
+; Disassembler state (ZP_SAVE, DIS_PC_LO, etc.) is declared via .res at the
+; very end of this file, AFTER all code and tables, so its address is always
+; correct no matter how large the tables grow. (A previous version hardcoded
+; this to $A7C0, which silently overlapped the tail of mnem_strs once that
+; table grew past it, corrupting the TSX/TXA/TXS/TYA mnemonic text on every
+; run. Don't hardcode this address again - let the assembler place it.)
 ;
 ; Mode constants (matching modasm.asm):
 ;   IMP=0 ACC=1 IMM=2 ZP=3 ZPX=4 ZPY=5 ABS=6 ABX=7 ABY=8 IND=9 IZX=10 IZY=11 REL=12
@@ -58,34 +74,17 @@ TMP2             = $3C          ; scratch (hi=$3D)
 TMP3             = $3E          ; scratch (hi=$3F)
 
 ; ---- ZP save area and disassembler state ----
-; CRITICAL: These MUST be placed outside the executable code area.
-; The ZP save loop writes to ZP_SAVE,x which would corrupt code bytes
-; if ZP_SAVE overlaps with instructions. MODDIS code ends around $A7A0,
-; staging starts at $A800, so $A7C0-$A7FF is the safe zone.
-ZP_SAVE          = $A7C0        ; 10 bytes: saves $3A-$3F, $FB-$FE
-
-; ---- Disassembler state (same safe zone, past code end) ----
-DIS_PC_LO        = $A7CA        ; current PC lo
-DIS_PC_HI        = $A7CB        ; current PC hi
-DIS_SRC_END_LO   = $A7CC        ; end of source binary lo (= GAP_START)
-DIS_SRC_END_HI   = $A7CD        ; end of source binary hi
-DIS_BUF_LO       = $A7CE        ; work_buf base lo
-DIS_BUF_HI       = $A7CF        ; work_buf base hi
-DIS_BUF_END_LO   = $A7D0        ; work_buf_end lo
-DIS_BUF_END_HI   = $A7D1        ; work_buf_end hi
-DIS_SPINNER      = $A7D2        ; 8-bit down-counter; wraps → color flip
-DIS_SPIN_IDX     = $A7D3        ; current color: $01=white $07=yellow (toggles)
+; Declared at the end of this file (after all code/tables) as plain labels
+; with .res - see the bottom of the file for ZP_SAVE, DIS_PC_LO, etc.
+; This keeps their addresses correct automatically; see header comment.
 
 SPIN_COLOR_A     = $01          ; white  (status bar default)
 SPIN_COLOR_B     = $00          ; black
 SPIN_CELL        = $D800        ; color RAM: row 0, col 39 (top-right)
 
-; ---- Staging buffer ----
-; No longer used — disassembly is written directly to work_buf.
-; DST_PTR (TMP2/TMP3) starts at work_buf and advances as text is emitted.
-; Since text output >> binary input in size, DST always stays ahead of SRC.
-STAGING          = $A800        ; kept as constant for reference only
-STAGING_END      = $B000        ; kept as constant for reference only
+; ---- (Staging buffer removed - disassembly writes directly to work_buf;
+; see emit_dst. The old STAGING/STAGING_END constants were unused and
+; have been removed to avoid confusion.)
 
 ; ---- Mode constants ----
 MODE_IMP         = 0
@@ -177,13 +176,18 @@ disassemble:
     jsr inc_src_ptr
     jsr inc_src_ptr
 
-    ; DST_PTR (TMP2/TMP3) starts at work_buf.
-    ; We write disassembly output directly into work_buf, reading ahead of
-    ; where we write (output text >> binary bytes, so no overlap possible).
-    ; This eliminates the staging buffer and copy step entirely.
-    lda DIS_BUF_LO
+    ; DST_PTR starts at DIS_SRC_END (= gap_start, the boundary right after
+    ; the loaded PRG content). Output text is ~15-30x longer than the source
+    ; bytes it's decoded from, so writing it starting at work_buf+0 (the
+    ; same base SRC_PTR reads from) raced straight through unread input
+    ; within the first few bytes, every run, on every program - see
+    ; relocate_output's header comment for the fix this replaced.
+    ; Writing into the gap instead keeps input and output in disjoint
+    ; regions for the whole loop; relocate_output moves the finished text
+    ; down to work_buf+0 (where the caller expects it) in one pass at the end.
+    lda DIS_SRC_END_LO
     sta DST_PTR
-    lda DIS_BUF_HI
+    lda DIS_SRC_END_HI
     sta DST_PTR+1
 
     ; Emit ".org $XXXX\r" as the first output line, using the PRG load address
@@ -257,7 +261,9 @@ disassemble:
     lda mode_tab,x              ; addressing mode
     sta TMP2+1                  ; TMP2+1 = mode (TMP3 is DST_PTR hi - safe, mode < $10)
 
-    ; Check for illegal opcode
+    ; Check for illegal opcode (defensive only - mnem_tab now maps all 256
+    ; opcodes to a real mnemonic, legal or illegal, so $FF should never
+    ; actually occur here. Left in as a guard rail.)
     lda TMP+1
     cmp #$FF
     bne :+
@@ -293,20 +299,22 @@ disassemble:
     jmp @dis_loop
 
 @done_overflow:
-    ; DST_PTR hit the limit. If it wrapped below work_buf hi, reset to
-    ; work_buf so MOD_NEW_END is at least valid (empty output).
+    ; DST_PTR hit the limit. If it's still below gap_start (shouldn't
+    ; normally happen), reset to gap_start so MOD_NEW_END is at least
+    ; valid (empty output) after relocate_output runs.
     lda DST_PTR+1
-    cmp DIS_BUF_HI
-    bcs @done                   ; TMP3 >= work_buf hi → valid, use as-is
-    lda DIS_BUF_LO
+    cmp DIS_SRC_END_HI
+    bcs @done                   ; DST_PTR hi >= gap_start hi -> valid, use as-is
+    lda DIS_SRC_END_LO
     sta DST_PTR
-    lda DIS_BUF_HI
+    lda DIS_SRC_END_HI
     sta DST_PTR+1
 
 @done:
     ; Restore status-bar corner color before returning
     lda #SPIN_COLOR_A
     sta SPIN_CELL
+    jsr relocate_output
     jsr set_new_end
 
     ; Restore ZP
@@ -678,13 +686,15 @@ emit_line:
     jsr emit_hex_byte
     lda #$3A                    ; ':'
     jsr emit_dst
-    ; Raw bytes (1, 2, or 3)
+    ; Raw bytes (1, 2, or 3), padded to a fixed 8-char field ("XX XX XX")
+    ; so the PETSCII hint column lands in the same place on every line,
+    ; no matter how many bytes this instruction actually has.
     ldy #0
     lda (SRC_PTR),y             ; opcode
     jsr emit_hex_byte
     lda TMP3+1                  ; size
     cmp #1
-    beq @emit_cr
+    beq @pad_size1
     lda #$20
     jsr emit_dst
     ldy #1
@@ -692,19 +702,40 @@ emit_line:
     jsr emit_hex_byte
     lda TMP3+1
     cmp #2
-    beq @emit_cr
+    beq @pad_size2
     lda #$20
     jsr emit_dst
     ldy #2
     lda (SRC_PTR),y
     jsr emit_hex_byte
+    jmp @emit_cr
+@pad_size1:
+    ; 1-byte instr emitted "XX" (2 chars) - need 6 more to reach 8
+    lda #$20
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
+    jmp @emit_cr
+@pad_size2:
+    ; 2-byte instr emitted "XX XX" (5 chars) - need 3 more to reach 8
+    lda #$20
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
 @emit_cr:
+    lda #$20
+    jsr emit_dst
+    jsr emit_petscii_hint
     lda #$0D
     jsr emit_dst
     rts
 
 ; ============================================================================
-; emit_illegal - emit ".BYTE $XX" for an unrecognised opcode
+; emit_illegal - emit ".BYTE $XX" for an unrecognised opcode (defensive
+; fallback only - see comment at the illegal-opcode check in @dis_loop)
 ; ============================================================================
 
 emit_illegal:
@@ -757,7 +788,16 @@ emit_illegal:
     inc DIS_PC_LO
     bne :+
     inc DIS_PC_HI
-:   lda #$0D
+:   ; pad "XX" (2 chars) to the fixed 8-char field width, same as emit_line
+    lda #$20
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_dst
+    jsr emit_petscii_hint
+    lda #$0D
     jsr emit_dst
     rts
 
@@ -784,9 +824,74 @@ trunc_msg:
     .byte $2A,$2A,$2A,$0D,$00
 
 ; ============================================================================
-; set_new_end - set MOD_NEW_END from current DST_PTR (TMP2/TMP3)
-; Called from @done and @done_overflow after disassembly completes.
-; Since we write directly to work_buf (no staging), no copy is needed.
+; relocate_output - copy the finished disassembly text from the gap region
+; (where the main loop wrote it, starting at DIS_SRC_END) down to work_buf+0,
+; which is where the caller (and MOD_NEW_END) expect it to live.
+;
+; Output was written starting at DIS_SRC_END instead of work_buf+0 so the
+; write pointer could never catch up to and overwrite source bytes the main
+; loop hadn't read yet - output runs ~15-30x longer than the source bytes
+; it's decoded from, so writing at work_buf+0 (the same base SRC_PTR reads
+; from) corrupted the input within the first instruction, every run, on
+; every program. This single copy at the end is the price of fixing that:
+; one pass instead of zero, but a correct one instead of a fast wrong one.
+;
+; Since work_buf (destination) is always <= DIS_SRC_END (source) - the gap
+; can't start before the buffer it's inside of - a plain forward copy is
+; safe even though the two regions can overlap: every byte gets read before
+; the copy could possibly advance far enough to overwrite it.
+;
+; In:  DST_PTR = end of written output (gap_start + output_len)
+;      DIS_SRC_END = gap_start = start of written output
+; Out: DST_PTR = work_buf + output_len (the new, correct end position)
+; Clobbers: SRC_PTR, DST_PTR, TMP2/TMP2+1 (saved boundary), A, Y
+; ============================================================================
+
+relocate_output:
+    ; Save the boundary we're copying up to (gap_start + output_len) before
+    ; DST_PTR gets repurposed as the copy destination pointer below.
+    lda DST_PTR
+    sta TMP2
+    lda DST_PTR+1
+    sta TMP2+1
+
+    ; SRC_PTR = gap_start (copy from), DST_PTR = work_buf (copy to)
+    lda DIS_SRC_END_LO
+    sta SRC_PTR
+    lda DIS_SRC_END_HI
+    sta SRC_PTR+1
+    lda DIS_BUF_LO
+    sta DST_PTR
+    lda DIS_BUF_HI
+    sta DST_PTR+1
+
+@copy_loop:
+    ; done when SRC_PTR has caught up to the saved boundary
+    lda SRC_PTR+1
+    cmp TMP2+1
+    bcc @copy_one
+    bne @copy_done
+    lda SRC_PTR
+    cmp TMP2
+    bcs @copy_done
+@copy_one:
+    ldy #0
+    lda (SRC_PTR),y
+    sta (DST_PTR),y
+    inc SRC_PTR
+    bne :+
+    inc SRC_PTR+1
+:   inc DST_PTR
+    bne :+
+    inc DST_PTR+1
+:   jmp @copy_loop
+@copy_done:
+    rts
+
+; ============================================================================
+; set_new_end - set MOD_NEW_END from current DST_PTR.
+; Called from @done, after relocate_output has moved the text down to
+; work_buf+0 and left DST_PTR pointing at the new (correct) end of it.
 ; ============================================================================
 
 set_new_end:
@@ -845,6 +950,83 @@ emit_dst:
     rts
 
 ; ============================================================================
+; emit_petscii_hint - emit "|ccc|", a 3-char PETSCII hint for the current
+; instruction's raw bytes, padded with spaces to a fixed 3-char width so the
+; closing pipe lands at the same column on every line. Mirrors the petsciiHint
+; property in Disassembler6502.swift (macOS C64IDE).
+;
+; In:  SRC_PTR points at the opcode byte; TMP3+1 = instruction size (1-3),
+;      both already set up by the caller (emit_line's @op_done, or
+;      emit_illegal) for the hex-byte dump this hint sits right after.
+; ============================================================================
+
+emit_petscii_hint:
+    lda #$7C                    ; '|'
+    jsr emit_dst
+    ldy #0
+    lda (SRC_PTR),y
+    jsr emit_petscii_char
+    lda TMP3+1
+    cmp #1
+    bne @hint_byte2
+    lda #$20                    ; pad 2 chars
+    jsr emit_dst
+    jsr emit_dst
+    jmp @hint_close
+@hint_byte2:
+    ldy #1
+    lda (SRC_PTR),y
+    jsr emit_petscii_char
+    lda TMP3+1
+    cmp #2
+    bne @hint_byte3
+    lda #$20                    ; pad 1 char
+    jsr emit_dst
+    jmp @hint_close
+@hint_byte3:
+    ldy #2
+    lda (SRC_PTR),y
+    jsr emit_petscii_char
+@hint_close:
+    lda #$7C                    ; '|'
+    jsr emit_dst
+    rts
+
+; ============================================================================
+; emit_petscii_char - convert byte in A to a displayable PETSCII hint
+; character and emit it via emit_dst. Same logic as petsciiChar() in
+; Disassembler6502.swift:
+;   $20-$7E  printable, pass through as-is
+;   $A0      reverse-space -> shown as a regular space
+;   $C1-$DA  PETSCII shifted uppercase A-Z -> mapped down to $41-$5A
+;   anything else -> '.'
+; Clobbers: A (tail-calls into emit_dst, which preserves X/Y)
+; ============================================================================
+
+emit_petscii_char:
+    cmp #$20
+    bcc @pc_dot                 ; < $20 -> dot
+    cmp #$7F
+    bcc @pc_pass                ; $20-$7E -> pass through
+    cmp #$A0
+    bne @pc_check_shift
+    lda #$20                    ; reverse-space -> regular space
+    jmp emit_dst
+@pc_check_shift:
+    cmp #$C1
+    bcc @pc_dot
+    cmp #$DB
+    bcs @pc_dot                 ; >= $DB -> outside shifted A-Z range
+    sec
+    sbc #$80                    ; $C1-$DA -> $41-$5A
+    jmp emit_dst
+@pc_pass:
+    jmp emit_dst
+@pc_dot:
+    lda #$2E                    ; '.'
+    jmp emit_dst
+
+; ============================================================================
 ; inc_src_ptr - advance SRC_PTR by 1, warping across gap
 ; ============================================================================
 
@@ -871,50 +1053,55 @@ inc_src_ptr:
 ; Opcode decode tables (256 bytes each)
 ; ============================================================================
 
-; mnemonic index table: opcode -> index into mnem_strs (FF = illegal)
+; mnemonic index table: opcode -> index into mnem_strs.
+; Indices 0-55 are the original legal mnemonics (unchanged); 56-74 are the
+; illegal/undocumented NMOS opcodes added below, cross-referenced against
+; Disassembler6502.swift (macOS C64IDE) so both tools agree on every opcode.
 mnem_tab:
-    .byte $0A,$22,$FF,$FF,$FF,$22,$02,$FF,$24,$22,$02,$FF,$FF,$22,$02,$FF  ; $00-$0F
-    .byte $09,$22,$FF,$FF,$FF,$22,$02,$FF,$0D,$22,$FF,$FF,$FF,$22,$02,$FF  ; $10-$1F
-    .byte $1C,$01,$FF,$FF,$06,$01,$27,$FF,$26,$01,$27,$FF,$06,$01,$27,$FF  ; $20-$2F
-    .byte $07,$01,$FF,$FF,$FF,$01,$27,$FF,$2C,$01,$FF,$FF,$FF,$01,$27,$FF  ; $30-$3F
-    .byte $29,$17,$FF,$FF,$FF,$17,$20,$FF,$23,$17,$20,$FF,$1B,$17,$20,$FF  ; $40-$4F
-    .byte $0B,$17,$FF,$FF,$FF,$17,$20,$FF,$0F,$17,$FF,$FF,$FF,$17,$20,$FF  ; $50-$5F
-    .byte $2A,$00,$FF,$FF,$FF,$00,$28,$FF,$25,$00,$28,$FF,$1B,$00,$28,$FF  ; $60-$6F
-    .byte $0C,$00,$FF,$FF,$FF,$00,$28,$FF,$2E,$00,$FF,$FF,$FF,$00,$28,$FF  ; $70-$7F
-    .byte $FF,$2F,$FF,$FF,$31,$2F,$30,$FF,$16,$FF,$35,$FF,$31,$2F,$30,$FF  ; $80-$8F
-    .byte $03,$2F,$FF,$FF,$31,$2F,$30,$FF,$37,$2F,$36,$FF,$FF,$2F,$FF,$FF  ; $90-$9F
-    .byte $1F,$1D,$1E,$FF,$1F,$1D,$1E,$FF,$33,$1D,$32,$FF,$1F,$1D,$1E,$FF  ; $A0-$AF
-    .byte $04,$1D,$FF,$FF,$1F,$1D,$1E,$FF,$10,$1D,$34,$FF,$1F,$1D,$1E,$FF  ; $B0-$BF
-    .byte $13,$11,$FF,$FF,$13,$11,$14,$FF,$1A,$11,$15,$FF,$13,$11,$14,$FF  ; $C0-$CF
-    .byte $08,$11,$FF,$FF,$FF,$11,$14,$FF,$0E,$11,$FF,$FF,$FF,$11,$14,$FF  ; $D0-$DF
-    .byte $12,$2B,$FF,$FF,$12,$2B,$18,$FF,$19,$2B,$21,$FF,$12,$2B,$18,$FF  ; $E0-$EF
-    .byte $05,$2B,$FF,$FF,$FF,$2B,$18,$FF,$2D,$2B,$FF,$FF,$FF,$2B,$18,$FF  ; $F0-$FF
+    .byte $0A,$22,$3D,$47,$21,$22,$02,$47,$24,$22,$02,$39,$21,$22,$02,$47  ; $00-$0F
+    .byte $09,$22,$3D,$47,$21,$22,$02,$47,$0D,$22,$21,$47,$21,$22,$02,$47  ; $10-$1F
+    .byte $1C,$01,$3D,$40,$06,$01,$27,$40,$26,$01,$27,$39,$06,$01,$27,$40  ; $20-$2F
+    .byte $07,$01,$3D,$40,$21,$01,$27,$40,$2C,$01,$21,$40,$21,$01,$27,$40  ; $30-$3F
+    .byte $29,$17,$3D,$48,$21,$17,$20,$48,$23,$17,$20,$38,$1B,$17,$20,$48  ; $40-$4F
+    .byte $0B,$17,$3D,$48,$21,$17,$20,$48,$0F,$17,$21,$48,$21,$17,$20,$48  ; $50-$5F
+    .byte $2A,$00,$3D,$41,$21,$00,$28,$41,$25,$00,$28,$3A,$1B,$00,$28,$41  ; $60-$6F
+    .byte $0C,$00,$3D,$41,$21,$00,$28,$41,$2E,$00,$21,$41,$21,$00,$28,$41  ; $70-$7F
+    .byte $21,$2F,$21,$42,$31,$2F,$30,$42,$16,$21,$35,$4A,$31,$2F,$30,$42  ; $80-$8F
+    .byte $03,$2F,$3D,$44,$31,$2F,$30,$42,$37,$2F,$36,$49,$46,$2F,$45,$44  ; $90-$9F
+    .byte $1F,$1D,$1E,$3F,$1F,$1D,$1E,$3F,$33,$1D,$32,$3F,$1F,$1D,$1E,$3F  ; $A0-$AF
+    .byte $04,$1D,$3D,$3F,$1F,$1D,$1E,$3F,$10,$1D,$34,$3E,$1F,$1D,$1E,$3F  ; $B0-$BF
+    .byte $13,$11,$21,$3B,$13,$11,$14,$3B,$1A,$11,$15,$43,$13,$11,$14,$3B  ; $C0-$CF
+    .byte $08,$11,$3D,$3B,$21,$11,$14,$3B,$0E,$11,$21,$3B,$21,$11,$14,$3B  ; $D0-$DF
+    .byte $12,$2B,$21,$3C,$12,$2B,$18,$3C,$19,$2B,$21,$2B,$12,$2B,$18,$3C  ; $E0-$EF
+    .byte $05,$2B,$3D,$3C,$21,$2B,$18,$3C,$2D,$2B,$21,$3C,$21,$2B,$18,$3C  ; $F0-$FF
 
 ; addressing mode table: opcode -> mode constant
 mode_tab:
-    .byte $00,$0A,$FF,$FF,$FF,$03,$03,$FF,$00,$02,$01,$FF,$FF,$06,$06,$FF  ; $00-$0F
-    .byte $0C,$0B,$FF,$FF,$FF,$04,$04,$FF,$00,$08,$FF,$FF,$FF,$07,$07,$FF  ; $10-$1F
-    .byte $06,$0A,$FF,$FF,$03,$03,$03,$FF,$00,$02,$01,$FF,$06,$06,$06,$FF  ; $20-$2F
-    .byte $0C,$0B,$FF,$FF,$FF,$04,$04,$FF,$00,$08,$FF,$FF,$FF,$07,$07,$FF  ; $30-$3F
-    .byte $00,$0A,$FF,$FF,$FF,$03,$03,$FF,$00,$02,$01,$FF,$06,$06,$06,$FF  ; $40-$4F
-    .byte $0C,$0B,$FF,$FF,$FF,$04,$04,$FF,$00,$08,$FF,$FF,$FF,$07,$07,$FF  ; $50-$5F
-    .byte $00,$0A,$FF,$FF,$FF,$03,$03,$FF,$00,$02,$01,$FF,$09,$06,$06,$FF  ; $60-$6F
-    .byte $0C,$0B,$FF,$FF,$FF,$04,$04,$FF,$00,$08,$FF,$FF,$FF,$07,$07,$FF  ; $70-$7F
-    .byte $FF,$0A,$FF,$FF,$03,$03,$03,$FF,$00,$FF,$00,$FF,$06,$06,$06,$FF  ; $80-$8F
-    .byte $0C,$0B,$FF,$FF,$04,$04,$05,$FF,$00,$08,$00,$FF,$FF,$07,$FF,$FF  ; $90-$9F
-    .byte $02,$0A,$02,$FF,$03,$03,$03,$FF,$00,$02,$00,$FF,$06,$06,$06,$FF  ; $A0-$AF
-    .byte $0C,$0B,$FF,$FF,$04,$04,$05,$FF,$00,$08,$00,$FF,$07,$07,$08,$FF  ; $B0-$BF
-    .byte $02,$0A,$FF,$FF,$03,$03,$03,$FF,$00,$02,$00,$FF,$06,$06,$06,$FF  ; $C0-$CF
-    .byte $0C,$0B,$FF,$FF,$FF,$04,$04,$FF,$00,$08,$FF,$FF,$FF,$07,$07,$FF  ; $D0-$DF
-    .byte $02,$0A,$FF,$FF,$03,$03,$03,$FF,$00,$02,$00,$FF,$06,$06,$06,$FF  ; $E0-$EF
-    .byte $0C,$0B,$FF,$FF,$FF,$04,$04,$FF,$00,$08,$FF,$FF,$FF,$07,$07,$FF  ; $F0-$FF
+    .byte $00,$0A,$00,$0A,$03,$03,$03,$03,$00,$02,$01,$02,$06,$06,$06,$06  ; $00-$0F
+    .byte $0C,$0B,$00,$0B,$04,$04,$04,$04,$00,$08,$00,$08,$07,$07,$07,$07  ; $10-$1F
+    .byte $06,$0A,$00,$0A,$03,$03,$03,$03,$00,$02,$01,$02,$06,$06,$06,$06  ; $20-$2F
+    .byte $0C,$0B,$00,$0B,$04,$04,$04,$04,$00,$08,$00,$08,$07,$07,$07,$07  ; $30-$3F
+    .byte $00,$0A,$00,$0A,$03,$03,$03,$03,$00,$02,$01,$02,$06,$06,$06,$06  ; $40-$4F
+    .byte $0C,$0B,$00,$0B,$04,$04,$04,$04,$00,$08,$00,$08,$07,$07,$07,$07  ; $50-$5F
+    .byte $00,$0A,$00,$0A,$03,$03,$03,$03,$00,$02,$01,$02,$09,$06,$06,$06  ; $60-$6F
+    .byte $0C,$0B,$00,$0B,$04,$04,$04,$04,$00,$08,$00,$08,$07,$07,$07,$07  ; $70-$7F
+    .byte $02,$0A,$02,$0A,$03,$03,$03,$03,$00,$02,$00,$02,$06,$06,$06,$06  ; $80-$8F
+    .byte $0C,$0B,$00,$0B,$04,$04,$05,$05,$00,$08,$00,$08,$07,$07,$08,$08  ; $90-$9F
+    .byte $02,$0A,$02,$0A,$03,$03,$03,$03,$00,$02,$00,$02,$06,$06,$06,$06  ; $A0-$AF
+    .byte $0C,$0B,$00,$0B,$04,$04,$05,$05,$00,$08,$00,$08,$07,$07,$08,$08  ; $B0-$BF
+    .byte $02,$0A,$02,$0A,$03,$03,$03,$03,$00,$02,$00,$02,$06,$06,$06,$06  ; $C0-$CF
+    .byte $0C,$0B,$00,$0B,$04,$04,$04,$04,$00,$08,$00,$08,$07,$07,$07,$07  ; $D0-$DF
+    .byte $02,$0A,$02,$0A,$03,$03,$03,$03,$00,$02,$00,$02,$06,$06,$06,$06  ; $E0-$EF
+    .byte $0C,$0B,$00,$0B,$04,$04,$04,$04,$00,$08,$00,$08,$07,$07,$07,$07  ; $F0-$FF
 
 ; instruction size by addressing mode
 ; IMP=0 ACC=1 IMM=2 ZP=3 ZPX=4 ZPY=5 ABS=6 ABX=7 ABY=8 IND=9 IZX=10 IZY=11 REL=12
 size_tab:
     .byte 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2
 
-; mnemonic strings: 56 * 3 bytes, uppercase PETSCII (= ASCII for A-Z)
+; mnemonic strings: 75 * 3 bytes, uppercase PETSCII (= ASCII for A-Z).
+; Indices 0-55: original legal mnemonics (unchanged, order preserved).
+; Indices 56-74: illegal/undocumented NMOS opcodes, appended below.
 mnem_strs:
     .byte "ADC","AND","ASL","BCC","BCS","BEQ","BIT","BMI"
     .byte "BNE","BPL","BRK","BVC","BVS","CLC","CLD","CLI"
@@ -923,3 +1110,26 @@ mnem_strs:
     .byte "LSR","NOP","ORA","PHA","PHP","PLA","PLP","ROL"
     .byte "ROR","RTI","RTS","SBC","SEC","SED","SEI","STA"
     .byte "STX","STY","TAX","TAY","TSX","TXA","TXS","TYA"
+    ; --- illegal/undocumented (56-74) ---
+    .byte "ALR","ANC","ARR","DCP","ISB","JAM","LAS","LAX"
+    .byte "RLA","RRA","SAX","SBX","SHA","SHX","SHY","SLO"
+    .byte "SRE","TAS","XAA"
+
+; ============================================================================
+; Disassembler state - placed here, after all code and tables, so the
+; assembler computes its address automatically. See header comment: do not
+; hardcode this to a fixed address again, that's what caused the TSX/TXA/
+; TXS/TYA corruption bug this file used to have.
+; ============================================================================
+
+ZP_SAVE:          .res 10         ; saves $3A-$3F, $FB-$FE
+DIS_PC_LO:        .res 1          ; current PC lo
+DIS_PC_HI:        .res 1          ; current PC hi
+DIS_SRC_END_LO:   .res 1          ; end of source binary lo (= GAP_START)
+DIS_SRC_END_HI:   .res 1          ; end of source binary hi
+DIS_BUF_LO:       .res 1          ; work_buf base lo
+DIS_BUF_HI:       .res 1          ; work_buf base hi
+DIS_BUF_END_LO:   .res 1          ; work_buf_end lo
+DIS_BUF_END_HI:   .res 1          ; work_buf_end hi
+DIS_SPINNER:      .res 1          ; 8-bit down-counter; wraps -> color flip
+DIS_SPIN_IDX:     .res 1          ; current color: $01=white $07=yellow (toggles)

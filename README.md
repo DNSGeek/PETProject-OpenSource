@@ -39,7 +39,7 @@ no modern PC, no special hardware required.
 - 💾 **Disk utility** — browse the directory, load files, delete, rename, format, and send raw drive commands
 - 🔎 **Search & replace** with toggleable case sensitivity
 - ⌨️ **Keyword completion** — press `TAB` to cycle through completions
-- 📜 **BASIC scripting engine** with extended keywords to automate the IDE *(REU required)*
+- 📜 **BASIC scripting engine** with extended keywords to automate the IDE _(REU required)_
 - 🧰 **Many quality-of-life touches** that make coding on a real C64 pleasant
 - 📦 **Fully self-contained** — runs perfectly on a stock C64; an REU is optional and used only by the scripting subsystem
 
@@ -58,7 +58,7 @@ no modern PC, no special hardware required.
    RUN
    ```
 
-   *(Or use your emulator's autostart feature.)*
+   _(Or use your emulator's autostart feature.)_
 
 That's it — you're in the editor. Press `F8` to open the module picker, or start
 typing to write some BASIC.
@@ -69,23 +69,23 @@ typing to write some BASIC.
 
 ## Keyboard Reference
 
-| Key | Action |
-| --- | --- |
-| `F1` | Settings — colors, data-drive number, cursor blink |
-| `F2` | Page Up |
-| `F3` | Load a file (BASIC, assembly, or compiled ML) |
-| `F4` | Page Down |
-| `F5` | Save the current file |
-| `F6` | Load a SEQ (plain text / source) file |
-| `F7` | Quit to BASIC |
-| `F8` | Open the module picker (see [Modules](#modules)) |
-| `CTRL+F` | Find / replace |
-| `CTRL+L` | Force a full screen redraw |
-| `CTRL+N` | New file (clears the buffer) |
-| `CTRL+R` | Run Script (shortcut for `F8 → Run Script`) |
-| `TAB` | Cycle keyword completions |
-| Cursor keys | Navigate |
-| `INST/DEL` | Delete the character left of the cursor |
+| Key         | Action                                             |
+| ----------- | -------------------------------------------------- |
+| `F1`        | Settings — colors, data-drive number, cursor blink |
+| `F2`        | Page Up                                            |
+| `F3`        | Load a file (BASIC, assembly, or compiled ML)      |
+| `F4`        | Page Down                                          |
+| `F5`        | Save the current file                              |
+| `F6`        | Load a SEQ (plain text / source) file              |
+| `F7`        | Quit to BASIC                                      |
+| `F8`        | Open the module picker (see [Modules](#modules))   |
+| `CTRL+F`    | Find / replace                                     |
+| `CTRL+L`    | Force a full screen redraw                         |
+| `CTRL+N`    | New file (clears the buffer)                       |
+| `CTRL+R`    | Run Script (shortcut for `F8 → Run Script`)        |
+| `TAB`       | Cycle keyword completions                          |
+| Cursor keys | Navigate                                           |
+| `INST/DEL`  | Delete the character left of the cursor            |
 
 > ℹ️ The **program disk must stay in drive 8**; the data drive is configurable in
 > Settings (`F1`). If you try to do something destructive (new file, load, quit)
@@ -98,13 +98,13 @@ typing to write some BASIC.
 
 Reach these from the module picker (`F8`):
 
-| Module | Purpose |
-| --- | --- |
-| **Assemble** (MODASM) | Two-pass 6502 assembler — compiles the current buffer to ML |
-| **Disassemble** (MODDIS) | 6502 disassembler; runs automatically when loading an ML file |
-| **Renumber** (MODREN) | Renumbers BASIC lines and updates `GOTO`/`GOSUB` targets |
-| **Disk Utility** (MODDSK) | Directory browser, delete, rename, format, raw commands |
-| **Run Script** (MODSCT/MODSCR/MODSCRH) | Run BASIC automation scripts with extended keywords *(REU required)* |
+| Module                                 | Purpose                                                              |
+| -------------------------------------- | -------------------------------------------------------------------- |
+| **Assemble** (MODASM)                  | Two-pass 6502 assembler — compiles the current buffer to ML          |
+| **Disassemble** (MODDIS)               | 6502 disassembler; runs automatically when loading an ML file        |
+| **Renumber** (MODREN)                  | Renumbers BASIC lines and updates `GOTO`/`GOSUB` targets             |
+| **Disk Utility** (MODDSK)              | Directory browser, delete, rename, format, raw commands              |
+| **Run Script** (MODSCT/MODSCR/MODSCRH) | Run BASIC automation scripts with extended keywords _(REU required)_ |
 
 Search & replace (MODSFR) is available directly via `CTRL+F`.
 
@@ -143,28 +143,28 @@ python3 make_disk.py --build-dir build --name petproject --id pp petproject.d64
 
 **Editor core**
 
-| File | Description |
-| --- | --- |
-| `editor.asm` | Main editor: entry point, main loop, rendering, input |
-| `colorize.asm` | Syntax colorizer (included by `editor.asm`) |
-| `loadsave.asm` | File I/O (included by `editor.asm`) |
-| `modules.asm` | Module-loader framework (included by `editor.asm`) |
-| `petproject.cfg` | Linker config for the editor PRG |
+| File             | Description                                           |
+| ---------------- | ----------------------------------------------------- |
+| `editor.asm`     | Main editor: entry point, main loop, rendering, input |
+| `colorize.asm`   | Syntax colorizer (included by `editor.asm`)           |
+| `loadsave.asm`   | File I/O (included by `editor.asm`)                   |
+| `modules.asm`    | Module-loader framework (included by `editor.asm`)    |
+| `petproject.cfg` | Linker config for the editor PRG                      |
 
 **Modules**
 
-| File | Loads at | Description |
-| --- | --- | --- |
-| `modasm.asm` | `$A000` | Assembler |
-| `moddis.asm` | `$A000` | Disassembler |
-| `modren.asm` | `$C000` | Renumber |
-| `moddsk.asm` | `$C000` | Disk utility |
-| `modsfr.asm` | `$C000` | Search / replace |
-| `moddet.asm` | — | Detokenizer (hidden; runs on BASIC load) |
-| `modtok.asm` | — | Tokenizer (hidden; runs on BASIC save) |
-| `modsct.asm` | — | Script tokenizer (hidden; runs on Run Script) |
-| `modscr.asm` | `$A000` | Script runner stub |
-| `modscrh.asm` | `$C000` | Script handler (stays resident during scripts) |
+| File          | Loads at | Description                                    |
+| ------------- | -------- | ---------------------------------------------- |
+| `modasm.asm`  | `$A000`  | Assembler                                      |
+| `moddis.asm`  | `$A000`  | Disassembler                                   |
+| `modren.asm`  | `$C000`  | Renumber                                       |
+| `moddsk.asm`  | `$C000`  | Disk utility                                   |
+| `modsfr.asm`  | `$C000`  | Search / replace                               |
+| `moddet.asm`  | —        | Detokenizer (hidden; runs on BASIC load)       |
+| `modtok.asm`  | —        | Tokenizer (hidden; runs on BASIC save)         |
+| `modsct.asm`  | —        | Script tokenizer (hidden; runs on Run Script)  |
+| `modscr.asm`  | `$A000`  | Script runner stub                             |
+| `modscrh.asm` | `$C000`  | Script handler (stays resident during scripts) |
 
 **Linker configs:** `module.cfg` (default `$C000`), `modasm.cfg` (`$A000`),
 `moddis.cfg`, `modsfr.cfg`, `modscr.cfg`, `modsct.cfg`.

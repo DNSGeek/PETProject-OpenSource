@@ -1,0 +1,53 @@
+name: Release
+
+# Push a version tag (e.g. `git tag v0.2 && git push origin v0.2`) to build
+# the disk image with cc65 and publish it as a GitHub Release.  Releases are
+# permanent and publicly downloadable (unlike CI artifacts, which expire and
+# require a GitHub login), with a stable URL per version:
+#   https://github.com/DNSGeek/PETProject-OpenSource/releases/download/<tag>/petproject-<tag>.d64
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install cc65 toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cc65
+
+      - name: Build editor, modules, and disk image
+        run: bash make_petproject.sh
+
+      - name: Verify build outputs
+        run: |
+          set -e
+          test -s petproject.d64
+          test -s build/editor.prg
+          for m in modasm moddet moddis moddsk modren modtok modsfr modsct modscr modscrh; do
+            test -s "build/${m}.prg"
+          done
+          echo "All PRGs and the disk image are present."
+
+      - name: Stamp versioned disk image
+        run: cp petproject.d64 "petproject-${GITHUB_REF_NAME}.d64"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: PETProject ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            petproject-${{ github.ref_name }}.d64
+            petproject.d64

@@ -178,10 +178,16 @@ sfr_loop:
     jsr sfr_do_return
     jmp sfr_loop
 @t5:
+    ; Accept printable PETSCII: $20-$7F and $A0-$FF.  Only $80-$9F are
+    ; control codes (F-keys, colors).  The buffer legitimately contains
+    ; shifted letters/graphics >= $A0, so they must be searchable.
     cmp #$20
     bcc sfr_loop            ; control chars — ignore
     cmp #$80
-    bcs sfr_loop            ; high PETSCII (function keys etc.) — ignore
+    bcc @typeable           ; $20-$7F: printable
+    cmp #$A0
+    bcc sfr_loop            ; $80-$9F: function keys etc. — ignore
+@typeable:
     jsr sfr_type_char
     jmp sfr_loop
 
@@ -768,12 +774,25 @@ sfr_vbyte:
 ; sfr_fold — PETSCII lowercase→uppercase for case-insensitive compare
 ; =============================================================================
 sfr_fold:
+    ; Case-insensitive fold to the $41-$5A range.  Two letter encodings
+    ; exist in PETSCII: $61-$7A (ASCII-style lowercase alias) and $C1-$DA
+    ; (SHIFT+letter as stored by the editor — the normal way uppercase
+    ; glyphs appear in the lowercase charset).  The old fold handled only
+    ; $61-$7A, so case-insensitive search never matched shifted text.
     cmp #$61
-    bcc @done
+    bcc @try_shifted
     cmp #$7B
     bcs @done
     sec
-    sbc #$20
+    sbc #$20                ; $61-$7A → $41-$5A
+    rts
+@try_shifted:
+    cmp #$C1
+    bcc @done
+    cmp #$DB
+    bcs @done
+    sec
+    sbc #$80                ; $C1-$DA → $41-$5A
 @done:
     rts
 
@@ -874,15 +893,25 @@ sfr_draw_toggle:
 ;   $40-$5F: subtract $40  (A-Z → screen codes $01-$1A)
 ;   $60-$7F: subtract $20  (a-z → screen codes $41-$5A in lowercase charset)
 sfr_pet2scr:
+    ; Full printable-PETSCII → screen-code mapping.  The input filter
+    ; blocks $00-$1F and $80-$9F, so those ranges can't reach us.
     cmp #$40
     bcc @done               ; $20-$3F: already correct
     cmp #$60
-    bcs @lo
-    sec                     ; $40-$5F: subtract $40
+    bcc @sub40              ; $40-$5F: subtract $40
+    cmp #$80
+    bcc @sub20              ; $60-$7F: subtract $20
+    cmp #$C0
+    bcc @sub40              ; $A0-$BF: graphics, subtract $40
+    sec                     ; $C0-$FF: shifted letters/graphics, subtract $80
+    sbc #$80
+    rts
+@sub40:
+    sec
     sbc #$40
     rts
-@lo:
-    sec                     ; $60-$7F: subtract $20
+@sub20:
+    sec
     sbc #$20
 @done:
     rts

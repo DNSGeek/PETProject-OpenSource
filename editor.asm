@@ -371,10 +371,17 @@ main_loop:
     jsr do_run_script
     jmp main_loop
 @try_insert:
-    cmp #$80                       ; reject PETSCII >= $80 (token bytes)
-    bcs @unhandled
-    cmp #$20                       ; reject control chars below $20
-    bcc @unhandled
+    ; Printable PETSCII is $20-$7F and $A0-$FF.  Only $00-$1F and $80-$9F
+    ; (F-keys, color/control codes) are non-text.  Shifted letters and
+    ; graphics ($C1-$DA etc.) are >= $A0 — the renderer already displays
+    ; them, so the keyboard path must allow typing them too.
+    cmp #$20
+    bcc @unhandled                 ; < $20: control chars
+    cmp #$80
+    bcc @insert_ok                 ; $20-$7F: printable
+    cmp #$A0
+    bcc @unhandled                 ; $80-$9F: F-keys / control codes
+@insert_ok:
     ; ---- Printable insert fast path ----
     ; A printable char only changes the current line. Snapshot the viewport
     ; origin, insert, reposition the cursor, and if the viewport did NOT scroll
@@ -511,6 +518,11 @@ main_loop:
     jmp main_loop                   ; user cancelled — back to editing
 
 @quit_now:
+    ; Restore default key-repeat before leaving: BASIC cold start does not
+    ; touch RPTFLG, so our $80 (all keys repeat) would leak into the
+    ; user's BASIC session permanently.
+    lda #0
+    sta RPTFLG
     ; Clear screen before handing back to BASIC.
     lda #$93                        ; PETSCII clear-screen character
     jsr $FFD2                       ; CHROUT
@@ -2392,7 +2404,11 @@ ensure_cursor_visible:
     sta WORK_PTR
     lda GAP_START+1
     sta WORK_PTR+1
-    lda #(CONTENT_ROWS - 1)
+    ; Count CONTENT_ROWS CRs back (not CONTENT_ROWS-1): after the k-th CR,
+    ; one-past-it is the start of line L-k+1, so a counter of ROWS-1 put
+    ; the cursor on row ROWS-2 and crossing the bottom edge visibly jumped
+    ; the viewport two lines instead of scrolling one.
+    lda #CONTENT_ROWS
     sta TMP+1               ; TMP+1: line counter (this routine uses TMP lo only)
 @cb_back:
     lda WORK_PTR            ; at BOF?

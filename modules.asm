@@ -97,6 +97,10 @@ MPOP_ITEM_ROW0   = (MPOP_TOP + 3)   ; screen row of first item (title at TOP+1, 
 ; operation failed.  Kernal LOAD does not touch $0228/$0229.
 MOD_LOAD_SAVE_LO = $0228
 MOD_LOAD_SAVE_HI = $0229
+; Index of the most recently run module — lets mpop_show_error honor
+; MODASM's rich-error flag ($C007) only when MODASM actually ran.
+MOD_LAST_IDX     = $022A
+MOD_IDX_MODASM   = 0
 
 ; ============================================================================
 ; Module table — filenames and description strings
@@ -481,10 +485,11 @@ mpop_draw_item:
     ; LPTR index via a separate counter in X (reuse X, we're done with item index for now)
     ldx #0
 @desc_loop:
-    lda (LPTR,x)                    ; read desc byte — X=0 so this is (LPTR),0
-    ; ca65: (LPTR,x) with X=0 is indexed indirect, not what we want.
-    ; Use (LPTR),y won't work since Y is the screen col.
-    ; Solution: use a temp register. Save Y, use Y=0 to read, restore Y.
+    ; Y is the screen column, so it can't index the string read.  Save Y,
+    ; read via (LPTR),0, restore Y.  (A leftover `lda (LPTR,x)` used to
+    ; sit here: X holds the PREVIOUS character after the first iteration,
+    ; so it dereferenced a random ZP pointer every loop — a read landing
+    ; on $DC0D/$DD0D would clear pending CIA interrupt flags.)
     sty MOD_TMP                     ; save screen col in MOD_TMP
     ldy #0
     lda (LPTR),y                    ; read next desc byte
@@ -598,6 +603,7 @@ run_module_by_index:
 
     ; Save module index — we need it again after SETLFS clobbers X.
     stx MOD_TMP
+    stx MOD_LAST_IDX            ; remembered for error display (see mpop_show_error)
 
     ; Stash module load address in the param area ($0228/$0229) — safe
     ; across kernal LOAD, and unlike the old $38/$39 home it doesn't
@@ -719,7 +725,11 @@ run_sel_loaded:
     sta $01
 @no_page_out:
     jsr mod_call_trampoline
-    lda LPTR+1
+    ; Decide the bank restore from OUR stash ($0229), not LPTR: LPTR is
+    ; editor zero page that the module just had full control over, and a
+    ; clobbered $16 here would silently skip the restore and leave BASIC
+    ; ROM banked out for the rest of the session.
+    lda MOD_LOAD_SAVE_HI
     cmp #$A0
     bne @no_page_in
     lda #$37                ; normal: BASIC ROM, Kernal ROM, I/O
@@ -802,6 +812,11 @@ run_sel_loaded:
 
 run_sel_load_err:
     jsr mpop_show_load_error
+    ; Mark the failure as already-reported: leaving MOD_STATUS at $FF made
+    ; run_selected_module's @check_err stack a second blocking "MODULE
+    ; ERROR" message right after "MODULE NOT FOUND".
+    lda #$00
+    sta MOD_STATUS
     rts
 
 ; ============================================================================
@@ -810,10 +825,17 @@ run_sel_load_err:
 
 mpop_show_error:
     ; If MODASM set ASM_ERR ($C007=$FF), show rich "ERR NNNN: MSGTEXT" display.
-    ; Other modules don't touch $C007, so $FF unambiguously means MODASM failed.
+    ; Gate on "MODASM was the module that just ran": five other modules
+    ; LOAD at $C000, so $C007 is one of THEIR code bytes — a coincidental
+    ; $FF there (or a stale flag from an earlier MODASM failure) used to
+    ; display garbage as a rich assembler error for unrelated failures.
+    lda MOD_LAST_IDX
+    cmp #MOD_IDX_MODASM
+    bne @generic
     lda $C007                       ; ASM_ERR flag written by MODASM's set_err_common
     cmp #$FF
     beq asm_show_err                ; MODASM error → rich display, includes wait
+@generic:
     ; Generic "MODULE ERROR" for all other module failures
     ldy #0
 @wr:

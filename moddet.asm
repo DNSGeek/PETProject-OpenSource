@@ -16,7 +16,7 @@
 ;         * Byte $80-$CB → look up keyword in ROM table at $A09E and emit.
 ;         * Byte > $CB   → emit as-is (shouldn't appear in BASIC 2.0).
 ;     - Emit $0D (CR) after each line.
-;   When done, copy staging area back to MOD_BUF and report MOD_STATUS=$02.
+;   When done, report MOD_STATUS=$02 (output was streamed in place).
 ;
 ; ROM keyword table ($A09E):
 ;   Contiguous keyword strings, last char of each has bit 7 set.
@@ -26,16 +26,16 @@
 ;
 ; Zero page used (free during our execution):
 ;   $FB/$FC — SRC_PTR:  walks tokenized source
-;   $FD/$FE — DST_PTR:  walks staging area
+;   $FD/$FE — DST_PTR:  output write pointer (streams into MOD_BUF)
 ;   $F7/$F8 — COPY_SRC: copy-back loop source pointer
 ;   $F9/$FA — COPY_DST: copy-back loop dest pointer
 ;   $3A/$3B — LINENO:   16-bit line number value (modified by decimal output)
 ;   $3C     — NZFLAG:   non-zero digit seen flag (decimal output)
 ;   $3D/$3E — KWTAB:    keyword table walker pointer
 ;
-; Staging buffer: $C300-$CFFF (3.25K) — output written here, then copied
-; back.  Code+data must fit in $C000-$C2FF.  Output larger than staging
-; aborts with MOD_STATUS=$01 (buffer left untouched) — see emit_byte.
+; Streaming: input relocated to the top of work_buf, output written in
+; place from MOD_BUF up (see the STREAMING MODEL note below).  A listing
+; larger than the buffer aborts with MOD_STATUS=$01 — see emit_byte.
 ; ============================================================================
 
 .setcpu "6502"
@@ -61,23 +61,23 @@ MOD_MAGIC_VAL    = $4D
 
 ; ---- Zero page -------------------------------------------------------------
 SRC_PTR          = $FB              ; source walk pointer (lo/hi)
-DST_PTR          = $FD              ; staging write pointer (lo/hi)
+DST_PTR          = $FD              ; output write pointer (lo/hi)
 COPY_SRC         = $F7              ; copy-back source (lo/hi)
 COPY_DST         = $F9              ; copy-back dest  (lo/hi)
 LINENO           = $3A              ; 16-bit line number scratch (lo/hi)
 NZFLAG           = $3C              ; non-zero digit seen (decimal output)
 KWTAB            = $3D              ; keyword table walker (lo/hi)
-OVFLAG           = $3F              ; staging overflow flag ($FF = overflowed)
+OVFLAG           = $3F              ; output-overflow flag ($FF = won't fit)
 
 
 
-; STAGING must start after the code+kwtab — $C300 gives page alignment and
-; margin.  STAGING_END is the first address staging may NOT touch: $D000 is
-; the I/O area while the module runs with $01=$37, so an unchecked write
-; there sprays VIC/SID/CIA registers.  emit_byte enforces this bound; on
-; overflow the module reports MOD_STATUS=$01 and leaves MOD_BUF untouched.
-STAGING          = $C300
-STAGING_END      = $D000
+; STREAMING MODEL (no staging buffer): the tokenized input is relocated to
+; the TOP of work_buf with a descending copy, then detokenized forward
+; with output written from MOD_BUF up.  emit_byte keeps the output
+; strictly below SRC_PTR, so a collision can only mean the listing
+; doesn't fit the 24 KB buffer at all — reported as MOD_STATUS=$01.
+; This replaces the old 3.25 KB module-RAM staging buffer (which capped
+; loadable BASIC programs at ~3 KB) and its copy-back pass.
 
 ; ============================================================================
 
@@ -100,10 +100,63 @@ detokenize:
     jmp @bad
 @magic_ok:
 
-    ; SRC_PTR = MOD_BUF (start of buffer)
-    lda MOD_BUF_LO
+    ; ---- Relocate the tokenized input to the top of the buffer ----
+    ; len = MOD_GAP_START - MOD_BUF (the loader set GAP_START to one past
+    ; the loaded data); reloc = MOD_BUF_END - len.  Detokenized output is
+    ; then written forward from MOD_BUF, kept strictly below SRC_PTR by
+    ; emit_byte — output can only collide with input if the result
+    ; genuinely doesn't fit the 24 KB buffer.
+    lda MOD_GAP_START_LO
+    sec
+    sbc MOD_BUF_LO
+    sta LINENO                  ; len lo (LINENO free until line parsing)
+    lda MOD_GAP_START_HI
+    sbc MOD_BUF_HI
+    sta LINENO+1                ; len hi
+    lda MOD_BUF_END_LO
+    sec
+    sbc LINENO
+    sta det_reloc_lo
+    lda MOD_BUF_END_HI
+    sbc LINENO+1
+    sta det_reloc_hi
+
+    ; Descending copy [MOD_BUF..MOD_BUF+len) -> [reloc..MOD_BUF_END);
+    ; regions overlap whenever len > free space, so copy last byte first.
+    lda MOD_GAP_START_LO
+    sta COPY_SRC
+    lda MOD_GAP_START_HI
+    sta COPY_SRC+1
+    lda MOD_BUF_END_LO
+    sta COPY_DST
+    lda MOD_BUF_END_HI
+    sta COPY_DST+1
+@reloc_loop:
+    lda LINENO
+    ora LINENO+1
+    beq @reloc_done
+    lda COPY_SRC
+    bne :+
+    dec COPY_SRC+1
+:   dec COPY_SRC
+    lda COPY_DST
+    bne :+
+    dec COPY_DST+1
+:   dec COPY_DST
+    ldy #0
+    lda (COPY_SRC),y
+    sta (COPY_DST),y
+    lda LINENO
+    bne :+
+    dec LINENO+1
+:   dec LINENO
+    jmp @reloc_loop
+@reloc_done:
+
+    ; SRC_PTR = relocated input
+    lda det_reloc_lo
     sta SRC_PTR
-    lda MOD_BUF_HI
+    lda det_reloc_hi
     sta SRC_PTR+1
 
     ; PRG header detection: if buf[0..1] (as 16-bit LE) < MOD_BUF address,
@@ -126,10 +179,10 @@ detokenize:
     jsr inc_src_ptr
 @no_header:
 
-    ; DST_PTR = STAGING
-    lda #<STAGING
+    ; Output streams in place, from the bottom of the caller's buffer.
+    lda MOD_BUF_LO
     sta DST_PTR
-    lda #>STAGING
+    lda MOD_BUF_HI
     sta DST_PTR+1
     lda #0
     sta OVFLAG
@@ -139,11 +192,11 @@ detokenize:
 ; ============================================================================
 
 @line_loop:
-    ; Bounds check
+    ; Bounds check — the relocated input ends exactly at MOD_BUF_END
     lda SRC_PTR
-    cmp MOD_GAP_START_LO
+    cmp MOD_BUF_END_LO
     lda SRC_PTR+1
-    sbc MOD_GAP_START_HI
+    sbc MOD_BUF_END_HI
     bcs @all_done
 
     ; Check for end-of-program sentinel ($0000 link word)
@@ -236,59 +289,21 @@ detokenize:
     jmp @line_loop
 
 ; ============================================================================
-; @all_done — copy staging area back to MOD_BUF
+; @all_done — finish up (output already in place)
 ; ============================================================================
 
 @all_done:
-    ; If staging overflowed, the output is truncated — do NOT copy it back
-    ; over the caller's buffer.  Report an error and leave MOD_BUF intact.
+    ; Output streamed in place — nothing to copy on success.  On overflow
+    ; (the listing wouldn't fit the 24 KB buffer) the buffer holds a
+    ; truncated listing; nothing is lost — the input was a just-loaded
+    ; file that is still on disk — and the caller reports the error.
     lda OVFLAG
     beq @no_overflow
     jmp @bad
 @no_overflow:
-
-    ; COPY_SRC = STAGING (start of staging output)
-    lda #<STAGING
-    sta COPY_SRC
-    lda #>STAGING
-    sta COPY_SRC+1
-
-    ; COPY_DST = MOD_BUF (where to copy back to)
-    lda MOD_BUF_LO
-    sta COPY_DST
-    lda MOD_BUF_HI
-    sta COPY_DST+1
-
-    ; Copy until COPY_SRC reaches DST_PTR (the staging write head).
-    ; Fix: compare COPY_SRC (not COPY_DST) against DST_PTR.
-    ; Both start at STAGING and track the output head, so this terminates
-    ; correctly regardless of where MOD_BUF lives in memory.
-@copy:
-    lda COPY_SRC
-    cmp DST_PTR
-    bne @copy_byte
-    lda COPY_SRC+1
-    cmp DST_PTR+1
-    beq @copy_done
-
-@copy_byte:
-    ldy #0
-    lda (COPY_SRC),y
-    sta (COPY_DST),y
-    ; Advance both pointers
-    inc COPY_SRC
-    bne :+
-    inc COPY_SRC+1
-:   inc COPY_DST
-    bne @copy
-    inc COPY_DST+1
-    jmp @copy
-
-@copy_done:
-    ; Report new buffer end (COPY_DST = MOD_BUF + bytes_written)
-    lda COPY_DST
+    lda DST_PTR
     sta MOD_NEW_END_LO
-    lda COPY_DST+1
+    lda DST_PTR+1
     sta MOD_NEW_END_HI
     lda #$02                    ; MOD_STATUS: buffer replaced
     sta MOD_STATUS
@@ -300,7 +315,7 @@ detokenize:
     rts
 
 ; ============================================================================
-; emit_lineno — write LINENO (16-bit) as decimal digits to staging.
+; emit_lineno — write LINENO (16-bit) as decimal digits to the output.
 ;
 ; Uses subtract-and-count with powers of 10.
 ; Suppresses leading zeros (always emits the units digit).
@@ -605,16 +620,22 @@ kwtab:
 
 ; ============================================================================
 ; emit_byte — write A to (DST_PTR), advance DST_PTR.
-; Bounds-checked: at STAGING_END the byte is dropped and OVFLAG is set —
-; without this, output longer than staging (any BASIC program over ~3 KB)
-; would write straight through the $D000 I/O registers.
+; Bounds-checked: output must stay strictly BELOW SRC_PTR (the unread part
+; of the relocated input).  Since the input is consumed as the output
+; grows, a collision means the detokenized listing genuinely cannot fit
+; the 24 KB buffer.  The byte is dropped and OVFLAG is set.
 ; Clobbers: Y
 ; ============================================================================
 
 emit_byte:
     ldy DST_PTR+1
-    cpy #>STAGING_END
+    cpy SRC_PTR+1
+    bcc @ok
+    bne @overflow
+    ldy DST_PTR
+    cpy SRC_PTR
     bcs @overflow
+@ok:
     ldy #0
     sta (DST_PTR),y
     inc DST_PTR
@@ -652,6 +673,9 @@ inc_kwtab:
 in_string:
     .byte 0
 
-; Link-time guard: the module's code+data must end below the staging
-; buffer, or detokenized output overwrites the module itself.
-.assert * <= STAGING, error, "moddet code overlaps STAGING buffer"
+; det_reloc — start of the relocated tokenized input at the top of
+; work_buf (= MOD_BUF_END - input length)
+det_reloc_lo:
+    .byte 0
+det_reloc_hi:
+    .byte 0

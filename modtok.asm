@@ -56,7 +56,10 @@ DST_PTR         = $FD   ; lo (hi at $FE)
 OVFLAG          = $FF   ; staging overflow flag ($FF = overflowed)
 
 BASIC_START     = $0801
-STAGING         = $C400
+; STAGING must start above the end of the module's code+data — the .assert
+; at the end of this file enforces that at link time.  ($C400 stopped being
+; safe the moment the code grew past it.)
+STAGING         = $C480
 ; First address staging may NOT touch: $D000 is the I/O area while the
 ; module runs, so an unchecked write there sprays VIC/SID/CIA registers.
 STAGING_END     = $D000
@@ -203,6 +206,7 @@ tokenize:
     lda #0
     sta IN_STRING
     sta AFTER_REM
+    sta after_data
 
 ; ============================================================================
 ; @token_loop
@@ -211,8 +215,9 @@ tokenize:
 @token_loop:
     ldy #0
     lda (SRC_PTR),y
-    beq @eof_line               ; source ended mid-line — close the line first
-    cmp #$0D
+    bne :+
+    jmp @eof_line               ; source ended mid-line — close the line first
+:   cmp #$0D
     beq @end_line
 
     lda AFTER_REM
@@ -235,15 +240,45 @@ tokenize:
     lda IN_STRING
     bne @literal
 
+    ; DATA statements: real CRUNCH copies everything after DATA literally
+    ; until ':' (outside quotes) or end of line.  Tokenizing here corrupts
+    ; the data — "DATA MONDAY" LISTs fine but READs garbage token bytes.
+    lda after_data
+    beq @not_data
+    ldy #0
+    lda (SRC_PTR),y
+    cmp #':'
+    bne @literal                ; still inside the DATA item list
+    lda #0
+    sta after_data              ; ':' ends the statement...
+    jmp @literal                ; ...and is itself emitted literally
+@not_data:
+
+    ; '?' is BASIC shorthand for PRINT — CRUNCH tokenizes it to $99.
+    ; Left literal it would be a runtime SYNTAX ERROR.
+    ldy #0
+    lda (SRC_PTR),y
+    cmp #'?'
+    bne @not_qmark
+    jsr inc_src_ptr
+    lda #$99                    ; PRINT token
+    jsr emit_byte
+    jsr inc_basic_addr
+    jmp @token_loop
+@not_qmark:
+
     jsr try_keyword
     bcc @literal
 
     ; keyword matched: A = token, SRC_PTR advanced
-    cmp #$8F
+    cmp #$8F                    ; REM — rest of LINE is literal
     bne :+
-    lda #$FF
-    sta AFTER_REM
-    lda #$8F
+    ldx #$FF
+    stx AFTER_REM
+:   cmp #$83                    ; DATA — rest of STATEMENT is literal
+    bne :+
+    ldx #$FF
+    stx after_data
 :   jsr emit_byte
     jsr inc_basic_addr
     jmp @token_loop
@@ -478,6 +513,10 @@ inc_src_ptr:
     inc SRC_PTR+1
 :   rts
 
+; after_data — $FF while inside a DATA statement (module RAM; ZP is full)
+after_data:
+    .byte 0
+
 ; ============================================================================
 ; kwtab — longest-first. [token][chars, last|$80] ... $FF sentinel
 ; ============================================================================
@@ -573,3 +612,7 @@ kwtab:
     .byte $B1,$BE                           ; >       (1)
     .byte $AE,$DE                           ; ^       (1)
     .byte $FF                               ; sentinel
+
+; Link-time guard: the module's code+data must end below the staging
+; buffer, or tokenized output overwrites the module itself.
+.assert * <= STAGING, error, "modtok code overlaps STAGING buffer"

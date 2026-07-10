@@ -90,10 +90,13 @@ MPOP_WIDTH       = 36                ; inner width (cols 2..38, bars at 1 and 39
 MPOP_INNER_LEFT  = 2                 ; first text column inside box
 MPOP_NUM_ITEMS   = 5
 MPOP_ITEM_ROW0   = (MPOP_TOP + 3)   ; screen row of first item (title at TOP+1, blank at TOP+2)
-; Module load-address holding bytes — survive across kernal LOAD.
-; These are normal ZP locations not touched by LOAD's internal use.
-MOD_LOAD_SAVE_LO = $38
-MOD_LOAD_SAVE_HI = $39
+; Module load-address stash.  Lives in the $0212-$02xx param area, NOT in
+; zero page: the old home ($38/$39) sat on BASIC's MEMSIZ hi byte and
+; CURLIN lo byte — MEMSIZ feeds FRETOP on CLR, so the script runner's
+; BASIC handoff inherited a garbage string-heap top and the first string
+; operation failed.  Kernal LOAD does not touch $0228/$0229.
+MOD_LOAD_SAVE_LO = $0228
+MOD_LOAD_SAVE_HI = $0229
 
 ; ============================================================================
 ; Module table — filenames and description strings
@@ -596,9 +599,9 @@ run_module_by_index:
     ; Save module index — we need it again after SETLFS clobbers X.
     stx MOD_TMP
 
-    ; Stash module load address.  These two BSS bytes are NOT touched by
-    ; any kernal call (they live at $38/$39 = LPTR/WORK_PTR area; nothing
-    ; in kernal LOAD uses these specifically — they're our ZP).
+    ; Stash module load address in the param area ($0228/$0229) — safe
+    ; across kernal LOAD, and unlike the old $38/$39 home it doesn't
+    ; clobber BASIC's MEMSIZ/CURLIN zero-page bytes.
     lda mod_load_lo,x
     sta MOD_LOAD_SAVE_LO
     lda mod_load_hi,x

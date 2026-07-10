@@ -10,9 +10,9 @@
 ; Requires: REU (1700/1764/1750 or compatible). Errors without one.
 ;
 ; Memory layout while active:
-;   $A000-$AFFF : code + kwtab + include table ($A800) + REU param block ($A7F0)
+;   $A000-$AFFF : code + kwtab + linker-reserved scratch (REU param block,
+;                 include table — see the .res block at end of file)
 ;   $B000-$BFFF : staging buffer — tokenized output before DMA to REU
-;   $0801+      : include source load buffer (gap buffer, reused after tokenization)
 ;
 ; REU layout (linear addresses):
 ;   $000000-$003FFF : main tokenized script (up to 16KB)
@@ -121,32 +121,17 @@ SRC_PTR     = $FB   ; lo (hi=$FC) — source walker
 DST_PTR     = $FD   ; lo (hi=$FE) — staging output pointer
 OVFLAG      = $FF   ; staging overflow flag ($FF = overflowed, output invalid)
 
-; ---- Module RAM (not in binary — runtime use only) ----
-; These addresses fall within $A000-$BFFF but above the code.
-; ca65 does not emit data for them; they are used as scratch RAM.
-
-; REU parameter block — filled before each reu_exec call
-REU_PB_C64LO  = $A7F0
-REU_PB_C64HI  = $A7F1
-REU_PB_REULO  = $A7F2
-REU_PB_REUME  = $A7F3
-REU_PB_REUHI  = $A7F4
-REU_PB_LENLO  = $A7F5
-REU_PB_LENHI  = $A7F6
-REU_PB_CMD    = $A7F7
-
-; Include table: 16 entries × 14 bytes = 224 bytes
-INCL_TABLE    = $A800   ; [+0..7]=name(8), [+8..10]=REU addr(3), [+11..12]=len(2), [+13]=flags
+; ---- Module scratch RAM ----
+; The REU parameter block and include table are RESERVED INSIDE THE IMAGE
+; (see the .res block at the end of this file) instead of being fixed
+; addresses "above the code".  The fixed-address scheme already failed
+; once: the assembled binary grew past $A7F0 and the very first DMA
+; overwrote the tail of kwtab and its sentinel, corrupting every later
+; keyword lookup.  As linker-placed labels they can never overlap code,
+; and the module.cfg size limit plus the .assert below catch any growth.
+; INCL_ENTRY_SZ / INCL_MAX stay as constants:
 INCL_ENTRY_SZ = 14
 INCL_MAX      = 16
-INCL_COUNT    = $A8E0   ; 1 byte: number of entries in table
-INCL_POOL_LO  = $A8E1   ; 3 bytes: next free offset in REU include pool
-INCL_POOL_MED = $A8E2
-INCL_POOL_HI  = $A8E3
-INCL_FNAME    = $A8E4   ; 8-byte filename buffer (for current include lookup/store)
-INCL_FLEN     = $A8EC   ; 1 byte: current include filename length
-INCL_LOAD_LO  = $A8ED   ; load length lo
-INCL_LOAD_HI  = $A8EE   ; load length hi
 
 ; Script staging buffer: tokenized output before DMA to REU
 STAGING       = $B000   ; 4KB: $B000-$BFFF
@@ -409,14 +394,17 @@ tok_main_script:
     lda #0
     sta IN_STRING
     sta AFTER_REM
+    sta tok_after_data
 
 ; ---- @token_loop ----
 @token_loop:
     jsr tok_src_peek
-    beq @all_done
-    cmp #$0D
-    beq @end_line
-
+    bne :+
+    jmp @all_done
+:   cmp #$0D
+    bne :+
+    jmp @end_line
+:
     lda AFTER_REM
     bne @literal
 
@@ -437,19 +425,57 @@ tok_main_script:
     lda IN_STRING
     bne @literal
 
+    ; DATA statements: real CRUNCH copies everything after DATA literally
+    ; until ':' (outside quotes) or end of line.  Tokenizing here corrupts
+    ; the data — READ returns garbage token bytes at run time.
+    lda tok_after_data
+    beq @not_data
+    jsr tok_src_peek
+    cmp #':'
+    bne @literal                ; still inside the DATA item list
+    lda #0
+    sta tok_after_data          ; ':' ends the statement...
+    jmp @literal                ; ...and is itself emitted literally
+@not_data:
+
+    ; '?' is BASIC shorthand for PRINT — CRUNCH tokenizes it to $99.
+    jsr tok_src_peek
+    cmp #'?'
+    bne @not_qmark
+    jsr tok_src_advance
+    lda #$99                    ; PRINT token
+    jsr emit_byte
+    jsr inc_basic_addr
+    jmp @token_loop
+@not_qmark:
+
     ; Attempt keyword match
     jsr try_keyword
     bcc @literal
 
     ; Keyword matched: A = token
-    cmp #$8F              ; REM token — rest of line is literal
+    cmp #$CD              ; INCLUDE — not supported: the pipeline is
+    bne :+                ; unfinished and corrupted the IDE image, so
+    jmp @include_err      ; fail loudly at tokenize time instead
+:   cmp #$8F              ; REM token — rest of LINE is literal
     bne :+
-    lda #$FF
-    sta AFTER_REM
-    lda #$8F
+    ldx #$FF
+    stx AFTER_REM
+:   cmp #$83              ; DATA — rest of STATEMENT is literal
+    bne :+
+    ldx #$FF
+    stx tok_after_data
 :   jsr emit_byte
     jsr inc_basic_addr
     jmp @token_loop
+
+@include_err:
+    ; INCLUDE reached the interpreter only through this tokenizer, so
+    ; refusing it here fully disables the feature: scan_for_includes
+    ; never sees an INCLUDE token and phase 3 is a safe no-op.
+    jsr set_status_incl
+    sec
+    rts
 
 @literal:
     jsr tok_src_peek
@@ -1282,6 +1308,27 @@ msg_disk:
     ; "INCLUDE DISK ERR" in C64 screen codes
     .byte $09,$0E,$03,$0C,$15,$04,$05,$20,$04,$09,$13,$0B,$20,$05,$12,$12, 0
 
+set_status_incl:
+    ldy #0
+@wr:
+    lda msg_incl,y
+    beq @done
+    sta $0400,y
+    lda #2
+    sta $D800,y
+    iny
+    jmp @wr
+@done:
+    rts
+
+msg_incl:
+    ; "INCLUDE UNSUPPORTED" in C64 screen codes
+    .byte $09,$0E,$03,$0C,$15,$04,$05,$20,$15,$0E,$13,$15,$10,$10,$0F,$12,$14,$05,$04, 0
+
+; tok_after_data — $FF while inside a DATA statement
+tok_after_data:
+    .byte 0
+
 ; ============================================================================
 ; kwtab — extended keyword table, longest-first.
 ; Format: [token][chars, last char has bit 7 set] ... $FF sentinel
@@ -1421,3 +1468,33 @@ kwtab:
 ;   ca65 -g modsct.asm -o modsct.o
 ;   ld65 -C modsct.cfg modsct.o -o MODSCT
 ; ============================================================================
+
+; ============================================================================
+; Reserved scratch — linker-placed so it can never overlap code or tables.
+; (Runtime-only state; the .res bytes ship as zeroes in the PRG.)
+; ============================================================================
+
+; REU parameter block — filled before each reu_exec call
+REU_PB_C64LO: .res 1
+REU_PB_C64HI: .res 1
+REU_PB_REULO: .res 1
+REU_PB_REUME: .res 1
+REU_PB_REUHI: .res 1
+REU_PB_LENLO: .res 1
+REU_PB_LENHI: .res 1
+REU_PB_CMD:   .res 1
+
+; Include table: 16 entries × 14 bytes = 224 bytes
+; [+0..7]=name(8), [+8..10]=REU addr(3), [+11..12]=len(2), [+13]=flags
+INCL_TABLE:   .res INCL_ENTRY_SZ * INCL_MAX
+INCL_COUNT:   .res 1    ; number of entries in table
+INCL_POOL_LO: .res 1    ; next free offset in REU include pool (3 bytes)
+INCL_POOL_MED: .res 1
+INCL_POOL_HI: .res 1
+INCL_FNAME:   .res 8    ; filename buffer (current include lookup/store)
+INCL_FLEN:    .res 1    ; current include filename length
+INCL_LOAD_LO: .res 1    ; load length lo
+INCL_LOAD_HI: .res 1    ; load length hi
+
+; Link-time guard: everything above must end below the staging buffer.
+.assert * <= STAGING, error, "modsct code/scratch overlaps STAGING buffer"

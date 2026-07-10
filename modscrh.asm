@@ -46,6 +46,7 @@
 ; ---- BASIC ROM ----
 BASIC_NEWSTT    = $A7AE
 BASIC_GONE_ORIG = $A7E7
+BASIC_CHRGOT    = $0079   ; re-read current char; sets Z/C like CHRGET
 BASIC_GETBYT    = $B79E
 BASIC_TXTPTR    = $7A     ; lo; hi at $7B
 
@@ -243,13 +244,15 @@ hnd_dispatch:
     ; and desync TXTPTR. $A7E7 dispatches on the token in A and loops back
     ; to NEWSTT itself.
     ;
-    ; CRITICAL: $A7ED (reached from $A7E7) does `SBC #$80` to index the
-    ; statement-vector table, which requires CARRY SET for a correct subtract.
-    ; The stock entry guarantees this because CHRGET's tail leaves carry set.
-    ; Our range test above ended with `cmp #$D9 / bcs` leaving carry CLEAR for
-    ; an in-not-our-range token, which would make SBC subtract one too many and
-    ; dispatch the WRONG handler. Force carry set first.
-    sec
+    ; CRITICAL: $A7ED needs the FULL CHRGET flag contract, not just carry:
+    ; it opens with BEQ, taking the end-of-statement path when Z=1 (byte
+    ; is $00 or ':'), and its `SBC #$80` needs carry SET.  Our cmp
+    ; #$CC/#$D9 range tests destroyed both — a bare `sec` fixed carry but
+    ; left Z clear, so legal empty statements (a trailing ':', '::') fell
+    ; into the LET path and raised spurious SYNTAX ERRORs.  CHRGOT
+    ; re-reads the current char and re-derives Z and C exactly as CHRGET
+    ; would, without moving TXTPTR.
+    jsr BASIC_CHRGOT
     jmp BASIC_GONE_ORIG
 
 ; Handler jump table (13 entries, $CC-$D8)
@@ -349,6 +352,14 @@ hnd_error:
     ora hnd_onerr_hi
     beq @no_onerr           ; ONERR not set → restore IDE
 
+    ; Unwind the CPU stack to BASIC's steady-state baseline, exactly as
+    ; the stock error handler ($A67A) does.  Errors are raised deep inside
+    ; ROM evaluation via JMP ($0300), leaving JSR frames (plus FOR/GOSUB
+    ; entries) on the stack; without this a script retrying disk ops
+    ; through ONERR leaks stack every caught error until it wraps.
+    ldx #$FA
+    txs
+
     ; Walk the BASIC program looking for the target line number.
     ; Use HND_TMP as the scan pointer (ZP $3C/$3D).
     lda TXTTAB
@@ -374,15 +385,19 @@ hnd_error:
     cmp hnd_onerr_hi
     bne @next_line
 
-    ; Found the target line. Set TXTPTR = line_start + 3.
-    ; NEWSTT does CHRGET first (INC TXTPTR then LDA (TXTPTR),Y), so this
-    ; positions TXTPTR one byte before the first token (at lineno_hi).
+    ; Found the target line.  Resume via the GOTO convention:
+    ; TXTPTR = line_start - 1, pointing at the $00 terminator BEFORE the
+    ; line's link word.  NEWSTT does NOT CHRGET — it requires (TXTPTR) to
+    ; be $00 or ':'; on $00 it re-reads the link word and line number
+    ; itself (setting CURLIN) and dispatches from the first token.  The
+    ; old "+3 and let NEWSTT CHRGET" convention resumed 4 bytes inside
+    ; the statement for lines < 256 and SYNTAX-ERROR-looped for the rest.
     lda HND_TMP
-    clc
-    adc #3
+    sec
+    sbc #1
     sta BASIC_TXTPTR
     lda HND_TMP+1
-    adc #0
+    sbc #0
     sta BASIC_TXTPTR+1
     jmp BASIC_NEWSTT        ; resume script at the ONERR target line
 
@@ -1420,8 +1435,15 @@ bne @no_str  ; expect opening quote
     beq @end
     cmp #$22
     beq @end
+    ; hnd_cmd_buf is 64 bytes and handler code follows it in memory —
+    ; NEVER write past offset 63.  Longer literals (a 66+ char string
+    ; used to overwrite the dispatch routine itself) are truncated, but
+    ; TXTPTR still scans to the closing quote so parsing stays in sync.
+    cpx #64
+    bcs @no_store
     sta hnd_cmd_buf,x
     inx
+@no_store:
     inc BASIC_TXTPTR
     bne :+
     inc BASIC_TXTPTR+1

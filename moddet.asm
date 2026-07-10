@@ -178,6 +178,10 @@ detokenize:
     lda #$20
     jsr emit_byte
 
+    ; Quote mode resets at the start of every line (same as ROM LIST).
+    lda #0
+    sta in_string
+
 ; ============================================================================
 ; @token_loop — process token bytes until line terminator ($00)
 ; ============================================================================
@@ -187,6 +191,22 @@ detokenize:
     lda (SRC_PTR),y             ; read next byte
     beq @end_line               ; $00 = end of this line
     jsr inc_src_ptr             ; advance past the byte we just read
+
+    ; Quote tracking (same rule as ROM LIST): '"' toggles string mode, and
+    ; inside a string EVERY byte is literal.  String contents are stored as
+    ; raw PETSCII, and shifted letters/graphics are >= $80 — without this,
+    ; PRINT"<shift-A>" detokenized as PRINT"ATN"... and corrupted the text.
+    cmp #$22
+    bne @not_quote
+    pha
+    lda in_string
+    eor #$FF
+    sta in_string
+    pla
+    jmp @literal                ; the quote char itself is literal
+@not_quote:
+    ldx in_string
+    bne @literal                ; inside a string: emit untouched
 
     ; Token or literal char?
     cmp #$80
@@ -627,3 +647,11 @@ inc_kwtab:
     bne :+
     inc KWTAB+1
 :   rts
+
+; in_string — $FF while inside a "" string literal (module RAM; ZP is full)
+in_string:
+    .byte 0
+
+; Link-time guard: the module's code+data must end below the staging
+; buffer, or detokenized output overwrites the module itself.
+.assert * <= STAGING, error, "moddet code overlaps STAGING buffer"

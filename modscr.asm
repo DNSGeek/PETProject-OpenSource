@@ -82,6 +82,7 @@ KERNAL_SETMSG = $FF90 ; control Kernal messages
 KERNAL_CLRSCR = $E544 ; clear screen + home cursor (CLR/HOME routine)
 TXTTAB     = $2B      ; start of BASIC program (lo/hi)
 VARTAB     = $2D      ; start of variables = end of program (lo/hi)
+MEMSIZ     = $37      ; top of BASIC RAM (lo/hi) — CLR copies this to FRETOP
 
 ; ---- IDE snapshot bounds ----
 IDE_START  = $0801
@@ -176,6 +177,17 @@ execute:
     lda #>IDE_START
     adc sclen_hi
     sta VARTAB+1
+
+    ; MEMSIZ must be sane before the handoff stub's CLR runs: CLR copies
+    ; MEMSIZ to FRETOP (top of the string heap).  Nothing since the IDE
+    ; booted guarantees $37/$38 still hold a real value, and a garbage
+    ; heap top makes the script's first string operation fail or corrupt
+    ; zero page.  Scripts run with BASIC ROM banked in, so the top of
+    ; BASIC RAM is $A000.
+    lda #$00
+    sta MEMSIZ
+    lda #$A0
+    sta MEMSIZ+1
 
     ; Restore BASIC ROM and hand off.
     ;
@@ -277,6 +289,11 @@ stash_ide:
 ; ============================================================================
 
 deploy_script:
+    ; The TXTPTR = TXTTAB-1 convention (CLR, GOTO, and modscrh's ONERR
+    ; resume) requires the byte before the program — $0800 — to be $00.
+    ; BASIC cold start normally leaves it that way; guarantee it.
+    lda #0
+    sta IDE_START-1
     ldy #0
     sty REU_INTMASK
     sty REU_ADDCTL
@@ -362,6 +379,19 @@ verify_script:
     sta sclen_lo
     lda META_BUF+3
     sta sclen_hi
+    ; Sanity-clamp before this length drives a DMA over $0801+: stale REU
+    ; contents from an earlier session can still pass the 2-byte magic
+    ; check.  Valid script: >= 2 bytes (the $00 $00 end marker) and
+    ; <= $97FF (deploy window $0801-$9FFF).  Note an REU length of 0
+    ; would transfer 64 KB — over this module itself mid-handoff.
+    lda sclen_hi
+    cmp #$98
+    bcs @bad                ; > $97FF — overruns the deploy window
+    bne @len_ok             ; $01xx-$97xx — certainly >= 2
+    lda sclen_lo
+    cmp #2
+    bcc @bad                ; 0 or 1 bytes — no valid script is that small
+@len_ok:
     sec
     rts
 @bad:

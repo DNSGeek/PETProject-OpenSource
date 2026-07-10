@@ -25,8 +25,7 @@
 ;   $FF     = OVFLAG         ($FF = staging overflowed, output truncated)
 ;
 ; Lessons from moddet: PHA/PLA around JSR before branches. INC corrupts flags.
-; Advance SRC_PTR past CR before re-entering @line_loop. STAGING at $C300.
-; Copy loop compares COPY_SRC (not COPY_DST) against DST_PTR.
+; Advance SRC_PTR past CR before re-entering @line_loop.
 ; ============================================================================
 
 .setcpu "6502"
@@ -56,13 +55,14 @@ DST_PTR         = $FD   ; lo (hi at $FE)
 OVFLAG          = $FF   ; staging overflow flag ($FF = overflowed)
 
 BASIC_START     = $0801
-; STAGING must start above the end of the module's code+data — the .assert
-; at the end of this file enforces that at link time.  ($C400 stopped being
-; safe the moment the code grew past it.)
-STAGING         = $C480
-; First address staging may NOT touch: $D000 is the I/O area while the
-; module runs, so an unchecked write there sprays VIC/SID/CIA registers.
-STAGING_END     = $D000
+; STREAMING MODEL (no staging buffer): the source text is first relocated
+; to the TOP of work_buf with a descending copy, then tokenized forward
+; with output written from MOD_BUF up.  Output must stay strictly below
+; the relocated input (reloc_lo/hi); on violation the original text is
+; restored exactly from the untouched relocated copy and the module
+; errors out.  This replaces the old 3 KB module-RAM staging buffer and
+; its copy-back — capacity is now "text + tokenized output <= 24 KB"
+; (roughly a 13 KB source) instead of ~2.9 KB of output.
 
 .segment "LOADADDR"
     .word $C000
@@ -82,14 +82,65 @@ tokenize:
     jmp @bad
 :
 
-    lda MOD_BUF_LO
-    sta SRC_PTR
-    lda MOD_BUF_HI
-    sta SRC_PTR+1
+    ; ---- Relocate the source text to the top of the buffer ----
+    ; len = MOD_GAP_START - MOD_BUF (content is contiguous — the save path
+    ; ran compact_gap); reloc = MOD_BUF_END - len.
+    lda MOD_GAP_START_LO
+    sec
+    sbc MOD_BUF_LO
+    sta TMP16                   ; len lo
+    lda MOD_GAP_START_HI
+    sbc MOD_BUF_HI
+    sta TMP16+1                 ; len hi
+    lda MOD_BUF_END_LO
+    sec
+    sbc TMP16
+    sta reloc_lo
+    lda MOD_BUF_END_HI
+    sbc TMP16+1
+    sta reloc_hi
 
-    lda #<STAGING
+    ; Descending copy [MOD_BUF..MOD_BUF+len) -> [reloc..MOD_BUF_END).
+    ; Regions overlap whenever len > free space, so the copy must run
+    ; from the last byte down.  Pointers start one past their block.
+    lda MOD_GAP_START_LO
+    sta SRC_PTR
+    lda MOD_GAP_START_HI
+    sta SRC_PTR+1
+    lda MOD_BUF_END_LO
     sta DST_PTR
-    lda #>STAGING
+    lda MOD_BUF_END_HI
+    sta DST_PTR+1
+@reloc_loop:
+    lda TMP16
+    ora TMP16+1
+    beq @reloc_done
+    lda SRC_PTR
+    bne :+
+    dec SRC_PTR+1
+:   dec SRC_PTR
+    lda DST_PTR
+    bne :+
+    dec DST_PTR+1
+:   dec DST_PTR
+    ldy #0
+    lda (SRC_PTR),y
+    sta (DST_PTR),y
+    lda TMP16
+    bne :+
+    dec TMP16+1
+:   dec TMP16
+    jmp @reloc_loop
+@reloc_done:
+
+    ; ---- Stream: read from the relocated copy, write from MOD_BUF ----
+    lda reloc_lo
+    sta SRC_PTR
+    lda reloc_hi
+    sta SRC_PTR+1
+    lda MOD_BUF_LO
+    sta DST_PTR
+    lda MOD_BUF_HI
     sta DST_PTR+1
     lda #0
     sta OVFLAG
@@ -97,7 +148,7 @@ tokenize:
     lda #$01
     jsr emit_byte
     lda #$08
-    jsr emit_byte               ; PRG load address $0108... wait: $0801 lo=$01, hi=$08
+    jsr emit_byte               ; PRG load-address header: $0801 lo, hi
 
     lda #<BASIC_START
     sta BASIC_ADDR
@@ -109,10 +160,11 @@ tokenize:
 ; ============================================================================
 
 @line_loop:
+    ; Source is the relocated copy, which ends exactly at MOD_BUF_END.
     lda SRC_PTR
-    cmp MOD_GAP_START_LO
+    cmp MOD_BUF_END_LO
     lda SRC_PTR+1
-    sbc MOD_GAP_START_HI
+    sbc MOD_BUF_END_HI
     bcc :+
     jmp @all_done
 :
@@ -332,31 +384,32 @@ tokenize:
     jsr emit_byte
     jsr emit_byte               ; $00 $00 end-of-program
 
-    ; If staging overflowed, the output is truncated — do NOT copy it back
-    ; over the caller's plain-text buffer.  Report an error and leave
-    ; MOD_BUF intact (the caller keeps its untokenized text).
+    ; Output was written in place, so on success there is nothing to copy.
+    ; On overflow (output met the relocated source) the tokenized result is
+    ; truncated AND the low part of the original text was overwritten — but
+    ; the relocated copy above the collision point was never touched, so
+    ; the user's text can be restored exactly.
     lda OVFLAG
-    beq :+
-    jmp @bad
-:
-    ; copy staging → MOD_BUF
-    lda #<STAGING
+    beq @success
+
+    ; Restore text: ascending copy [reloc..MOD_BUF_END) -> MOD_BUF.
+    ; Moving DOWN in memory, so the forward copy is overlap-safe.
+    lda reloc_lo
     sta LINK_PTR
-    lda #>STAGING
+    lda reloc_hi
     sta LINK_PTR+1
     lda MOD_BUF_LO
     sta BASIC_ADDR
     lda MOD_BUF_HI
     sta BASIC_ADDR+1
-
-@copy:
+@rst:
     lda LINK_PTR
-    cmp DST_PTR
-    bne @copy_byte
+    cmp MOD_BUF_END_LO
+    bne @rst_byte
     lda LINK_PTR+1
-    cmp DST_PTR+1
-    beq @copy_done
-@copy_byte:
+    cmp MOD_BUF_END_HI
+    beq @rst_done
+@rst_byte:
     ldy #0
     lda (LINK_PTR),y
     sta (BASIC_ADDR),y
@@ -364,14 +417,16 @@ tokenize:
     bne :+
     inc LINK_PTR+1
 :   inc BASIC_ADDR
-    bne @copy
+    bne @rst
     inc BASIC_ADDR+1
-    jmp @copy
+    jmp @rst
+@rst_done:
+    jmp @bad                    ; text restored — report the error
 
-@copy_done:
-    lda BASIC_ADDR
+@success:
+    lda DST_PTR
     sta MOD_NEW_END_LO
-    lda BASIC_ADDR+1
+    lda DST_PTR+1
     sta MOD_NEW_END_HI
     lda #$02
     sta MOD_STATUS
@@ -515,15 +570,20 @@ inc_basic_addr:
 
 ; ============================================================================
 ; emit_byte — write A to (DST_PTR), advance DST_PTR. Clobbers Y.
-; Bounds-checked: at STAGING_END the byte is dropped and OVFLAG is set —
-; without this, output longer than staging (~3 KB of source) would write
-; straight through the $D000 I/O registers.
 ; ============================================================================
 
 emit_byte:
+    ; Output must stay strictly BELOW the relocated source text.  On
+    ; violation the byte is dropped, OVFLAG is set, and @all_done restores
+    ; the original text from the (never overwritten) relocated copy.
     ldy DST_PTR+1
-    cpy #>STAGING_END
+    cpy reloc_hi
+    bcc @ok
+    bne @overflow
+    ldy DST_PTR
+    cpy reloc_lo
     bcs @overflow
+@ok:
     ldy #0
     sta (DST_PTR),y
     inc DST_PTR
@@ -547,6 +607,13 @@ inc_src_ptr:
 
 ; after_data — $FF while inside a DATA statement (module RAM; ZP is full)
 after_data:
+    .byte 0
+
+; reloc — start of the relocated source text at the top of work_buf
+; (= MOD_BUF_END - text length); the output's hard ceiling.
+reloc_lo:
+    .byte 0
+reloc_hi:
     .byte 0
 
 ; ============================================================================
@@ -644,7 +711,3 @@ kwtab:
     .byte $B1,$BE                           ; >       (1)
     .byte $AE,$DE                           ; ^       (1)
     .byte $FF                               ; sentinel
-
-; Link-time guard: the module's code+data must end below the staging
-; buffer, or tokenized output overwrites the module itself.
-.assert * <= STAGING, error, "modtok code overlaps STAGING buffer"

@@ -10,9 +10,10 @@
 ; Requires: REU (1700/1764/1750 or compatible). Errors without one.
 ;
 ; Memory layout while active:
-;   $A000-$AFFF : code + kwtab + linker-reserved scratch (REU param block,
-;                 include table — see the .res block at end of file)
-;   $B000-$BFFF : staging buffer — tokenized output before DMA to REU
+;   $A000-$BFFF : code + kwtab + linker-reserved scratch (REU param block,
+;                 include table, streaming state — see end of file)
+;   work_buf    : source linearized at the top, tokenized output streamed
+;                 into the freed region, then the buffer restored exactly
 ;
 ; REU layout (linear addresses):
 ;   $000000-$003FFF : main tokenized script (up to 16KB)
@@ -133,9 +134,19 @@ OVFLAG      = $FF   ; staging overflow flag ($FF = overflowed, output invalid)
 INCL_ENTRY_SZ = 14
 INCL_MAX      = 16
 
-; Script staging buffer: tokenized output before DMA to REU
-STAGING       = $B000   ; 4KB: $B000-$BFFF
-STAGING_END   = $C000
+; STREAMING MODEL (live path no longer uses a staging buffer): the main
+; script's pre-gap text is linearized to the top of work_buf (modren-
+; style descending copy; post-gap is already in place), tokenized output
+; streams into the freed region from MOD_BUF up, is DMA'd to the REU
+; from there, and the pre-gap text is then restored exactly so the IDE
+; snapshot taken later by MODSCR sees the user's unmodified buffer.
+; Capacity: tokenized script <= free buffer space (the old staging
+; capped it at 4 KB regardless).
+;
+; STAGING is referenced only by the disabled INCLUDE machinery
+; (unreachable — INCLUDE errors out at tokenize time) and is kept solely
+; so that dead code still assembles.
+STAGING       = $B000   ; 4KB: $B000-$BFFF (dead include path only)
 
 ; Include source load buffer: reuse gap buffer area after main tokenization
 LOAD_BUF      = $0801
@@ -162,6 +173,12 @@ BASIC_START   = $0801
 tokenize:
     sei                          ; protect ZP and REU setup from IRQ
 
+    ; sct_restore must be safe on every exit path, including ones that
+    ; run before the linearization — start with "nothing to restore".
+    lda #0
+    sta sct_pre_lo
+    sta sct_pre_hi
+
     lda MOD_MAGIC
     cmp #MOD_MAGIC_VAL
     beq :+
@@ -182,8 +199,8 @@ tokenize:
     lda #REU_IPOOL_HI
     sta INCL_POOL_HI
 
-    ; ---- Phase 1: tokenize main script to STAGING ----
-    jsr tok_main_script          ; tokenizes gap buffer → STAGING; sets TMP16=length
+    ; ---- Phase 1: tokenize main script (streamed in work_buf) ----
+    jsr tok_main_script          ; output at MOD_BUF; sets TMP16=length
     bcc :+
     jmp @err_bad                 ; tokenization error (shouldn't normally happen)
 
@@ -193,10 +210,18 @@ tokenize:
     lda TMP16+1
     sta tok_sclen_hi
 
-    ; ---- Phase 2: DMA staging → REU script slot ----
-    lda #<STAGING
+    ; The REU script slot is 16 KB ($000000-$003FFF); the include pool
+    ; starts at $004000.  The streamed output can now legitimately exceed
+    ; that, so enforce it here.
+    lda tok_sclen_hi
+    cmp #$40
+    bcc :+
+    jmp @err_bad
+:
+    ; ---- Phase 2: DMA the in-place output → REU script slot ----
+    lda MOD_BUF_LO
     sta REU_PB_C64LO
-    lda #>STAGING
+    lda MOD_BUF_HI
     sta REU_PB_C64HI
     lda #REU_SCRIPT_LO
     sta REU_PB_REULO
@@ -211,37 +236,34 @@ tokenize:
     lda #REU_CMD_STASH
     jsr reu_exec
 
-    ; ---- Phase 3: scan staging for INCLUDE tokens, process each ----
-    ; STAGING still has the tokenized main script; scan it in C64 RAM.
-    jsr scan_for_includes
-    bcc :+
-    jmp @err_disk               ; disk error loading an include
+    ; ---- Phase 3 (include scan) removed: INCLUDE is refused at tokenize
+    ; time, so no $CD token can exist in the output.  INCL_COUNT stays 0
+    ; and write_include_table below records an empty table.
 
-:   ; ---- Phase 4: write include table and metadata to REU ----
+    ; ---- Phase 4: write include table and metadata to REU ----
     jsr write_include_table
     jsr write_metadata
 
-    ; Success
+    ; Success — put the user's text back before returning (MODSCR
+    ; snapshots the buffer to the REU after we return).
+    jsr sct_restore
     cli
     lda #$05                    ; MOD_STATUS $05 = script tokenized to REU
     sta MOD_STATUS
     rts
 
 @err_noreu:
+    ; (reu_detect runs before any relocation; sct_restore is a safe no-op
+    ; because sct_pre was zeroed at entry)
+    jsr sct_restore
     cli
     jsr set_status_noreu
     lda #$01
     sta MOD_STATUS
     rts
 
-@err_disk:
-    cli
-    jsr set_status_disk
-    lda #$01
-    sta MOD_STATUS
-    rts
-
 @err_bad:
+    jsr sct_restore
     cli
     lda #$01
     sta MOD_STATUS
@@ -252,45 +274,92 @@ tok_sclen_lo: .byte 0
 tok_sclen_hi: .byte 0
 
 ; ============================================================================
-; tok_main_script — tokenize gap buffer to STAGING.
+; tok_main_script — tokenize the gap buffer, streaming in work_buf.
 ; Source: MOD_BUF_LO/HI .. MOD_GAP_START_LO/HI (text before gap = all content).
-; Output: STAGING contains tokenized BASIC (no PRG load-address header).
+; Output: tokenized BASIC at [MOD_BUF..DST_PTR) (no PRG load-address
+; header).  Caller must run sct_restore before returning to the editor.
 ;         TMP16 = byte count of tokenized output.
 ; C=0 on success, C=1 on error.
 ; ============================================================================
 
 tok_main_script:
-    ; Source: gap buffer start → gap start (text before gap = all content)
-    lda MOD_BUF_LO
-    sta SRC_PTR
-    lda MOD_BUF_HI
-    sta SRC_PTR+1
-
-    ; End of source = gap start (text after gap is empty post-cursor space)
-    ; Use MOD_GAP_START as the source end — it marks end of text content.
-    ; If gap is at the very start (empty buffer), MOD_GAP_START = MOD_BUF.
-    ; Also honor MOD_GAP_END to MOD_BUF_END for text after cursor.
-    ; For now: source = [MOD_BUF .. MOD_GAP_START) ∪ [MOD_GAP_END .. MOD_BUF_END)
-    ; Simple approach: walk SRC_PTR, skip gap in tok_src_peek (like modasm src_peek).
-
-    ; Store gap bounds so tok_src_peek can skip them
+    ; ---- Linearize the source at the top of the buffer (modren-style) ----
+    ; Post-gap text [gap_e..BUF_END) is already in place at the top; copy
+    ; pre-gap [MOD_BUF..gap_s) DESCENDING to just below it, at
+    ; [gap_e - pre .. gap_e).  The contiguous source then spans
+    ; [reloc..MOD_BUF_END) with reloc = gap_e - pre (= MOD_BUF + gap size),
+    ; and the freed region below reloc receives the tokenized output.
+    ; sct_restore copies the pre-gap back afterwards, so the caller's
+    ; buffer — which MODSCR snapshots to the REU later — is untouched.
     lda MOD_GAP_START_LO
-    sta tok_gap_s_lo
+    sec
+    sbc MOD_BUF_LO
+    sta sct_pre_lo
     lda MOD_GAP_START_HI
-    sta tok_gap_s_hi
+    sbc MOD_BUF_HI
+    sta sct_pre_hi
     lda MOD_GAP_END_LO
-    sta tok_gap_e_lo
+    sec
+    sbc sct_pre_lo
+    sta sct_reloc_lo
     lda MOD_GAP_END_HI
+    sbc sct_pre_hi
+    sta sct_reloc_hi
+
+    lda sct_pre_lo
+    sta TMP16
+    lda sct_pre_hi
+    sta TMP16+1
+    lda MOD_GAP_START_LO
+    sta SRC_PTR
+    lda MOD_GAP_START_HI
+    sta SRC_PTR+1
+    lda MOD_GAP_END_LO
+    sta DST_PTR
+    lda MOD_GAP_END_HI
+    sta DST_PTR+1
+@lin_loop:
+    lda TMP16
+    ora TMP16+1
+    beq @lin_done
+    lda SRC_PTR
+    bne :+
+    dec SRC_PTR+1
+:   dec SRC_PTR
+    lda DST_PTR
+    bne :+
+    dec DST_PTR+1
+:   dec DST_PTR
+    ldy #0
+    lda (SRC_PTR),y
+    sta (DST_PTR),y
+    lda TMP16
+    bne :+
+    dec TMP16+1
+:   dec TMP16
+    jmp @lin_loop
+@lin_done:
+
+    ; Source walk is now contiguous [reloc..MOD_BUF_END).  Park the gap
+    ; bounds where SRC_PTR can never be so tok_src_peek's skip never fires.
+    lda sct_reloc_lo
+    sta SRC_PTR
+    lda sct_reloc_hi
+    sta SRC_PTR+1
+    lda #$FF
+    sta tok_gap_s_lo
+    sta tok_gap_s_hi
+    sta tok_gap_e_lo
     sta tok_gap_e_hi
     lda MOD_BUF_END_LO
     sta tok_src_end_lo
     lda MOD_BUF_END_HI
     sta tok_src_end_hi
 
-    ; Output: staging buffer
-    lda #<STAGING
+    ; Output: the freed region [MOD_BUF..reloc)
+    lda MOD_BUF_LO
     sta DST_PTR
-    lda #>STAGING
+    lda MOD_BUF_HI
     sta DST_PTR+1
     lda #0
     sta OVFLAG
@@ -511,13 +580,13 @@ tok_main_script:
     ; marker. Zeroing the last line's link word would orphan it and make BASIC
     ; stop one line early.
 
-    ; Compute byte count: DST_PTR - STAGING
+    ; Compute byte count: DST_PTR - MOD_BUF (output streamed in place)
     lda DST_PTR
     sec
-    sbc #<STAGING
+    sbc MOD_BUF_LO
     sta TMP16
     lda DST_PTR+1
-    sbc #>STAGING
+    sbc MOD_BUF_HI
     sta TMP16+1
 
     ; If staging overflowed, the tokenized output is truncated and must not
@@ -1077,24 +1146,24 @@ write_include_table:
 ; ============================================================================
 
 write_metadata:
-    ; Build 6-byte metadata block at STAGING (reusing it — we're done tokenizing)
+    ; Build the 6-byte metadata block in the reserved scratch area
     lda #$53             ; 'S'
-    sta STAGING+META_MAGIC0
+    sta meta_buf+META_MAGIC0
     lda #$43             ; 'C'
-    sta STAGING+META_MAGIC1
+    sta meta_buf+META_MAGIC1
     lda tok_sclen_lo
-    sta STAGING+META_SCLEN_LO
+    sta meta_buf+META_SCLEN_LO
     lda tok_sclen_hi
-    sta STAGING+META_SCLEN_HI
+    sta meta_buf+META_SCLEN_HI
     lda INCL_COUNT
-    sta STAGING+META_ICOUNT
+    sta meta_buf+META_ICOUNT
     lda #$01             ; version
-    sta STAGING+META_VERSION
+    sta meta_buf+META_VERSION
 
     ; DMA to REU metadata slot
-    lda #<STAGING
+    lda #<meta_buf
     sta REU_PB_C64LO
-    lda #>STAGING
+    lda #>meta_buf
     sta REU_PB_C64HI
     lda #REU_META_LO
     sta REU_PB_REULO
@@ -1283,9 +1352,18 @@ inc_basic_addr:
 ; module RAM and on through the $D000 I/O registers (including $DF01, the
 ; REU command register, where a stray byte executes a rogue DMA).
 emit_byte:
+    ; Output must stay strictly below the relocated source text at
+    ; sct_reloc — i.e. within the buffer's free space.  On violation the
+    ; byte is dropped, OVFLAG is set, and the caller restores the buffer
+    ; and errors out (the script is too long for the remaining room).
     ldy DST_PTR+1
-    cpy #>STAGING_END
+    cpy sct_reloc_hi
+    bcc @ok
+    bne @overflow
+    ldy DST_PTR
+    cpy sct_reloc_lo
     bcs @overflow
+@ok:
     ldy #0
     sta (DST_PTR),y
     inc DST_PTR
@@ -1523,5 +1601,53 @@ INCL_FLEN:    .res 1    ; current include filename length
 INCL_LOAD_LO: .res 1    ; load length lo
 INCL_LOAD_HI: .res 1    ; load length hi
 
-; Link-time guard: everything above must end below the staging buffer.
-.assert * <= STAGING, error, "modsct code/scratch overlaps STAGING buffer"
+; Streaming-model state
+sct_reloc_lo: .res 1    ; start of the linearized source (= MOD_BUF + gap size)
+sct_reloc_hi: .res 1
+sct_pre_lo:   .res 1    ; pre-gap length — bytes sct_restore must copy back
+sct_pre_hi:   .res 1
+meta_buf:     .res 6    ; 6-byte metadata block staged for the REU DMA
+
+; ============================================================================
+; sct_restore — copy the relocated pre-gap text back down to MOD_BUF.
+; Ascending copy moving DOWN in memory, so overlap-safe.  Post-gap text was
+; never moved, and the gap pointers in the param block were never changed,
+; so afterwards the caller's buffer is byte-for-byte as it was on entry.
+; Safe to call on any exit path (no-op when sct_pre is zero).
+; Clobbers A, Y, SRC_PTR, DST_PTR, TMP16.
+; ============================================================================
+sct_restore:
+    lda sct_pre_lo
+    ora sct_pre_hi
+    beq @done
+    lda sct_reloc_lo
+    sta SRC_PTR
+    lda sct_reloc_hi
+    sta SRC_PTR+1
+    lda MOD_BUF_LO
+    sta DST_PTR
+    lda MOD_BUF_HI
+    sta DST_PTR+1
+    lda sct_pre_lo
+    sta TMP16
+    lda sct_pre_hi
+    sta TMP16+1
+@loop:
+    ldy #0
+    lda (SRC_PTR),y
+    sta (DST_PTR),y
+    inc SRC_PTR
+    bne :+
+    inc SRC_PTR+1
+:   inc DST_PTR
+    bne :+
+    inc DST_PTR+1
+:   lda TMP16
+    bne :+
+    dec TMP16+1
+:   dec TMP16
+    lda TMP16
+    ora TMP16+1
+    bne @loop
+@done:
+    rts

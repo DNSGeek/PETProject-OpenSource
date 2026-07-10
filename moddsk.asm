@@ -5,13 +5,17 @@
 ; Entry: JSR $C000 (first 3 bytes = JMP disk_main)
 ;
 ; Features:
-;   - Reads up to DSK_MAX_ENTRIES (34) directory entries into module RAM
+;   - Reads up to DSK_MAX_ENTRIES (34) directory entries per page into
+;     module RAM; F2/F4 page backward/forward through larger directories
 ;   - Displays 20 entries at a time in a scrollable popup
 ;   - RETURN  = open selected file (writes FNAME_BUF/FNAME_LEN, MOD_STATUS=$04)
-;   - D       = delete selected file (confirm Y/N)
-;   - R       = rename selected file (inline prompt on legend row)
-;   - F       = format disk (confirm, prompt for name/id)
+;   - F       = format disk (prompt for name + 2-char id; result reported)
+;   - @       = raw drive command (scratch/rename via S0:/R0: etc.)
 ;   - STOP/F8 = close, MOD_STATUS=$00 (no change)
+;
+; NOTE: there are no dedicated delete/rename keys — use the '@' raw
+; command channel for those (this header used to promise D/R handlers
+; that were never implemented).
 ;
 ; Return values (MOD_STATUS):
 ;   $00 = cancelled / no action
@@ -174,6 +178,7 @@ DSK_CMD_BUF:     .res 32    ; raw command input buffer (@-key feature)
 DSK_CMD_LEN:     .res 1     ; length of raw command in DSK_CMD_BUF
 DSK_PAGE:        .res 1     ; current page number (0-based); each page = DSK_MAX_ENTRIES
 DSK_SKIP:        .res 1     ; entries to skip on next dsk_read_entries call (= PAGE × MAX)
+DSK_SKIP_HI:     .res 1     ; hi byte — page 3+ of a big (CMD/SD2IEC) dir exceeds 255
 DSK_CACHE:       .res 680   ; directory cache: 34 entries × 20 bytes
 
 .segment "CODE"
@@ -235,6 +240,7 @@ disk_main:
     sta DSK_TRUNCATED
     sta DSK_PAGE
     sta DSK_SKIP
+    sta DSK_SKIP_HI
 
     ; Read directory into cache
     jsr dsk_read_directory
@@ -522,11 +528,15 @@ dsk_read_entries:
     sta DSK_FREE_LO
     sta DSK_FREE_HI
 
-    ; --- Skip phase: drain DSK_SKIP entries without caching ---
+    ; --- Skip phase: drain DSK_SKIP (16-bit) entries without caching ---
+    ; DSK_TMP/DSK_TMP2 hold the countdown; both are free until the entry
+    ; loop, which re-initializes them before use.
     lda DSK_SKIP
+    sta DSK_TMP
+    lda DSK_SKIP_HI
+    sta DSK_TMP2
+    ora DSK_TMP
     beq @entry_loop             ; nothing to skip
-
-    sta DSK_TMP                 ; DSK_TMP = skip counter
 @skip_loop:
     ; Read and discard one complete directory entry line.
     ; Structure: link(2) + blocks(2) + spaces/reverse + "filename" + type + EOL($00)
@@ -550,12 +560,19 @@ dsk_read_entries:
     bcs @skip_done
     cmp #$00
     bne @skip_eol
-    ; one entry consumed
-    dec DSK_TMP
+    ; one entry consumed — 16-bit countdown
+    lda DSK_TMP
+    bne :+
+    dec DSK_TMP2
+:   dec DSK_TMP
+    lda DSK_TMP
+    ora DSK_TMP2
     bne @skip_loop
-    ; set TRUNCATED so we know there's a previous page worth of data
-    lda #$FF
-    sta DSK_TRUNCATED
+    ; Note: do NOT set DSK_TRUNCATED here.  It means "more entries exist
+    ; AFTER this page" (dsk_page_next's gate) and is set only when the
+    ; entry cap below is actually hit.  Setting it just because we skipped
+    ; (i.e. "a previous page exists" — which DSK_PAGE>0 already encodes)
+    ; made F4 page forever into empty pages.
     jmp @entry_loop
 
 @skip_done:
@@ -1137,12 +1154,33 @@ dsk_draw_legend:
 ; F=$06 2=$32 ==$3D P=$10 G=$07 +=$2B space=$20
 ; F=$06 4=$34 ==$3D P=$10 G=$07 -=$2D
 dsk_legend_text:
+    ; F2 = previous page, F4 = next page (matches the editor's F2=up /
+    ; F4=down convention and the handlers below — the old legend had
+    ; the two swapped).
     .byte $12,$05,$14,$3D,$0F,$10,$05,$0E,$20   ; RET=OPEN
     .byte $06,$3D,$06,$0D,$14,$20               ; F=FMT
     .byte $00,$3D,$03,$0D,$04,$20               ; @=CMD
-    .byte $06,$32,$3D,$10,$07,$2B,$20           ; F2=PG+
-    .byte $06,$34,$3D,$10,$07,$2D               ; F4=PG-
+    .byte $06,$32,$3D,$10,$07,$2D,$20           ; F2=PG-
+    .byte $06,$34,$3D,$10,$07,$2B               ; F4=PG+
     .byte 0
+
+; ============================================================================
+; dsk_redraw_two — repaint only the old (DSK_NAMELEN_TMP) and new (DSK_SEL)
+; selection rows.  Cursor movement inside the window changes exactly two
+; rows; the old full 20-row dsk_draw_entries cost ~35-40K cycles per
+; keypress, making cursor movement visibly sluggish at 1 MHz.
+; Callers guarantee both entries are inside the visible window.
+; ============================================================================
+
+dsk_redraw_two:
+    lda DSK_NAMELEN_TMP
+    sec
+    sbc DSK_VIEW_START
+    jsr dsk_draw_one_entry
+    lda DSK_SEL
+    sec
+    sbc DSK_VIEW_START
+    jmp dsk_draw_one_entry      ; tail call
 
 ; ============================================================================
 ; dsk_draw_entries — draw all 20 visible entry rows (rows 3-22)
@@ -1400,13 +1438,16 @@ dsk_color_row:
 dsk_cursor_up:
     lda DSK_SEL
     beq @wrap                   ; at top — wrap to bottom
+    sta DSK_NAMELEN_TMP         ; old selection, for the two-row repaint
     dec DSK_SEL
     ; Scroll viewport if selection moved above view
     lda DSK_SEL
     cmp DSK_VIEW_START
-    bcs @redraw                 ; sel >= view_start: no scroll
+    bcs @two_rows               ; sel >= view_start: no scroll
     dec DSK_VIEW_START
     jmp @redraw
+@two_rows:
+    jmp dsk_redraw_two
 @wrap:
     ; Wrap to last entry
     lda DSK_ENTRY_COUNT
@@ -1437,6 +1478,7 @@ dsk_cursor_down:
     lda DSK_ENTRY_COUNT
     beq @done                   ; no entries
     lda DSK_SEL
+    sta DSK_NAMELEN_TMP         ; old selection, for the two-row repaint
     clc
     adc #1
     cmp DSK_ENTRY_COUNT
@@ -1449,21 +1491,25 @@ dsk_cursor_down:
     rts
 @not_wrap:
     sta DSK_SEL
-    ; Scroll down if selection moved below visible window
+    ; Scroll down if selection moved below visible window.
+    ; Last visible index is view_start + ROWS - 1; comparing against
+    ; view_start + ROWS counted sel == view_start+ROWS as "in view" and
+    ; left the highlight off-screen for one keypress at the bottom row.
     lda DSK_VIEW_START
     clc
-    adc #DSK_VIEW_ROWS
+    adc #DSK_VIEW_ROWS-1
     cmp DSK_SEL
-    bcs @redraw                 ; view_start + ROWS > sel: in view
+    bcs @two_rows               ; in view — repaint just the two rows
     ; sel is below window: advance view_start
     lda DSK_SEL
     sec
     sbc #(DSK_VIEW_ROWS - 1)
     sta DSK_VIEW_START
-@redraw:
     jsr dsk_draw_entries
 @done:
     rts
+@two_rows:
+    jmp dsk_redraw_two
 
 ; ============================================================================
 ; dsk_do_open — RETURN handler.
@@ -1622,6 +1668,7 @@ dsk_do_format:
     lda #0
     sta DSK_PAGE
     sta DSK_SKIP
+    sta DSK_SKIP_HI
     sta DSK_ENTRY_COUNT
     sta DSK_SEL
     sta DSK_VIEW_START
@@ -1693,8 +1740,9 @@ dsk_do_format_id:
     jmp @idinp
 
 @do_format:
-    lda DSK_TMP                 ; need at least 1 ID char
-    bne :+
+    lda DSK_TMP                 ; CBM DOS requires exactly a 2-char ID
+    cmp #2
+    bcs :+
 @cancel:
     sec
     rts
@@ -1749,18 +1797,14 @@ dsk_do_format_id:
     iny
     jmp @fmt_name
 @fmt_comma:
+    ; "N0:<name>,<id>" — note: NO ",P" suffix.  ",P" is a LOAD/SAVE
+    ; file-type suffix, not part of the NEW command; some DOSes answer it
+    ; with 30,SYNTAX ERROR and silently skip the format.
     lda #$2C
     jsr CHROUT
     lda DSK_INPUT_BUF+16
     jsr CHROUT
-    lda DSK_INPUT_BUF+17
-    cmp #$20
-    beq @fmt_end_id
-    jsr CHROUT
-@fmt_end_id:
-    lda #$2C
-    jsr CHROUT
-    lda #$50                    ; 'P'
+    lda DSK_INPUT_BUF+17        ; always present — 2-char ID enforced above
     jsr CHROUT
     lda #$0D
     jsr CHROUT
@@ -1790,13 +1834,65 @@ dsk_do_format_id:
     clc
     rts
 @poll_loop:
+    ; The drive answers the status channel only once the format finishes
+    ; (~40 s on a real 1541).  Capture the two-digit DOS code — it was
+    ; previously discarded, so failures like 26,WRITE PROTECT ON looked
+    ; identical to success (the user just saw an empty directory).
+    jsr CHRIN
+    sta DSK_TMP2                ; first status digit (PETSCII '0'-'9')
+    jsr CHRIN
+    sta DSK_NAMELEN_TMP         ; second status digit
+@drain_status:
     jsr CHRIN
     cmp #$0D
-    bne @poll_loop
+    bne @drain_status
     jsr CLRCHN
     lda #15
     jsr CLOSE
+    ; "00, OK" = success; anything else is a DOS error — surface it.
+    lda DSK_TMP2
+    cmp #$30
+    bne @fmt_failed
+    lda DSK_NAMELEN_TMP
+    cmp #$30
+    bne @fmt_failed
     clc
+    rts
+@fmt_failed:
+    ; Show "FORMAT ERROR NN" (NN = DOS code) on the title row, hold ~1.5s.
+    ldy #0
+@fe_wr:
+    lda dsk_fmt_err_text,y
+    beq @fe_code
+    sta SCREEN,y
+    lda #CLR_ERROR
+    sta COLOR,y
+    iny
+    bne @fe_wr
+@fe_code:
+    ; Digit PETSCII $30-$39 == digit screen codes, so store directly.
+    lda DSK_TMP2
+    sta SCREEN,y
+    lda #CLR_ERROR
+    sta COLOR,y
+    iny
+    lda DSK_NAMELEN_TMP
+    sta SCREEN,y
+    lda #CLR_ERROR
+    sta COLOR,y
+    iny
+    lda #$20                    ; blank the leftover "FORMATTING..." tail
+    sta SCREEN,y
+    sta SCREEN+1,y
+    lda JIFFY_LO
+    clc
+    adc #90
+    sta DSK_TMP
+@fe_spin:
+    lda JIFFY_LO
+    cmp DSK_TMP
+    bne @fe_spin
+    clc                         ; still C=0: caller refreshes the directory
     rts
 
 ; "FORMAT? Y/N " in screen codes
@@ -1814,6 +1910,10 @@ dsk_fmt_id_prompt:
 ; "FORMATTING...   " in screen codes
 dsk_formatting_msg:
     .byte $06,$0F,$12,$0D,$01,$14,$14,$09,$0E,$07,$2E,$2E,$2E,$20,$20,$20, 0
+
+; "FORMAT ERROR " screen codes (DOS code digits appended at runtime)
+dsk_fmt_err_text:
+    .byte $06,$0F,$12,$0D,$01,$14,$20,$05,$12,$12,$0F,$12,$20, 0
 
 ; ============================================================================
 ; dsk_page_next — F4 handler: advance to the next page of directory entries.
@@ -1855,9 +1955,11 @@ dsk_page_prev:
 ; ============================================================================
 
 dsk_page_reload:
-    ; Compute DSK_SKIP = DSK_PAGE * DSK_MAX_ENTRIES
+    ; Compute DSK_SKIP (16-bit) = DSK_PAGE * DSK_MAX_ENTRIES.
+    ; 8-bit math wrapped at page 3 (300 entries) on big CMD/SD2IEC dirs.
     lda #0
     sta DSK_SKIP
+    sta DSK_SKIP_HI
     ldx DSK_PAGE
     beq @skip_done              ; page 0: skip = 0
 @mul_loop:
@@ -1865,7 +1967,9 @@ dsk_page_reload:
     clc
     adc #DSK_MAX_ENTRIES
     sta DSK_SKIP
-    dex
+    bcc :+
+    inc DSK_SKIP_HI
+:   dex
     bne @mul_loop
 @skip_done:
     ; Reset viewport and cache; preserve DSK_PAGE and DSK_SKIP
@@ -2102,6 +2206,7 @@ dsk_do_rawcmd:
     lda #0
     sta DSK_PAGE
     sta DSK_SKIP
+    sta DSK_SKIP_HI
     sta DSK_ENTRY_COUNT
     sta DSK_SEL
     sta DSK_VIEW_START

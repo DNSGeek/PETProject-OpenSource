@@ -220,10 +220,12 @@ means it doesn't.
 
 #### `INCLUDE "file"`
 
-Resolved entirely at tokenize time by MODSCT — the named source file is pulled
-into your program before it runs. At runtime the statement is a deliberate
-no-op (the work is already done). Include depth is limited by MODSCT's frame
-stack.
+> ⚠️ **Not yet supported.** `INCLUDE` is reserved for a future release.
+> MODSCT recognizes the keyword but stops tokenization with an
+> `INCLUDE UNSUPPORTED` error rather than importing the file. (In earlier
+> builds the half-finished include pipeline could corrupt the running IDE —
+> failing loudly is the safe interim behavior.) Keep each script in a single
+> file for now.
 
 #### `ASSEMBLE "source" TO "output"`
 

@@ -56,7 +56,10 @@ DST_PTR         = $FD   ; lo (hi at $FE)
 OVFLAG          = $FF   ; staging overflow flag ($FF = overflowed)
 
 BASIC_START     = $0801
-STAGING         = $C400
+; STAGING must start above the end of the module's code+data — the .assert
+; at the end of this file enforces that at link time.  ($C400 stopped being
+; safe the moment the code grew past it.)
+STAGING         = $C480
 ; First address staging may NOT touch: $D000 is the I/O area while the
 ; module runs, so an unchecked write there sprays VIC/SID/CIA registers.
 STAGING_END     = $D000
@@ -203,6 +206,7 @@ tokenize:
     lda #0
     sta IN_STRING
     sta AFTER_REM
+    sta after_data
 
 ; ============================================================================
 ; @token_loop
@@ -211,8 +215,9 @@ tokenize:
 @token_loop:
     ldy #0
     lda (SRC_PTR),y
-    beq @eof_line               ; source ended mid-line — close the line first
-    cmp #$0D
+    bne :+
+    jmp @eof_line               ; source ended mid-line — close the line first
+:   cmp #$0D
     beq @end_line
 
     lda AFTER_REM
@@ -235,15 +240,45 @@ tokenize:
     lda IN_STRING
     bne @literal
 
+    ; DATA statements: real CRUNCH copies everything after DATA literally
+    ; until ':' (outside quotes) or end of line.  Tokenizing here corrupts
+    ; the data — "DATA MONDAY" LISTs fine but READs garbage token bytes.
+    lda after_data
+    beq @not_data
+    ldy #0
+    lda (SRC_PTR),y
+    cmp #':'
+    bne @literal                ; still inside the DATA item list
+    lda #0
+    sta after_data              ; ':' ends the statement...
+    jmp @literal                ; ...and is itself emitted literally
+@not_data:
+
+    ; '?' is BASIC shorthand for PRINT — CRUNCH tokenizes it to $99.
+    ; Left literal it would be a runtime SYNTAX ERROR.
+    ldy #0
+    lda (SRC_PTR),y
+    cmp #'?'
+    bne @not_qmark
+    jsr inc_src_ptr
+    lda #$99                    ; PRINT token
+    jsr emit_byte
+    jsr inc_basic_addr
+    jmp @token_loop
+@not_qmark:
+
     jsr try_keyword
     bcc @literal
 
     ; keyword matched: A = token, SRC_PTR advanced
-    cmp #$8F
+    cmp #$8F                    ; REM — rest of LINE is literal
     bne :+
-    lda #$FF
-    sta AFTER_REM
-    lda #$8F
+    ldx #$FF
+    stx AFTER_REM
+:   cmp #$83                    ; DATA — rest of STATEMENT is literal
+    bne :+
+    ldx #$FF
+    stx after_data
 :   jsr emit_byte
     jsr inc_basic_addr
     jmp @token_loop
@@ -364,66 +399,84 @@ tokenize:
 ; ============================================================================
 
 try_keyword:
+    ; ---- Fast paths (the bulk of the old cost was here) ----
+    ; The old loop walked the whole ~600-byte table with a 16-bit INC and
+    ; a PHA/PLA flag dance per BYTE, for every source character — saving
+    ; a large file took minutes.  Three fixes, ~10x combined:
+    ;   1. single-char operators dispatch through an 8-entry table,
+    ;   2. characters that can't start a keyword skip the scan entirely,
+    ;   3. entries reject on their first char, and the walk is Y-indexed
+    ;      from a pointer that only advances once per entry.
+    ldy #0
+    lda (SRC_PTR),y
+    sta KW_XSAVE                ; cache first source char for entry rejects
+    ldx #7
+@op_chk:
+    cmp kw_op_chars,x
+    beq @op_hit
+    dex
+    bpl @op_chk
+    ; Only A-Z can start a multi-char keyword — digits, space, and
+    ; punctuation can never match, so don't scan at all.
+    cmp #'A'
+    bcc @kw_no_match
+    cmp #'Z'+1
+    bcs @kw_no_match
+
     lda #<kwtab
     sta TMP16
     lda #>kwtab
     sta TMP16+1
 
-@kw_next:
+@kw_entry:
     ldy #0
-    lda (TMP16),y
+    lda (TMP16),y               ; token byte, $FF = sentinel
     cmp #$FF
     beq @kw_no_match
-    sta KW_TOKEN                ; save token byte
-    inc TMP16                   ; advance past token byte
-    bne :+
-    inc TMP16+1
-:   ldx #0                      ; X = source char index
-
-@kw_match:
-    stx KW_XSAVE                ; save source index
-    ldy #0
-    lda (TMP16),y               ; read keyword char (with bit7 end-marker)
-    pha                         ; save full byte BEFORE INC corrupts N
-    inc TMP16                   ; advance TMP16 (INC corrupts N — PHA already done)
-    bne :+
-    inc TMP16+1
-:   pla                         ; PLA: N = bit7 of keyword char ✓
-    pha                         ; save again — need bit7 after comparison
-    and #$7F                    ; A = keyword char (no bit7)
-    ldy KW_XSAVE                ; Y = source index (does NOT clobber A)
-    cmp (SRC_PTR),y             ; keyword char == source char?
-    ; Branch on MISMATCH before PLA can clobber Z flag:
-    bne @kw_mismatch_pull       ; mismatch — pull saved byte and handle
-    ; Match on this char. Pull saved byte to check if it was the last char:
-    pla                         ; PLA: N = bit7 of keyword char ✓
-    bmi @kw_full_match          ; bit7 set → last char matched → full match
-    ; More chars to compare:
-    ldx KW_XSAVE
-    inx
-    jmp @kw_match
-
-@kw_mismatch_pull:
-    ; CMP said mismatch. The saved keyword char byte is on stack — pull it.
-    pla                         ; PLA: N = bit7 of the mismatched keyword char
-    bmi @kw_next                ; bit7 set → we were on the last char → already past entry
-    ; bit7 clear → more chars remain in this entry; skip to the end
-@kw_skip:
-    ldy #0
+    sta KW_TOKEN
+    ; First-char reject: most entries fail here for 13 cycles instead of
+    ; a byte-by-byte walk.
+    ldy #1
     lda (TMP16),y
-    pha                         ; save with bit7
-    inc TMP16
-    bne :+
+    and #$7F
+    cmp KW_XSAVE
+    bne @kw_skip_entry
+
+    ; Full compare.  Y indexes the keyword inside the entry (1..len);
+    ; the matching source index is always Y-1.
+@kw_match:
+    dey
+    lda (SRC_PTR),y             ; source char at (kw index - 1)
+    iny
+    eor (TMP16),y               ; $00 = match; $80 = match on final char
+    asl                         ; C = final-char flag, A = difference << 1
+    bne @kw_skip_from_y         ; real difference → try next entry
+    bcs @kw_full_match          ; matched the entry's final char
+    iny
+    bne @kw_match               ; always taken (Y stays tiny)
+
+@kw_skip_entry:
+    ldy #1
+@kw_skip_from_y:
+    ; Find the entry's final char (bit7 set); next entry starts at Y+1.
+    lda (TMP16),y
+    bmi @kw_advance_entry
+    iny
+    bne @kw_skip_from_y         ; always taken
+@kw_advance_entry:
+    iny                         ; Y = offset of the next entry's token byte
+    tya
+    clc
+    adc TMP16
+    sta TMP16
+    bcc @kw_entry
     inc TMP16+1
-:   pla                         ; PLA: N = bit7
-    bpl @kw_skip                ; bit7 clear → more chars
-    jmp @kw_next                ; bit7 set → past end of entry
+    jmp @kw_entry
 
 @kw_full_match:
-    ; X = index of last matched char = keyword_length - 1.
-    ; Advance SRC_PTR by X+1 = keyword_length.
-    ldx KW_XSAVE
-    inx                         ; X = keyword length
+    ; Keyword chars occupy offsets 1..Y, so Y = keyword length.
+    tya
+    tax
 @kw_advance:
     jsr inc_src_ptr
     dex
@@ -432,9 +485,23 @@ try_keyword:
     sec
     rts
 
+@op_hit:
+    lda kw_op_tokens,x
+    sta KW_TOKEN
+    jsr inc_src_ptr             ; consume the operator char
+    lda KW_TOKEN
+    sec
+    rts
+
 @kw_no_match:
     clc
     rts
+
+; Single-char operator dispatch — chars and their BASIC tokens (same
+; encodings as the kwtab's 1-char entries, which are now unreachable and
+; kept only as documentation).
+kw_op_chars:  .byte $2A,$2B,$2D,$2F,$3C,$3D,$3E,$5E   ; * + - / < = > ^
+kw_op_tokens: .byte $AC,$AA,$AB,$AD,$B3,$B2,$B1,$AE
 
 ; ============================================================================
 ; inc_basic_addr — advance BASIC_ADDR by 1.
@@ -477,6 +544,10 @@ inc_src_ptr:
     bne :+
     inc SRC_PTR+1
 :   rts
+
+; after_data — $FF while inside a DATA statement (module RAM; ZP is full)
+after_data:
+    .byte 0
 
 ; ============================================================================
 ; kwtab — longest-first. [token][chars, last|$80] ... $FF sentinel
@@ -573,3 +644,7 @@ kwtab:
     .byte $B1,$BE                           ; >       (1)
     .byte $AE,$DE                           ; ^       (1)
     .byte $FF                               ; sentinel
+
+; Link-time guard: the module's code+data must end below the staging
+; buffer, or tokenized output overwrites the module itself.
+.assert * <= STAGING, error, "modtok code overlaps STAGING buffer"

@@ -535,25 +535,24 @@ colorize_row:
     ; Not a letter — clear the word flag, then check operator chars.
     ldy #0
     sty CLR_PREVLET
-    ; Operator single-char keywords: + - * / ^ > = <
-    cmp #'+'
-    beq @n_try_kw
-    cmp #'-'
-    beq @n_try_kw
-    cmp #'*'
-    beq @n_try_kw
-    cmp #'/'
-    beq @n_try_kw
-    cmp #'^'
-    beq @n_try_kw
-    cmp #'>'
-    beq @n_try_kw
-    cmp #'='
-    beq @n_try_kw
-    cmp #'<'
-    beq @n_try_kw
+    ; Operator single-char keywords: + - * / ^ > = < — dispatch directly.
+    ; Sending them through col_match_kw cost the 8-byte lookahead fill
+    ; plus a table walk ('=' scanned ~50 entries ≈ 2K cycles), and
+    ; operators appear several times on nearly every BASIC line.
+    ldx #7
+@n_op_scan:
+    cmp col_op_chars,x
+    beq @n_op_hit
+    dex
+    bpl @n_op_scan
     ; Plain literal char.
     jmp @n_emit_literal
+@n_op_hit:
+    lda col_op_tokens,x
+    sta KW_TOKEN
+    lda #1
+    sta CLR_KWLEN
+    jmp @n_kw_hit                   ; paint one keyword-colored cell
 
     ; BASIC keyword? (buffer is plain text; match keyword strings, not tokens)
 @n_try_kw:
@@ -562,6 +561,7 @@ colorize_row:
 
     ; Matched: paint CLR_KWLEN cells with the keyword color and advance past
     ; the whole keyword. col_match_kw clobbered X (state); we restore it after.
+@n_kw_hit:
     lda CLR_KWLEN
     sta CLR_TMP                     ; cells remaining to paint/advance
 @n_kw_loop:
@@ -818,6 +818,11 @@ col_match_kw:
 @mk_no_match:
     clc
     rts
+
+; Single-char operator dispatch for @n_op_scan — chars and their BASIC
+; tokens (indices must stay aligned between the two tables).
+col_op_chars:  .byte $2A,$2B,$2D,$2F,$3C,$3D,$3E,$5E   ; * + - / < = > ^
+col_op_tokens: .byte $AC,$AA,$AB,$AD,$B3,$B2,$B1,$AE
 
 
 ; ============================================================================

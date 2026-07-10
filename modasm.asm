@@ -161,6 +161,12 @@ ASM_LOAD_HI     = $C059   ; PRG load address hi
 ASM_SPINNER     = $C05A   ; 8-bit line counter; every 16 lines → color flip
 ASM_SPIN_IDX    = $C05B   ; current color value written to SPIN_CELL
 
+; parse_decimal ×10 scratch.  Deliberately NOT TMP2: parse_expr saves the
+; base of a "label+N" / "label-N" expression in TMP2 across parse_number,
+; so parse_decimal must not touch it.
+ASM_MUL_LO      = $C05C   ; ×10 partial (value*2) lo
+ASM_MUL_HI      = $C05D   ; ×10 partial (value*2) hi
+
 SPIN_CELL       = $D800   ; color RAM col 0, row 0 (top-left corner)
 SPIN_COLOR_A    = $01     ; white
 SPIN_COLOR_B    = $00     ; black
@@ -1144,8 +1150,12 @@ parse_operand:
     rts
 
 ; ============================================================================
-; parse_expr  -  parse a value expression into TMP (lo) / TMP+1 (hi).
-; Also stores in ASM_VAL_LO/HI.
+; parse_expr  -  parse a value expression.
+; CONTRACT: on success the result is ALWAYS in BOTH TMP/TMP+1 and
+; ASM_VAL_LO/HI — every path.  Directives (.byte/.word/.org/*=) consume
+; TMP via parse_value; instruction operands consume ASM_VAL.  The two must
+; never diverge, or ".byte >label" and ".word label+2" silently emit the
+; wrong bytes while instructions look fine.
 ; Supports: $hex, decimal, label, <expr, >expr, expr+N, expr-N
 ; C=1 on error.
 ; ============================================================================
@@ -1169,6 +1179,7 @@ parse_expr:
     sta ASM_VAL_LO
     lda #0
     sta ASM_VAL_HI
+    sta TMP+1                   ; TMP = result too (see contract above)
     clc
     rts
 
@@ -1181,8 +1192,10 @@ parse_expr:
     bcs @err
     lda TMP+1                   ; hi byte ? becomes lo byte of result
     sta ASM_VAL_LO
+    sta TMP                     ; TMP = result too (see contract above)
     lda #0
     sta ASM_VAL_HI
+    sta TMP+1
     clc
     rts
 
@@ -1204,7 +1217,8 @@ parse_expr:
 
 @add:
     jsr src_advance
-    ; Save base value
+    ; Save base value.  parse_number/parse_decimal must NOT touch TMP2 —
+    ; parse_decimal uses ASM_MUL for its ×10 scratch for exactly this reason.
     lda TMP
     sta TMP2
     lda TMP+1
@@ -1215,9 +1229,11 @@ parse_expr:
     clc
     adc TMP
     sta ASM_VAL_LO
+    sta TMP                     ; TMP = result too (see contract above)
     lda TMP2+1
     adc TMP+1
     sta ASM_VAL_HI
+    sta TMP+1
     clc
     rts
 
@@ -1233,9 +1249,11 @@ parse_expr:
     sec
     sbc TMP
     sta ASM_VAL_LO
+    sta TMP                     ; TMP = result too (see contract above)
     lda TMP2+1
     sbc TMP+1
     sta ASM_VAL_HI
+    sta TMP+1
     clc
     rts
 
@@ -1353,30 +1371,30 @@ parse_decimal:
     sec
     sbc #'0'
     pha
-    ; TMP = TMP*10: TMP*8 + TMP*2
+    ; TMP = TMP*10 = TMP*8 + TMP*2, via 16-bit in-memory shifts.
+    ; Each doubling must be a paired "asl TMP / rol TMP+1" so the carry
+    ; propagates between the bytes.  (The old code shifted the lo byte
+    ; three times in A, which kept only the LAST shift's carry — any
+    ; value >= ~1024 parsed to garbage: ".word 53280" miscompiled.)
+    ; Scratch is ASM_MUL, NOT TMP2: parse_expr keeps the base of a
+    ; "label+N" expression in TMP2 across this routine.
+    asl TMP
+    rol TMP+1                   ; TMP*2
     lda TMP
-    asl
-    sta TMP2                    ; TMP*2 lo
+    sta ASM_MUL_LO
     lda TMP+1
-    rol
-    sta TMP2+1                  ; TMP*2 hi
-    lda TMP
-    asl
-    asl
-    asl                         ; TMP*8 lo
-    sta TMP
-    lda TMP+1
-    rol
-    rol
-    rol                         ; TMP*8 hi
-    sta TMP+1
+    sta ASM_MUL_HI              ; save TMP*2 for the sum
+    asl TMP
+    rol TMP+1                   ; TMP*4
+    asl TMP
+    rol TMP+1                   ; TMP*8
     lda TMP
     clc
-    adc TMP2
+    adc ASM_MUL_LO
     sta TMP
     lda TMP+1
-    adc TMP2+1
-    sta TMP+1
+    adc ASM_MUL_HI
+    sta TMP+1                   ; TMP*10
     pla                         ; digit
     clc
     adc TMP

@@ -55,6 +55,9 @@ echo ""
 echo "Build complete: ${SRC}/petproject.d64"
 
 # ── Optional: launch in VICE ──────────────────────────────────────────────────
-# Uncomment and adjust path to auto-launch after building:
-# x64sc -basicload -autostart "${SRC}/petproject.d64"
-/opt/homebrew/bin/x64sc -basicload -autostart petproject.d64
+# Set X64SC to your x64sc binary to auto-launch after building, e.g.:
+#   X64SC=/opt/homebrew/bin/x64sc bash make_petproject.sh
+# (Runs only when X64SC is set, so the build works on machines without VICE.)
+if [[ -n "${X64SC:-}" ]]; then
+  "${X64SC}" -basicload -autostart "${SRC}/petproject.d64"
+fi

@@ -1,0 +1,52 @@
+name: Build
+
+# Assemble the editor and every module with cc65, build the .d64 disk
+# image, and fail the run if any linker overlap/range error sneaks in.
+# This is the only check that actually exercises the 95%-assembly codebase.
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install cc65 toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cc65
+
+      - name: Show toolchain versions
+        run: |
+          ca65 --version
+          ld65 --version
+          python3 --version
+
+      - name: Build editor, modules, and disk image
+        run: bash make_petproject.sh
+
+      - name: Verify build outputs
+        run: |
+          set -e
+          test -s petproject.d64
+          test -s build/editor.prg
+          for m in modasm moddet moddis moddsk modren modtok modsfr modsct modscr modscrh; do
+            test -s "build/${m}.prg"
+          done
+          echo "All PRGs and the disk image are present."
+
+      - name: Upload disk image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: petproject-d64
+          path: petproject.d64
+          if-no-files-found: error

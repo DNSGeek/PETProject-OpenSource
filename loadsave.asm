@@ -35,9 +35,10 @@ IO_LA             = 2         ; logical file number we'll use for I/O
 do_load_file:
     lda #0
     sta LOAD_AS_SOURCE      ; F3 = normal PRG load (with type detection)
-    sta FNAME_LEN
     sta PROMPT_IS_SAVE
-    sta IS_BASIC            ; clear until we know otherwise
+    jsr prompt_stash_fname  ; keep current filename so cancel can restore it
+    lda #0
+    sta FNAME_LEN           ; load prompt starts blank
 
     lda #<prompt_lbl_load
     sta LPTR
@@ -45,7 +46,13 @@ do_load_file:
     sta LPTR+1
     jsr draw_filename_prompt        ; C=1 → cancelled
     bcc :+
-    rts                             ; cancelled — nothing to redraw, just return
+    ; Cancelled: restore the filename the prompt clobbered and repaint the
+    ; status row the prompt drew over.  IS_BASIC is untouched here — it is
+    ; only cleared in load_body, after the prompt is confirmed, so a
+    ; cancelled load can't flip a BASIC document to "plain text" (which
+    ; would make the next save write an untokenized, corrupt PRG).
+    jsr prompt_restore_fname
+    jmp render_status
 :
     jmp load_body                   ; into shared load body
 
@@ -60,9 +67,10 @@ do_load_source_file:
     lda #1
     sta LOAD_AS_SOURCE      ; F6 = force SEQ source load, no detection
     lda #0
-    sta FNAME_LEN
     sta PROMPT_IS_SAVE
-    sta IS_BASIC
+    jsr prompt_stash_fname  ; keep current filename so cancel can restore it
+    lda #0
+    sta FNAME_LEN           ; load prompt starts blank
 
     lda #<prompt_lbl_load
     sta LPTR
@@ -70,9 +78,38 @@ do_load_source_file:
     sta LPTR+1
     jsr draw_filename_prompt        ; C=1 → cancelled
     bcc :+
-    rts
+    jsr prompt_restore_fname        ; cancelled — undo prompt clobber
+    jmp render_status               ; repaint status row over the prompt
 :
     jmp load_body                   ; into shared body (keeps LOAD_AS_SOURCE=1)
+
+; ----------------------------------------------------------------------------
+; prompt_stash_fname / prompt_restore_fname — save and restore
+; FNAME_BUF/FNAME_LEN around a filename prompt, so cancelling the prompt
+; doesn't lose the document's remembered filename.  IO_NAME_BUF is free
+; until a confirmed prompt builds a drive command in it, so the first
+; 17 bytes serve as the stash.
+; ----------------------------------------------------------------------------
+
+prompt_stash_fname:
+    ldy #15
+:   lda FNAME_BUF,y
+    sta IO_NAME_BUF,y
+    dey
+    bpl :-
+    lda FNAME_LEN
+    sta IO_NAME_BUF+16
+    rts
+
+prompt_restore_fname:
+    ldy #15
+:   lda IO_NAME_BUF,y
+    sta FNAME_BUF,y
+    dey
+    bpl :-
+    lda IO_NAME_BUF+16
+    sta FNAME_LEN
+    rts
 
 ; ============================================================================
 ; do_load_file_from_fname — load body only, no filename prompt.
@@ -157,11 +194,20 @@ load_body:
     jsr CHRIN                   ; A = next byte
 
     ; Some drives set EOF on the byte that holds valid data, so check
-    ; status AFTER read and still store the byte if EOF is set.
+    ; status AFTER read and still store the byte if EOF is set.  Any
+    ; status bit other than EOF means CHRIN returned junk — a missing
+    ; file OPENs fine on serial drives and only surfaces here, as a
+    ; read timeout ($02).  Treat that as an error instead of storing
+    ; the junk byte and "succeeding".
     pha
     jsr READST
-    and #$40                    ; bit 6 = EOF
-    bne @read_eof_with_byte
+    beq @read_ok                ; ST=0 → normal byte
+    and #$BF                    ; ignore EOF bit; anything left = error
+    beq @read_eof_with_byte     ; pure EOF → keep the final byte
+    pla                         ; discard the junk byte
+    jmp @close_err
+
+@read_ok:
     pla
 
     ; Store byte
@@ -460,7 +506,7 @@ do_save_file:
     lda #IO_LA
     jsr CLOSE
     jsr show_io_error
-    jmp @done
+    jmp @recover_text
 
 @write_done:
     jsr CLRCHN
@@ -473,25 +519,7 @@ do_save_file:
 
     lda IS_BASIC
     beq @done
-
-    ; Save cursor/viewport state before re-detokenizing
-    lda TOP_LINE
-    sta IO_END_LO           ; repurpose — I/O is finished at this point
-    lda TOP_LINE+1
-    sta IO_END_HI
-    lda CURSOR_ROW
-    sta IO_SCRATCH
-
-    jsr load_run_moddet
-
-    lda IO_END_LO
-    sta TOP_LINE
-    lda IO_END_HI
-    sta TOP_LINE+1
-    lda IO_SCRATCH
-    sta CURSOR_ROW
-
-    jsr ensure_cursor_visible
+    jsr save_redetokenize
     jmp @done
 
 @restore_gap:
@@ -517,12 +545,47 @@ do_save_file:
     jsr READST
     sta IO_STATUS
     jsr show_io_error
+    ; fall through to @recover_text
+
+@recover_text:
+    ; Every error label below @skip_tokenize can only be reached after a
+    ; BASIC buffer has been tokenized in place.  A failed save must not
+    ; leave the user editing raw token bytes, so detokenize back to text.
+    lda IS_BASIC
+    beq @done
+    jsr save_redetokenize
 
 @done:
     jsr render_status
     jsr render_viewport
     jsr draw_cursor
     rts
+
+; ----------------------------------------------------------------------------
+; save_redetokenize — after a BASIC save attempt (successful or failed), run
+; MODDET to restore work_buf to plain text, preserving viewport/cursor state
+; across the module call.  IO_END_LO/HI and IO_SCRATCH are free by the time
+; this runs — the write is finished or abandoned.
+; On return: GAP_START set from MOD_NEW_END, GAP_END = work_buf_end (moddet).
+; ----------------------------------------------------------------------------
+
+save_redetokenize:
+    lda TOP_LINE
+    sta IO_END_LO
+    lda TOP_LINE+1
+    sta IO_END_HI
+    lda CURSOR_ROW
+    sta IO_SCRATCH
+
+    jsr load_run_moddet
+
+    lda IO_END_LO
+    sta TOP_LINE
+    lda IO_END_HI
+    sta TOP_LINE+1
+    lda IO_SCRATCH
+    sta CURSOR_ROW
+    jmp ensure_cursor_visible       ; tail call
 
 ; ============================================================================
 ; load_run_moddet — auto-detokenize work_buf after loading a BASIC PRG.

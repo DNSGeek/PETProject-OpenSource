@@ -22,7 +22,7 @@
 ;   $F9/$FA = BASIC_ADDR     (running $0801-based C64 address)
 ;   $FB/$FC = SRC_PTR        (input pointer)
 ;   $FD/$FE = DST_PTR        (staging output pointer)
-;   $FF     = KW_CHAR        (stripped keyword char, try_keyword only)
+;   $FF     = OVFLAG         ($FF = staging overflowed, output truncated)
 ;
 ; Lessons from moddet: PHA/PLA around JSR before branches. INC corrupts flags.
 ; Advance SRC_PTR past CR before re-entering @line_loop. STAGING at $C300.
@@ -53,10 +53,13 @@ LINK_PTR        = $F7   ; lo (hi at $F8)
 BASIC_ADDR      = $F9   ; lo (hi at $FA)
 SRC_PTR         = $FB   ; lo (hi at $FC)
 DST_PTR         = $FD   ; lo (hi at $FE)
-KW_CHAR         = $FF   ; stripped keyword char (try_keyword only)
+OVFLAG          = $FF   ; staging overflow flag ($FF = overflowed)
 
 BASIC_START     = $0801
 STAGING         = $C400
+; First address staging may NOT touch: $D000 is the I/O area while the
+; module runs, so an unchecked write there sprays VIC/SID/CIA registers.
+STAGING_END     = $D000
 
 .segment "LOADADDR"
     .word $C000
@@ -85,6 +88,8 @@ tokenize:
     sta DST_PTR
     lda #>STAGING
     sta DST_PTR+1
+    lda #0
+    sta OVFLAG
 
     lda #$01
     jsr emit_byte
@@ -206,7 +211,7 @@ tokenize:
 @token_loop:
     ldy #0
     lda (SRC_PTR),y
-    beq @all_done
+    beq @eof_line               ; source ended mid-line — close the line first
     cmp #$0D
     beq @end_line
 
@@ -267,6 +272,22 @@ tokenize:
 
     jmp @line_loop
 
+@eof_line:
+    ; Source ended without a trailing CR: close the line properly — emit
+    ; the $00 terminator and back-patch the link word — before finishing.
+    ; Otherwise the line's link stays at its $0000 placeholder, which is
+    ; BASIC's end-of-program marker, and the whole line silently vanishes.
+    lda #0
+    jsr emit_byte
+    jsr inc_basic_addr
+    ldy #0
+    lda BASIC_ADDR
+    sta (LINK_PTR),y
+    iny
+    lda BASIC_ADDR+1
+    sta (LINK_PTR),y
+    jmp @all_done
+
 ; ============================================================================
 ; @all_done
 ; ============================================================================
@@ -276,6 +297,13 @@ tokenize:
     jsr emit_byte
     jsr emit_byte               ; $00 $00 end-of-program
 
+    ; If staging overflowed, the output is truncated — do NOT copy it back
+    ; over the caller's plain-text buffer.  Report an error and leave
+    ; MOD_BUF intact (the caller keeps its untokenized text).
+    lda OVFLAG
+    beq :+
+    jmp @bad
+:
     ; copy staging → MOD_BUF
     lda #<STAGING
     sta LINK_PTR
@@ -328,7 +356,6 @@ tokenize:
 ;   TMP16 ($3C/$3D): kwtab pointer. Advanced by INC one char at a time.
 ;   KW_TOKEN ($3A): token byte for current entry (saved at @kw_next).
 ;   KW_XSAVE ($3B): source index X, saved here before forcing Y=0 for kwtab read.
-;   KW_CHAR ($FF): stripped keyword char for CMP.
 ;   X: source char index (0=first char). Incremented per match step.
 ;   Stack: 2 pushes per loop (source index, keyword char with bit7). Both pulled per loop.
 ;
@@ -421,15 +448,25 @@ inc_basic_addr:
 
 ; ============================================================================
 ; emit_byte — write A to (DST_PTR), advance DST_PTR. Clobbers Y.
+; Bounds-checked: at STAGING_END the byte is dropped and OVFLAG is set —
+; without this, output longer than staging (~3 KB of source) would write
+; straight through the $D000 I/O registers.
 ; ============================================================================
 
 emit_byte:
+    ldy DST_PTR+1
+    cpy #>STAGING_END
+    bcs @overflow
     ldy #0
     sta (DST_PTR),y
     inc DST_PTR
     bne :+
     inc DST_PTR+1
 :   rts
+@overflow:
+    ldy #$FF
+    sty OVFLAG
+    rts
 
 ; ============================================================================
 ; inc_src_ptr — advance SRC_PTR by 1.

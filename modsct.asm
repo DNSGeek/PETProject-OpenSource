@@ -1175,59 +1175,72 @@ reu_exec:
 ; ============================================================================
 
 try_keyword:
+    ; Fast paths — same rewrite as modtok's try_keyword (see there for
+    ; the rationale): direct single-char operator dispatch, no scan for
+    ; characters that can't start a keyword, first-char entry reject,
+    ; Y-indexed walk with one pointer advance per entry.
+    ldy #0
+    lda (SRC_PTR),y
+    sta KW_XSAVE                ; cache first source char for entry rejects
+    ldx #7
+@op_chk:
+    cmp kw_op_chars,x
+    beq @op_hit
+    dex
+    bpl @op_chk
+    cmp #'A'
+    bcc @kw_no_match
+    cmp #'Z'+1
+    bcs @kw_no_match
+
     lda #<kwtab
     sta TMP16
     lda #>kwtab
     sta TMP16+1
 
-@kw_next:
+@kw_entry:
     ldy #0
-    lda (TMP16),y
+    lda (TMP16),y               ; token byte, $FF = sentinel
     cmp #$FF
     beq @kw_no_match
     sta KW_TOKEN
-    inc TMP16
-    bne :+
-    inc TMP16+1
-:   ldx #0
+    ldy #1
+    lda (TMP16),y
+    and #$7F
+    cmp KW_XSAVE
+    bne @kw_skip_entry
 
 @kw_match:
-    stx KW_XSAVE
-    ldy #0
-    lda (TMP16),y
-    pha
-    inc TMP16
-    bne :+
-    inc TMP16+1
-:   pla
-    pha
-    and #$7F
-    ldy KW_XSAVE        ; Y = source index (does NOT clobber keyword char in A)
-    cmp (SRC_PTR),y
-    bne @kw_mismatch_pull
-    pla
-    bmi @kw_full_match
-    ldx KW_XSAVE
-    inx
-    jmp @kw_match
+    dey
+    lda (SRC_PTR),y             ; source char at (kw index - 1)
+    iny
+    eor (TMP16),y               ; $00 = match; $80 = match on final char
+    asl                         ; C = final-char flag, A = difference << 1
+    bne @kw_skip_from_y
+    bcs @kw_full_match
+    iny
+    bne @kw_match               ; always taken
 
-@kw_mismatch_pull:
-    pla
-    bmi @kw_next
-@kw_skip:
-    ldy #0
+@kw_skip_entry:
+    ldy #1
+@kw_skip_from_y:
     lda (TMP16),y
-    pha
-    inc TMP16
-    bne :+
+    bmi @kw_advance_entry
+    iny
+    bne @kw_skip_from_y         ; always taken
+@kw_advance_entry:
+    iny                         ; Y = offset of the next entry's token byte
+    tya
+    clc
+    adc TMP16
+    sta TMP16
+    bcc @kw_entry
     inc TMP16+1
-:   pla
-    bpl @kw_skip
-    jmp @kw_next
+    jmp @kw_entry
 
 @kw_full_match:
-    ldx KW_XSAVE
-    inx
+    tya                         ; Y = keyword length
+    tax
 @kw_advance:
     jsr tok_src_advance
     dex
@@ -1236,9 +1249,23 @@ try_keyword:
     sec
     rts
 
+@op_hit:
+    lda kw_op_tokens,x
+    sta KW_TOKEN
+    jsr tok_src_advance         ; consume the operator char
+    lda KW_TOKEN
+    sec
+    rts
+
 @kw_no_match:
     clc
     rts
+
+; Single-char operator dispatch — chars and their BASIC tokens (same
+; encodings as the kwtab's 1-char entries, which are now unreachable and
+; kept only as documentation).
+kw_op_chars:  .byte $2A,$2B,$2D,$2F,$3C,$3D,$3E,$5E   ; * + - / < = > ^
+kw_op_tokens: .byte $AC,$AA,$AB,$AD,$B3,$B2,$B1,$AE
 
 ; ============================================================================
 ; Helpers

@@ -1529,28 +1529,13 @@ settings_write_label:
 ; Clobbers A, X. Does NOT preserve X — callers must save if needed.
 ; ============================================================================
 pop_row_ptr:
-    ; WORK_PTR = SCREEN + (A * 40), 16-bit result
-    tax                            ; X = row number (loop counter)
-    lda #0
-    sta TMP                        ; TMP = $0000
-    sta TMP+1
-    cpx #0
-    beq @add_base                  ; row 0: TMP stays 0
-@mul40:
-    lda TMP
-    clc
-    adc #40
-    sta TMP
-    bcc :+
-    inc TMP+1                      ; carry into high byte
-:   dex
-    bne @mul40
-@add_base:
-    lda TMP
+    ; WORK_PTR = SCREEN + (A * 40), via the shared row-offset table
+    tax                            ; X = row number
+    lda row40_lo,x
     clc
     adc #<SCREEN
     sta WORK_PTR
-    lda TMP+1
+    lda row40_hi,x
     adc #>SCREEN
     sta WORK_PTR+1
     rts
@@ -1560,28 +1545,13 @@ pop_row_ptr:
 ; Clobbers A, X. Does NOT preserve X — callers must save if needed.
 ; ============================================================================
 pop_color_ptr:
-    ; WORK_PTR = COLOR + (A * 40), 16-bit result
+    ; WORK_PTR = COLOR + (A * 40), via the shared row-offset table
     tax                            ; X = row number
-    lda #0
-    sta TMP
-    sta TMP+1
-    cpx #0
-    beq @add_base
-@mul40:
-    lda TMP
-    clc
-    adc #40
-    sta TMP
-    bcc :+
-    inc TMP+1
-:   dex
-    bne @mul40
-@add_base:
-    lda TMP
+    lda row40_lo,x
     clc
     adc #<COLOR
     sta WORK_PTR
-    lda TMP+1
+    lda row40_hi,x
     adc #>COLOR
     sta WORK_PTR+1
     rts
@@ -1696,23 +1666,17 @@ render_cursor_row:
     sta BUF_PTR+1
     jsr buf_ptr_warp               ; warp if line start sits at the gap
 
-    ; SCREEN_PTR = CONTENT_TOP + CURSOR_ROW * COLS
-    lda #<CONTENT_TOP
-    sta SCREEN_PTR
-    lda #>CONTENT_TOP
-    sta SCREEN_PTR+1
-    ldy CURSOR_ROW
-    beq @row_ready
-@row_add:
+    ; SCREEN_PTR = CONTENT_TOP + CURSOR_ROW * COLS, via the row table
+    ; (content row N is screen row N+1)
+    ldx CURSOR_ROW
+    inx
+    lda row40_lo,x
     clc
-    lda SCREEN_PTR
-    adc #COLS
+    adc #<SCREEN
     sta SCREEN_PTR
-    bcc :+
-    inc SCREEN_PTR+1
-:   dey
-    bne @row_add
-@row_ready:
+    lda row40_hi,x
+    adc #>SCREEN
+    sta SCREEN_PTR+1
     ldx #1                         ; render exactly one row, then rv_next_row rts
     jmp rv_row_loop
 
@@ -1776,9 +1740,7 @@ rv_row_loop:
     jsr lookup_screen              ; preserves X and Y
     sta (SCREEN_PTR),y
     iny
-    sty TMP
-    jsr advance_buf
-    ldy TMP
+    jsr advance_buf                ; touches A only — X and Y survive
     jmp @render_loop
 
 @pad:
@@ -2465,35 +2427,40 @@ ensure_cursor_visible:
 ; compute_cursor_addr — WORK_PTR = screen RAM address of cursor cell.
 ; ============================================================================
 compute_cursor_addr:
-    lda #0
-    sta TMP
-    sta TMP+1
+    ; WORK_PTR = CONTENT_TOP + CURSOR_ROW*COLS + CURSOR_COL, via the
+    ; row-offset table.  This runs on every idle poll (cursor blink), so
+    ; the old repeated-addition multiply burned up to ~370 cycles
+    ; thousands of times per second.  CONTENT_TOP is SCREEN + one row,
+    ; so content row N uses table entry N+1.
     ldx CURSOR_ROW
-    beq @add_col
-@mul:
-    lda TMP
-    clc
-    adc #COLS
-    sta TMP
-    bcc :+
-    inc TMP+1
-:   dex
-    bne @mul
-@add_col:
-    lda TMP
+    inx
+    lda row40_lo,x
     clc
     adc CURSOR_COL
-    sta TMP
-    bcc :+
-    inc TMP+1
-:   lda #<CONTENT_TOP
-    clc
-    adc TMP
     sta WORK_PTR
-    lda #>CONTENT_TOP
-    adc TMP+1
+    lda row40_hi,x
+    adc #0
+    sta WORK_PTR+1
+    lda WORK_PTR
+    clc
+    adc #<SCREEN
+    sta WORK_PTR
+    lda WORK_PTR+1
+    adc #>SCREEN
     sta WORK_PTR+1
     rts
+
+; Row-offset table: row40[n] = n * COLS for screen rows 0-24.
+; Shared by compute_cursor_addr, pop_row_ptr, pop_color_ptr, and
+; render_cursor_row — replaces four multiply-by-repeated-addition loops.
+row40_lo:
+.repeat 25, I
+    .byte <(I*COLS)
+.endrepeat
+row40_hi:
+.repeat 25, I
+    .byte >(I*COLS)
+.endrepeat
 
 ; ============================================================================
 ; draw_cursor — invert cursor cell (set bit 7 = reverse-video glyph).

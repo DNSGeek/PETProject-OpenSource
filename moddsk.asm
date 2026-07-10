@@ -1165,6 +1165,24 @@ dsk_legend_text:
     .byte 0
 
 ; ============================================================================
+; dsk_redraw_two — repaint only the old (DSK_NAMELEN_TMP) and new (DSK_SEL)
+; selection rows.  Cursor movement inside the window changes exactly two
+; rows; the old full 20-row dsk_draw_entries cost ~35-40K cycles per
+; keypress, making cursor movement visibly sluggish at 1 MHz.
+; Callers guarantee both entries are inside the visible window.
+; ============================================================================
+
+dsk_redraw_two:
+    lda DSK_NAMELEN_TMP
+    sec
+    sbc DSK_VIEW_START
+    jsr dsk_draw_one_entry
+    lda DSK_SEL
+    sec
+    sbc DSK_VIEW_START
+    jmp dsk_draw_one_entry      ; tail call
+
+; ============================================================================
 ; dsk_draw_entries — draw all 20 visible entry rows (rows 3-22)
 ; ============================================================================
 
@@ -1420,13 +1438,16 @@ dsk_color_row:
 dsk_cursor_up:
     lda DSK_SEL
     beq @wrap                   ; at top — wrap to bottom
+    sta DSK_NAMELEN_TMP         ; old selection, for the two-row repaint
     dec DSK_SEL
     ; Scroll viewport if selection moved above view
     lda DSK_SEL
     cmp DSK_VIEW_START
-    bcs @redraw                 ; sel >= view_start: no scroll
+    bcs @two_rows               ; sel >= view_start: no scroll
     dec DSK_VIEW_START
     jmp @redraw
+@two_rows:
+    jmp dsk_redraw_two
 @wrap:
     ; Wrap to last entry
     lda DSK_ENTRY_COUNT
@@ -1457,6 +1478,7 @@ dsk_cursor_down:
     lda DSK_ENTRY_COUNT
     beq @done                   ; no entries
     lda DSK_SEL
+    sta DSK_NAMELEN_TMP         ; old selection, for the two-row repaint
     clc
     adc #1
     cmp DSK_ENTRY_COUNT
@@ -1477,16 +1499,17 @@ dsk_cursor_down:
     clc
     adc #DSK_VIEW_ROWS-1
     cmp DSK_SEL
-    bcs @redraw                 ; view_start + ROWS - 1 >= sel: in view
+    bcs @two_rows               ; in view — repaint just the two rows
     ; sel is below window: advance view_start
     lda DSK_SEL
     sec
     sbc #(DSK_VIEW_ROWS - 1)
     sta DSK_VIEW_START
-@redraw:
     jsr dsk_draw_entries
 @done:
     rts
+@two_rows:
+    jmp dsk_redraw_two
 
 ; ============================================================================
 ; dsk_do_open — RETURN handler.

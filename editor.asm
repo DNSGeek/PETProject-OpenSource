@@ -576,10 +576,6 @@ do_new_file:
     beq @clear
     jmp @wait
 @save:
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
     jsr do_save_file            ; if save is cancelled, still proceed to clear
 @clear:
     ; Reset gap buffer to empty

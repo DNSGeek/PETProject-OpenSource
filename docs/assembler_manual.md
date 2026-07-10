@@ -274,12 +274,17 @@ The characters are stored as-is. What you type is in PETSCII, so uppercase lette
 
 ---
 
-### `.include` – Import another assembley file into the current file
+### `.include` – Import another assembly file into the current file
 
-Will read an assembly file from disk and insert it into the current file at the line where the `.include` directive occurs.
+> ⚠️ **Not yet supported.** `.include` is reserved for a future release. The
+> assembler recognizes the directive and validates its syntax, but assembly
+> stops with an `INCL UNSUPPORTED` error rather than importing the file. (In
+> earlier builds the directive silently truncated the assembled program —
+> failing loudly is the safe interim behavior.) Keep each source in a single
+> file for now.
 
 ```
-        .include "another_file.asm"
+        .include "another_file.asm"      ; -> INCL UNSUPPORTED
 ```
 
 ---

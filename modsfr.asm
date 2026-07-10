@@ -288,15 +288,28 @@ sfr_do_return:
     adc sfr_find_len
     sta sfr_ge_lo
     sta ZP_GAP_END
+    sta MOD_GAP_END_LO
     lda sfr_ge_hi
     adc #0
     sta sfr_ge_hi
     sta ZP_GAP_END+1
+    sta MOD_GAP_END_HI
+    ; Deleting the match shrinks the document — keep sfr_total in sync,
+    ; or later searches scan find_len bytes past the real content and can
+    ; act on phantom matches beyond the buffer.
+    lda sfr_total_lo
+    sec
+    sbc sfr_find_len
+    sta sfr_total_lo
+    lda sfr_total_hi
+    sbc #0
+    sta sfr_total_hi
     lda #$FF
     sta sfr_did_move
     jmp @after_repl
 @do_repl:
     jsr sfr_replace_at_match
+    bcs @done                   ; no room in gap — replace aborted
 @after_repl:
     lda #0
     sta sfr_have_match
@@ -320,6 +333,16 @@ sfr_find_next:
     bne @has_str
     rts                     ; no search string — nothing to do
 @has_str:
+    ; Pattern longer than the document can never match — bail out now,
+    ; which also keeps the "total - find_len" limit below from wrapping
+    ; negative and scanning memory past the buffer.
+    lda sfr_total_hi
+    bne @len_ok
+    lda sfr_total_lo
+    cmp sfr_find_len
+    bcs @len_ok
+    jmp @nf
+@len_ok:
     lda sfr_srch_lo
     sta sfr_i_lo
     lda sfr_srch_hi
@@ -494,7 +517,11 @@ sfr_move_gap:
     sta sfr_mv_cnt_lo
     lda sfr_mv_sz_hi
     sta sfr_mv_cnt_hi
-    jsr sfr_fwd_copy
+    ; Case A moves the block UP in memory (dst = src + gap size), so the
+    ; regions overlap whenever the block is larger than the gap.  Copy
+    ; descending — a forward copy would overwrite the block's tail before
+    ; reading it.  (Case B moves down, where the forward copy is safe.)
+    jsr sfr_bwd_copy
 @a_upd:
     lda sfr_buf_lo
     clc
@@ -527,8 +554,25 @@ sfr_move_gap:
 
 ; =============================================================================
 ; sfr_replace_at_match
+; C=0 replaced; C=1 aborted — the free gap (ge - gs) is smaller than the
+; replacement, and writing anyway would trample post-gap content and leave
+; gap_start past gap_end (after which every gap operation corrupts memory).
 ; =============================================================================
 sfr_replace_at_match:
+    lda sfr_ge_lo
+    sec
+    sbc sfr_gs_lo
+    sta sfr_tmp_lo
+    lda sfr_ge_hi
+    sbc sfr_gs_hi
+    bne @fits                   ; gap >= 256 bytes — always enough
+    lda sfr_tmp_lo
+    cmp sfr_repl_len
+    bcs @fits
+    jsr sfr_flash_full          ; "BUFFER FULL" — nothing was changed
+    sec
+    rts
+@fits:
     lda sfr_gs_lo
     sta LPTR
     lda sfr_gs_hi
@@ -587,6 +631,7 @@ sfr_replace_at_match:
     sta sfr_total_hi
     lda #$FF
     sta sfr_did_move
+    clc
     rts
 
 ; =============================================================================
@@ -628,6 +673,54 @@ sfr_fwd_copy:
     iny
     dex
     bne @tl
+@done:
+    rts
+
+; =============================================================================
+; sfr_bwd_copy — sfr_mv_cnt bytes from sfr_src to sfr_dst, copied DESCENDING
+; (last byte first).  Required when dst > src and the regions may overlap.
+; sfr_src/sfr_dst are the START addresses, same convention as sfr_fwd_copy.
+; Clobbers sfr_mv_cnt.
+; =============================================================================
+sfr_bwd_copy:
+    lda sfr_mv_cnt_lo
+    ora sfr_mv_cnt_hi
+    beq @done
+    ; WORK_PTR = src + cnt, LPTR = dst + cnt (one past the last byte)
+    lda sfr_src_lo
+    clc
+    adc sfr_mv_cnt_lo
+    sta WORK_PTR
+    lda sfr_src_hi
+    adc sfr_mv_cnt_hi
+    sta WORK_PTR+1
+    lda sfr_dst_lo
+    clc
+    adc sfr_mv_cnt_lo
+    sta LPTR
+    lda sfr_dst_hi
+    adc sfr_mv_cnt_hi
+    sta LPTR+1
+@loop:
+    ; Pre-decrement both pointers, copy one byte, then count down.
+    lda WORK_PTR
+    bne :+
+    dec WORK_PTR+1
+:   dec WORK_PTR
+    lda LPTR
+    bne :+
+    dec LPTR+1
+:   dec LPTR
+    ldy #0
+    lda (WORK_PTR),y
+    sta (LPTR),y
+    lda sfr_mv_cnt_lo
+    bne :+
+    dec sfr_mv_cnt_hi
+:   dec sfr_mv_cnt_lo
+    lda sfr_mv_cnt_lo
+    ora sfr_mv_cnt_hi
+    bne @loop
 @done:
     rts
 
@@ -910,10 +1003,34 @@ sfr_flash_not_found:
     ; Status bar stays "NOT FOUND" until module exits — editor restores it then.
     rts
 
+sfr_flash_full:
+    ldy #0
+@wr:
+    lda sfr_msg_full,y
+    beq @wait
+    sta ROW0_SCR,y
+    lda #COL_NOT_FOUND
+    sta ROW0_COL,y
+    iny
+    bne @wr
+@wait:
+    lda JIFFY_LO
+    clc
+    adc #45
+    sta sfr_jtmp
+@sp:
+    lda JIFFY_LO
+    cmp sfr_jtmp
+    bne @sp
+    ; Status bar stays "BUFFER FULL" until module exits — editor restores it.
+    rts
+
 sfr_msg_found:
-    .byte $06,$0F,$15,$0E,$04,$20,$20,$20,$20,$20, 0   ; FOUND
+    .byte $06,$0F,$15,$0E,$04,$20,$20,$20,$20,$20,$20, 0   ; FOUND
 sfr_msg_nf:
-    .byte $0E,$0F,$14,$20,$06,$0F,$15,$0E,$04,$20, 0   ; NOT FOUND
+    .byte $0E,$0F,$14,$20,$06,$0F,$15,$0E,$04,$20,$20, 0   ; NOT FOUND
+sfr_msg_full:
+    .byte $02,$15,$06,$06,$05,$12,$20,$06,$15,$0C,$0C, 0   ; BUFFER FULL
 
 ; =============================================================================
 .segment "BSS"

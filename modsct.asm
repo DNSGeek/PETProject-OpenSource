@@ -119,7 +119,7 @@ LINK_PTR    = $F7   ; lo (hi=$F8) — link word back-patch pointer / scan pointe
 BASIC_ADDR  = $F9   ; lo (hi=$FA) — running C64 address tracker
 SRC_PTR     = $FB   ; lo (hi=$FC) — source walker
 DST_PTR     = $FD   ; lo (hi=$FE) — staging output pointer
-KW_CHAR     = $FF
+OVFLAG      = $FF   ; staging overflow flag ($FF = overflowed, output invalid)
 
 ; ---- Module RAM (not in binary — runtime use only) ----
 ; These addresses fall within $A000-$BFFF but above the code.
@@ -307,6 +307,8 @@ tok_main_script:
     sta DST_PTR
     lda #>STAGING
     sta DST_PTR+1
+    lda #0
+    sta OVFLAG
 
     ; BASIC_ADDR tracks the runtime $0801-based address of each emitted byte
     lda #<BASIC_START
@@ -492,6 +494,14 @@ tok_main_script:
     sbc #>STAGING
     sta TMP16+1
 
+    ; If staging overflowed, the tokenized output is truncated and must not
+    ; be deployed — report failure (C=1) so the caller errors out instead
+    ; of stashing a broken script to the REU.
+    lda OVFLAG
+    beq :+
+    sec
+    rts
+:
     clc
     rts
 
@@ -1214,13 +1224,25 @@ inc_basic_addr:
     inc BASIC_ADDR+1
 :   rts
 
+; emit_byte — write A to (DST_PTR), advance DST_PTR.  Bounds-checked: at
+; STAGING_END ($C000) the byte is dropped and OVFLAG is set — without this,
+; a script larger than the 4 KB staging buffer would write over the $C000
+; module RAM and on through the $D000 I/O registers (including $DF01, the
+; REU command register, where a stray byte executes a rogue DMA).
 emit_byte:
+    ldy DST_PTR+1
+    cpy #>STAGING_END
+    bcs @overflow
     ldy #0
     sta (DST_PTR),y
     inc DST_PTR
     bne :+
     inc DST_PTR+1
 :   rts
+@overflow:
+    ldy #$FF
+    sty OVFLAG
+    rts
 
 ; ============================================================================
 ; Status bar messages (screen codes, zero-terminated)

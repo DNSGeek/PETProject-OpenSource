@@ -33,8 +33,9 @@
 ;   $3C     — NZFLAG:   non-zero digit seen flag (decimal output)
 ;   $3D/$3E — KWTAB:    keyword table walker pointer
 ;
-; Staging buffer: $C200-$CFFF (3.5K) — output written here, then copied back.
-; Code+data must fit in $C000-$C1FF (512 bytes).
+; Staging buffer: $C300-$CFFF (3.25K) — output written here, then copied
+; back.  Code+data must fit in $C000-$C2FF.  Output larger than staging
+; aborts with MOD_STATUS=$01 (buffer left untouched) — see emit_byte.
 ; ============================================================================
 
 .setcpu "6502"
@@ -66,12 +67,17 @@ COPY_DST         = $F9              ; copy-back dest  (lo/hi)
 LINENO           = $3A              ; 16-bit line number scratch (lo/hi)
 NZFLAG           = $3C              ; non-zero digit seen (decimal output)
 KWTAB            = $3D              ; keyword table walker (lo/hi)
+OVFLAG           = $3F              ; staging overflow flag ($FF = overflowed)
 
 
 
-; kwtab sits at $C157 and is 255 bytes, ending at $C256.
-; STAGING must start after kwtab — use $C300 for page alignment and margin.
+; STAGING must start after the code+kwtab — $C300 gives page alignment and
+; margin.  STAGING_END is the first address staging may NOT touch: $D000 is
+; the I/O area while the module runs with $01=$37, so an unchecked write
+; there sprays VIC/SID/CIA registers.  emit_byte enforces this bound; on
+; overflow the module reports MOD_STATUS=$01 and leaves MOD_BUF untouched.
 STAGING          = $C300
+STAGING_END      = $D000
 
 ; ============================================================================
 
@@ -125,6 +131,8 @@ detokenize:
     sta DST_PTR
     lda #>STAGING
     sta DST_PTR+1
+    lda #0
+    sta OVFLAG
 
 ; ============================================================================
 ; @line_loop — walk one BASIC line per iteration
@@ -212,6 +220,13 @@ detokenize:
 ; ============================================================================
 
 @all_done:
+    ; If staging overflowed, the output is truncated — do NOT copy it back
+    ; over the caller's buffer.  Report an error and leave MOD_BUF intact.
+    lda OVFLAG
+    beq @no_overflow
+    jmp @bad
+@no_overflow:
+
     ; COPY_SRC = STAGING (start of staging output)
     lda #<STAGING
     sta COPY_SRC
@@ -570,16 +585,26 @@ kwtab:
 
 ; ============================================================================
 ; emit_byte — write A to (DST_PTR), advance DST_PTR.
+; Bounds-checked: at STAGING_END the byte is dropped and OVFLAG is set —
+; without this, output longer than staging (any BASIC program over ~3 KB)
+; would write straight through the $D000 I/O registers.
 ; Clobbers: Y
 ; ============================================================================
 
 emit_byte:
+    ldy DST_PTR+1
+    cpy #>STAGING_END
+    bcs @overflow
     ldy #0
     sta (DST_PTR),y
     inc DST_PTR
     bne :+
     inc DST_PTR+1
 :   rts
+@overflow:
+    ldy #$FF
+    sty OVFLAG
+    rts
 
 ; ============================================================================
 ; inc_src_ptr — advance SRC_PTR by 1.

@@ -354,14 +354,27 @@ setup_staging:
     ora REN_PREGAP_HI
     beq @no_pregap
 
-    ; Source: BUF;  Dest: REN_STAG.  TMP3 = dest ptr.
+    ; staging_start = BUF + gap_size, so dest > source and the regions
+    ; OVERLAP whenever pre_size > gap_size (a buffer more than half full
+    ; with the cursor near the end).  The copy must therefore run
+    ; DESCENDING — an ascending copy overwrites source bytes before
+    ; reading them and destroys the program being renumbered.
+    ;
+    ; Source: SRC_PTR = BUF + pre_size      (one past last source byte)
     lda REN_BUF_LO
+    clc
+    adc REN_PREGAP_LO
     sta SRC_PTR
     lda REN_BUF_HI
+    adc REN_PREGAP_HI
     sta SRC_PTR+1
+    ; Dest: TMP3 = staging_start + pre_size (one past last dest byte)
     lda REN_STAG_LO
+    clc
+    adc REN_PREGAP_LO
     sta TMP3
     lda REN_STAG_HI
+    adc REN_PREGAP_HI
     sta TMP3+1
     ; Counter in TMP2/TMP2+1 (= pre_size, which we just computed above)
     lda REN_PREGAP_LO
@@ -369,23 +382,26 @@ setup_staging:
     lda REN_PREGAP_HI
     sta TMP2+1
 @copy:
-    lda TMP2
-    ora TMP2+1
-    beq @no_pregap
+    ; Pre-decrement both pointers (they start one past the end), copy the
+    ; byte, then count down.
+    lda SRC_PTR
+    bne :+
+    dec SRC_PTR+1
+:   dec SRC_PTR
+    lda TMP3
+    bne :+
+    dec TMP3+1
+:   dec TMP3
     ldy #0
     lda (SRC_PTR),y
     sta (TMP3),y
-    inc SRC_PTR
-    bne :+
-    inc SRC_PTR+1
-:   inc TMP3
-    bne :+
-    inc TMP3+1
-:   lda TMP2
+    lda TMP2
     bne :+
     dec TMP2+1
 :   dec TMP2
-    jmp @copy
+    lda TMP2
+    ora TMP2+1
+    bne @copy
 
 @no_pregap:
     lda REN_STAG_LO
@@ -670,7 +686,10 @@ emit_src_char:
 ; ============================================================================
 ; find_mapping — linear search: TMP2+1:TMP2 → new number.
 ; C=0 found (TMP2+1:TMP2 updated); C=1 not found (unchanged).
-; REN_COUNT_LO assumed < 256 for this iteration.
+; Honors the full 16-bit entry count: the table legitimately holds up to
+; REN_TABLE_MAX (512) entries, so an 8-bit count would search count mod 256
+; entries and silently leave stale line references on programs with 256+
+; lines.  Counter: X = count lo, REN_FM_HI = count hi.
 ; ============================================================================
 find_mapping:
     lda #<REN_TABLE
@@ -678,8 +697,12 @@ find_mapping:
     lda #>REN_TABLE
     sta TMP3+1
     ldx REN_COUNT_LO
-    beq @nf
+    lda REN_COUNT_HI
+    sta REN_FM_HI
 @lp:
+    txa
+    ora REN_FM_HI
+    beq @nf                     ; 16-bit count exhausted
     ldy #0
     lda (TMP3),y
     cmp TMP2
@@ -705,8 +728,12 @@ find_mapping:
     sta TMP3
     bcc :+
     inc TMP3+1
+:   ; 16-bit decrement of the X/REN_FM_HI counter
+    cpx #0
+    bne :+
+    dec REN_FM_HI
 :   dex
-    bne @lp
+    jmp @lp
 @nf:
     sec
     rts
@@ -1159,6 +1186,7 @@ REN_STEP_LO:     .res 1
 REN_STEP_HI:     .res 1
 REN_COUNT_LO:    .res 1
 REN_COUNT_HI:    .res 1
+REN_FM_HI:       .res 1         ; find_mapping 16-bit counter, high byte
 REN_SPINNER:     .res 1
 REN_SPIN_IDX:    .res 1
 

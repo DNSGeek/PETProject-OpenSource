@@ -167,6 +167,13 @@ ASM_SPIN_IDX    = $C05B   ; current color value written to SPIN_CELL
 ASM_MUL_LO      = $C05C   ; ×10 partial (value*2) lo
 ASM_MUL_HI      = $C05D   ; ×10 partial (value*2) hi
 
+; End-of-pass-1 PC, for the pass-2 phase check.  If the two passes end at
+; different PCs (e.g. a forward reference sized as 16-bit in pass 1 that
+; resolved to zero page in pass 2), the emitted PRG is silently misaligned
+; from the point of divergence on — report PHASE ERROR instead.
+ASM_P1END_LO    = $C05E
+ASM_P1END_HI    = $C05F
+
 SPIN_CELL       = $D800   ; color RAM col 0, row 0 (top-left corner)
 SPIN_COLOR_A    = $01     ; white
 SPIN_COLOR_B    = $00     ; black
@@ -358,6 +365,12 @@ assemble:
     sta ASM_PASS
     jsr run_pass
 
+    ; Record where pass 1 ended for the pass-2 phase check below.
+    lda ASM_PC_LO
+    sta ASM_P1END_LO
+    lda ASM_PC_HI
+    sta ASM_P1END_HI
+
     ; ---- Pass 2: emit code ----
     ; Only if no errors in pass 1
     lda ASM_ERR
@@ -386,6 +399,20 @@ assemble:
 :
 
     jsr run_pass
+
+    ; Phase check: both passes must end at the same PC, or the sizes the
+    ; two passes assigned diverged somewhere and every byte after that
+    ; point is misplaced in the output.  set_err keeps only the first
+    ; error, so a real pass-2 error still takes precedence.
+    lda ASM_PC_LO
+    cmp ASM_P1END_LO
+    bne @phase_err
+    lda ASM_PC_HI
+    cmp ASM_P1END_HI
+    beq @phase_ok
+@phase_err:
+    jsr set_err_phase
+@phase_ok:
 
     ; Close output file  -  needs IRQ for serial bus
     cli
@@ -989,19 +1016,35 @@ parse_operand:
     jsr upcase_a
     cmp #'A'
     bne @not_acc
-    ; Peek next: must be space, CR, or ';'
+    ; Look ahead: it's accumulator mode only if the char AFTER the 'A'
+    ; ends the operand (space, CR, ';', or NUL).  Anything else means a
+    ; label/value that merely starts with A ("LSR AVAL", "LDA ARG,X") —
+    ; rewind and parse it as a value.  The rewind is safe: src_advance
+    ; only increments SRC_PTR, and any gap warp already happened at the
+    ; src_peek above, so restoring the saved pointer is exact.
+    lda SRC_PTR
+    sta ASM_MUL_LO              ; free scratch outside parse_decimal
+    lda SRC_PTR+1
+    sta ASM_MUL_HI
     jsr src_advance
     jsr src_peek
+    beq @acc_ok                 ; NUL — end of source
     cmp #' '
     beq @acc_ok
     cmp #$0D
     beq @acc_ok
     cmp #';'
     beq @acc_ok
-    beq @acc_ok
-    ; Not just 'A'  -  back up and treat as label/value
-    ; (can't easily un-advance, so just treat as error if non-label)
-    ; Actually 'A' alone as a label is unusual  -  treat as ACC and hope for best
+    ; Not a bare 'A': rewind to the 'A' and fall into the value paths
+    ; ('#' and '(' checks fail on 'A', landing in the label/value parse).
+    ; @not_acc expects A = upcased first operand char, so re-peek it.
+    lda ASM_MUL_LO
+    sta SRC_PTR
+    lda ASM_MUL_HI
+    sta SRC_PTR+1
+    jsr src_peek
+    jsr upcase_a
+    jmp @not_acc
 @acc_ok:
     lda #MODE_ACC
     sta ASM_MODE
@@ -1717,14 +1760,16 @@ parse_directive:
     jsr src_advance             ; consume closing '"'
     cpx #0
     beq @inc_bad_syn            ; empty filename = syntax error
-    ; Depth check: if SRC_DEPTH >= SRC_MAX_DEPTH, can't push another frame
-    lda SRC_DEPTH
-    cmp #SRC_MAX_DEPTH
-    bcc @inc_depth_ok           ; depth < max: OK to push
+    ; .include is parsed but NOT implemented.  The source walker
+    ; (src_peek / src_advance / run_pass's NUL check) is not frame-aware,
+    ; so pushing a file frame silently ended the pass: everything after
+    ; the .include — in both files — vanished from the output PRG with
+    ; NO error, the most dangerous failure an assembler can have.  Until
+    ; the walker is frame-aware, fail loudly instead.  The frame
+    ; machinery below (@inc_push, fill_line_buf, pop_src_frame) is kept
+    ; as groundwork but is now genuinely unreachable.
     jsr set_err_include
     rts
-@inc_depth_ok:
-    jmp @inc_push               ; skip the stubs
 @inc_bad_dir:
     jmp @unknown_dir
 @inc_bad_syn:
@@ -2587,6 +2632,13 @@ set_err_include:
     sta TMP+1
     jmp set_err_common
 
+set_err_phase:
+    lda #<err_phase_txt
+    sta TMP
+    lda #>err_phase_txt
+    sta TMP+1
+    jmp set_err_common
+
 set_err_truncate:
     lda #<err_truncate_txt
     sta TMP
@@ -2717,7 +2769,9 @@ err_io_txt:
 err_truncate_txt:
     .byte $0C,$09,$0E,$05,$20,$14,$0F,$0F,$20,$0C,$0F,$0E,$07, 0   ; LINE TOO LONG
 err_include_txt:
-    .byte $09,$0E,$03,$0C,$20,$14,$0F,$0F,$20,$04,$05,$05,$10, 0   ; INCL TOO DEEP
+    .byte $09,$0E,$03,$0C,$20,$15,$0E,$13,$15,$10,$10,$0F,$12,$14,$05,$04, 0   ; INCL UNSUPPORTED
+err_phase_txt:
+    .byte $10,$08,$01,$13,$05,$20,$05,$12,$12,$0F,$12, 0            ; PHASE ERROR
 
 ; ============================================================================
 ; Opcode table (526 bytes)

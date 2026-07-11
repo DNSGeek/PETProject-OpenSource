@@ -45,3 +45,6 @@ build/
 
 # Stuff we don't want to send to git
 publish.sh
+
+# Python test harness cache
+__pycache__/

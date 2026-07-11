@@ -33,7 +33,7 @@ CHRIN, CHROUT, READST, GETIN = 0xFFCF, 0xFFD2, 0xFFB7, 0xFFE4
 
 # ---- modasm.asm interface addresses ----
 MOD_COMMAND = 0x0213
-MOD_BUF = 0x0214          # lo/hi
+MOD_BUF = 0x0214  # lo/hi
 MOD_GAP_START = 0x0216
 MOD_GAP_END = 0x0218
 MOD_BUF_END = 0x021A
@@ -46,7 +46,7 @@ ASM_ERR_MSG = 0xC00A
 SRC_DEPTH = 0xBF00
 
 BUF_START = 0x3000
-RETURN_TO = 0xCFFF        # sentinel return address for the module's RTS
+RETURN_TO = 0xCFFF  # sentinel return address for the module's RTS
 
 
 def sc_decode(codes):
@@ -70,12 +70,12 @@ class FakeDrive:
     """Minimal IEC drive + Kernal channel-table emulation."""
 
     def __init__(self, files):
-        self.files = dict(files)      # name -> bytes (disk contents)
-        self.open_files = {}          # lfn -> dict
-        self.st = 0                   # Kernal status byte ($90)
-        self.dflt_in = None           # CHKIN-selected LFN
-        self.dflt_out = None          # CHKOUT-selected LFN
-        self.screen = bytearray()     # CHROUT with no output channel
+        self.files = dict(files)  # name -> bytes (disk contents)
+        self.open_files = {}  # lfn -> dict
+        self.st = 0  # Kernal status byte ($90)
+        self.dflt_in = None  # CHKIN-selected LFN
+        self.dflt_out = None  # CHKOUT-selected LFN
+        self.screen = bytearray()  # CHROUT with no output channel
         self.pend_lfn = self.pend_dev = self.pend_sa = 0
         self.pend_name = ""
         self.bus_violations = []
@@ -95,7 +95,7 @@ class FakeDrive:
         self.pend_lfn, self.pend_dev, self.pend_sa = a, x, y
 
     def setnam(self, length, addr, mem):
-        self.pend_name = bytes(mem[addr:addr + length]).decode("latin1")
+        self.pend_name = bytes(mem[addr : addr + length]).decode("latin1")
 
     def open(self):
         self._bus_command("OPEN")
@@ -153,7 +153,7 @@ class FakeDrive:
             raise AssertionError("CHRIN with no input channel selected")
         f = self.open_files[self.dflt_in]
         if f["missing"]:
-            self.st |= 0x02       # read timeout: drive has nothing to say
+            self.st |= 0x02  # read timeout: drive has nothing to say
             return 0x0D
         data, pos = f["data"], f["pos"]
         if pos < len(data):
@@ -180,6 +180,11 @@ class FakeDrive:
 
 
 class Machine:
+
+    def _w16(self, addr, val):
+        self.mem[addr] = val & 0xFF
+        self.mem[addr + 1] = (val >> 8) & 0xFF
+
     def __init__(self, source, files):
         self.mpu = MPU()
         self.mem = self.mpu.memory
@@ -188,25 +193,21 @@ class Machine:
         prg = PRG.read_bytes()
         load = prg[0] | (prg[1] << 8)
         assert load == 0xA000, f"unexpected load address ${load:04x}"
-        self.mem[load:load + len(prg) - 2] = list(prg[2:])
+        self.mem[load : load + len(prg) - 2] = list(prg[2:])
 
         src = source.replace("\n", "\r").encode("latin1")
         end = BUF_START + len(src)
         self.mem[BUF_START:end] = list(src)
         self._w16(MOD_BUF, BUF_START)
-        self._w16(MOD_GAP_START, end)   # zero-width gap at buffer end
+        self._w16(MOD_GAP_START, end)  # zero-width gap at buffer end
         self._w16(MOD_GAP_END, end)
         self._w16(MOD_BUF_END, end)
         self.mem[MOD_DRIVE] = 8
         self.mem[MOD_STATUS] = 0xFF
-        self.mem[MOD_COMMAND] = 0x01    # batch: no keyboard prompt
+        self.mem[MOD_COMMAND] = 0x01  # batch: no keyboard prompt
         name = b"OUT"
         self.mem[BATCH_FNAME_LEN] = len(name)
-        self.mem[BATCH_FNAME:BATCH_FNAME + len(name)] = list(name)
-
-    def _w16(self, addr, val):
-        self.mem[addr] = val & 0xFF
-        self.mem[addr + 1] = (val >> 8) & 0xFF
+        self.mem[BATCH_FNAME : BATCH_FNAME + len(name)] = list(name)
 
     def _stub_rts(self):
         m = self.mpu
@@ -235,29 +236,32 @@ class Machine:
             if pc == RETURN_TO:
                 return
             if pc == SETLFS:
-                d.setlfs(m.a, m.x, m.y); self._stub_rts()
+                d.setlfs(m.a, m.x, m.y)
             elif pc == SETNAM:
-                d.setnam(m.a, m.x | (m.y << 8), self.mem); self._stub_rts()
+                d.setnam(m.a, m.x | (m.y << 8), self.mem)
             elif pc == OPEN:
-                self._set_carry(d.open()); self._stub_rts()
+                self._set_carry(d.open())
             elif pc == CLOSE:
-                d.close(m.a); self._set_carry(None); self._stub_rts()
+                d.close(m.a)
+                self._set_carry(None)
             elif pc == CHKIN:
-                self._set_carry(d.chkin(m.x)); self._stub_rts()
+                self._set_carry(d.chkin(m.x))
             elif pc == CHKOUT:
-                self._set_carry(d.chkout(m.x)); self._stub_rts()
+                self._set_carry(d.chkout(m.x))
             elif pc == CLRCHN:
-                d.clrchn(); self._stub_rts()
+                d.clrchn()
             elif pc == CHRIN:
-                m.a = d.chrin(); self._stub_rts()
+                m.a = d.chrin()
             elif pc == CHROUT:
-                d.chrout(m.a); self._stub_rts()
+                d.chrout(m.a)
             elif pc == READST:
-                m.a = d.st; self._stub_rts()
+                m.a = d.st
             elif pc == GETIN:
                 raise AssertionError("GETIN called in batch mode")
             else:
                 m.step()
+                continue
+            self._stub_rts()  # every Kernal stub returns like an RTS
         raise AssertionError("execution did not finish (runaway loop?)")
 
     # ---- result accessors ----
@@ -271,7 +275,7 @@ class Machine:
 
     @property
     def err_msg(self):
-        return sc_decode(self.mem[ASM_ERR_MSG:ASM_ERR_MSG + 20])
+        return sc_decode(self.mem[ASM_ERR_MSG : ASM_ERR_MSG + 20])
 
     @property
     def err_line(self):
@@ -279,9 +283,9 @@ class Machine:
 
     def check_clean_finish(self):
         assert not self.drive.bus_violations, self.drive.bus_violations
-        assert not self.drive.screen, (
-            f"{len(self.drive.screen)} output bytes leaked to the screen"
-        )
+        assert (
+            not self.drive.screen
+        ), f"{len(self.drive.screen)} output bytes leaked to the screen"
         for lfn, f in self.drive.open_files.items():
             raise AssertionError(f"LFN {lfn} ({f['name']}) left open")
         assert self.mem[SRC_DEPTH] == 0, "source frame stack not empty"
@@ -349,12 +353,14 @@ def main():
 
     # 2. Single include, labels crossing the file boundary both directions.
     files = {"SUB": petscii("LOOP:   DEX\n        BNE LOOP\n        RTS\n")}
-    src = ("        *= $C000\n"
-           "        LDX #$05\n"
-           "        JSR LOOP\n"          # forward ref into the include
-           "        JMP AFTER\n"
-           '        .include "SUB"\n'
-           "AFTER:  RTS\n")
+    src = (
+        "        *= $C000\n"
+        "        LDX #$05\n"
+        "        JSR LOOP\n"  # forward ref into the include
+        "        JMP AFTER\n"
+        '        .include "SUB"\n'
+        "AFTER:  RTS\n"
+    )
     m = equivalence("single include", src, files)
     expect_output(m, bytes.fromhex("00c0a2052008c04c0cc0cad0fd6060"), "single include")
     print("ok: single include, cross-file labels")
@@ -363,16 +369,18 @@ def main():
     #    (EOF pop cascade), innermost file has no trailing CR.
     files = {
         "F1": petscii('        LDA #$02\n        .include "F2"'),
-        "F2": b"        LDA #$03\r        LDA #$04",   # no trailing CR
+        "F2": b"        LDA #$03\r        LDA #$04",  # no trailing CR
     }
-    src = ('        *= $C000\n        LDA #$01\n        .include "F1"\n        RTS\n')
+    src = '        *= $C000\n        LDA #$01\n        .include "F1"\n        RTS\n'
     equivalence("nested + EOF cascade + no trailing CR", src, files)
     print("ok: nested includes, EOF cascade, missing trailing CR")
 
     # 4. Empty include file, and a file that is a single bare CR.
     files = {"MT": b"", "CR": b"\r"}
-    src = ('        *= $C000\n        LDA #$01\n        .include "MT"\n'
-           '        .include "CR"\n        RTS\n')
+    src = (
+        '        *= $C000\n        LDA #$01\n        .include "MT"\n'
+        '        .include "CR"\n        RTS\n'
+    )
     m = assemble(src, files)
     expect_output(m, bytes.fromhex("00c0a90160"), "empty includes")
     print("ok: empty include files")
@@ -380,8 +388,10 @@ def main():
     # 5. Text after the closing quote is ignored; same file included twice
     #    (LFN must be reusable after close).
     files = {"TW": petscii("        NOP\n")}
-    src = ('        *= $C000\n        .include "TW" ; helpers\n'
-           '        .include "TW"\n        RTS\n')
+    src = (
+        '        *= $C000\n        .include "TW" ; helpers\n'
+        '        .include "TW"\n        RTS\n'
+    )
     m = assemble(src, files)
     expect_output(m, bytes.fromhex("00c0eaea60"), "double include")
     print("ok: comment after include, same file twice")
@@ -393,58 +403,58 @@ def main():
             fs[f"D{i}"] = petscii(f'        LDA #${i:02X}\n        .include "D{i+1}"\n')
         fs[f"D{n}"] = petscii(f"        LDA #${n:02X}\n")
         return fs
+
     src = '        *= $C000\n        .include "D1"\n        RTS\n'
     m = equivalence("7-deep nesting", src, chain(7))
     print("ok: 7-deep nesting (maximum)")
-    m = Machine(src, chain(8)); m.run(); m.check_clean_finish()
+    m = assemble(src, chain(8))
     expect_error(m, "INCLUDE TOO DEEP", "8-deep nesting")
     print("ok: 8-deep nesting rejected")
 
     # 7. Missing file → I/O ERROR, reported on the .include line.
-    m = Machine('        *= $C000\n        NOP\n        .include "NOPE"\n', {})
-    m.run(); m.check_clean_finish()
+    m = assemble('        *= $C000\n        NOP\n        .include "NOPE"\n')
     expect_error(m, "I/O ERROR", "missing file", line=3)
     print("ok: missing include file")
 
     # 8. Error line numbers are per-file: bad mnemonic on line 2 of the
     #    include reports line 2, not the position in the main source.
     files = {"BAD": petscii("        NOP\n        BOGUS $12\n")}
-    m = Machine('        *= $C000\n        NOP\n        NOP\n'
-                '        .include "BAD"\n', files)
-    m.run(); m.check_clean_finish()
-    assert m.status == 1 and m.err_line == 2, (
-        f"per-file line numbers: err={m.err_msg!r} line={m.err_line}, expected 2"
+    m = assemble(
+        "        *= $C000\n        NOP\n        NOP\n" '        .include "BAD"\n', files
     )
+    assert (
+        m.status == 1 and m.err_line == 2
+    ), f"per-file line numbers: err={m.err_msg!r} line={m.err_line}, expected 2"
     print("ok: per-file error line numbers")
 
     # 9. After a clean include, a main-file error still reports the
     #    main-file line (counter restored from the frame).
     files = {"OK1": petscii("        NOP\n")}
-    m = Machine('        *= $C000\n        .include "OK1"\n        NOP\n'
-                "        BOGUS\n", files)
-    m.run(); m.check_clean_finish()
-    assert m.status == 1 and m.err_line == 4, (
-        f"restored line numbers: err={m.err_msg!r} line={m.err_line}, expected 4"
+    m = assemble(
+        '        *= $C000\n        .include "OK1"\n        NOP\n' "        BOGUS\n",
+        files,
     )
+    assert (
+        m.status == 1 and m.err_line == 4
+    ), f"restored line numbers: err={m.err_msg!r} line={m.err_line}, expected 4"
     print("ok: parent line numbers restored after include")
 
     # 10. Over-long line inside an include → LINE TOO LONG, no hang.
     files = {"LNG": petscii("        NOP\n" + "        LDA #$01" + " " * 100 + "; x\n")}
-    m = Machine('        *= $C000\n        .include "LNG"\n', files)
-    m.run(); m.check_clean_finish()
+    m = assemble('        *= $C000\n        .include "LNG"\n', files)
     expect_error(m, "LINE TOO LONG", "long line")
     print("ok: over-long include line")
 
     # 11. .include as the very last line of the main buffer.
     files = {"TAIL": petscii("        LDA #$07\n        RTS\n")}
-    src = '        *= $C000\n        .include "TAIL"'   # no trailing newline
+    src = '        *= $C000\n        .include "TAIL"'  # no trailing newline
     m = assemble(src, files)
     expect_output(m, bytes.fromhex("00c0a90760"), "include on last buffer line")
     print("ok: include on the buffer's last line")
 
     # 12. A NUL byte inside an included file must not truncate the output.
     files = {"NUL": b"        LDA #$05\r\x00\r        LDA #$06\r"}
-    src = ('        *= $C000\n        .include "NUL"\n        RTS\n')
+    src = '        *= $C000\n        .include "NUL"\n        RTS\n'
     m = assemble(src, files)
     expect_output(m, bytes.fromhex("00c0a905a90660"), "NUL byte in include")
     print("ok: NUL byte inside include does not truncate")
@@ -455,13 +465,18 @@ def main():
     # a directive after a label on the same line (see the manual's .text
     # example), which is unrelated to .include.
     files = {
-        "DATA": petscii('MSG:\n        .text "HI"\n        .byte $00\n'
-                        "TAB:\n        .word MSG,TAB\n"),
-        "CODE": petscii("PRINT:  LDA MSG\n        BEQ OUT1\n        JSR $FFD2\n"
-                        "OUT1:   RTS\n"),
+        "DATA": petscii(
+            'MSG:\n        .text "HI"\n        .byte $00\n'
+            "TAB:\n        .word MSG,TAB\n"
+        ),
+        "CODE": petscii(
+            "PRINT:  LDA MSG\n        BEQ OUT1\n        JSR $FFD2\n" "OUT1:   RTS\n"
+        ),
     }
-    src = ('        *= $C000\n        JSR PRINT\n        RTS\n'
-           '        .include "DATA"\n        .include "CODE"\n')
+    src = (
+        "        *= $C000\n        JSR PRINT\n        RTS\n"
+        '        .include "DATA"\n        .include "CODE"\n'
+    )
     equivalence("mixed directives across files", src, files)
     print("ok: data + code directives across multiple files")
 

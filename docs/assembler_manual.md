@@ -564,18 +564,18 @@ All branches use REL mode. Write a label as the target.
 
 When an error occurs, assembly stops at the first error found. The status bar shows a red message and the line number. Fix the problem and reassemble.
 
-| Message         | Meaning                                                                                                     |
-| --------------- | ----------------------------------------------------------------------------------------------------------- |
-| `SYNTAX ERROR`  | The line couldn't be parsed — check for typos, missing colons, or bad `*=` syntax.                          |
-| `VALUE ERROR`   | A number or expression couldn't be evaluated — invalid hex digits, empty expression, etc.                   |
-| `SYMBOL ERROR`  | A label was defined more than once, or the symbol table is full (see [Limits](#12-limits-and-constraints)). |
-| `BAD MNEMONIC`  | The 3-letter instruction name couldn't be read — check your spelling and spacing.                           |
-| `UNKNWN OP`     | The mnemonic is not a known 6502 instruction.                                                               |
-| `BAD OPERAND`   | The operand syntax is wrong — mismatched parentheses, missing `X`/`Y`, etc.                                 |
-| `BAD ADDR MODE` | The instruction doesn't support the addressing mode you used, or a branch target is out of range.           |
-| `I/O ERROR`     | A disk problem — the output file couldn't be written (disk full, write-protected), or an included file is missing or unreadable. |
-| `INCLUDE TOO DEEP` | `.include` files are nested more than 7 levels deep.                                                     |
-| `LINE TOO LONG` | A line in an included file is longer than 80 characters.                                                    |
+| Message            | Meaning                                                                                                                          |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `SYNTAX ERROR`     | The line couldn't be parsed — check for typos, missing colons, or bad `*=` syntax.                                               |
+| `VALUE ERROR`      | A number or expression couldn't be evaluated — invalid hex digits, empty expression, etc.                                        |
+| `SYMBOL ERROR`     | A label was defined more than once, or the symbol table is full (see [Limits](#12-limits-and-constraints)).                      |
+| `BAD MNEMONIC`     | The 3-letter instruction name couldn't be read — check your spelling and spacing.                                                |
+| `UNKNWN OP`        | The mnemonic is not a known 6502 instruction.                                                                                    |
+| `BAD OPERAND`      | The operand syntax is wrong — mismatched parentheses, missing `X`/`Y`, etc.                                                      |
+| `BAD ADDR MODE`    | The instruction doesn't support the addressing mode you used, or a branch target is out of range.                                |
+| `I/O ERROR`        | A disk problem — the output file couldn't be written (disk full, write-protected), or an included file is missing or unreadable. |
+| `INCLUDE TOO DEEP` | `.include` files are nested more than 7 levels deep.                                                                             |
+| `LINE TOO LONG`    | A line in an included file is longer than 80 characters.                                                                         |
 
 ---
 

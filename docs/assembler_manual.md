@@ -276,16 +276,39 @@ The characters are stored as-is. What you type is in PETSCII, so uppercase lette
 
 ### `.include` – Import another assembly file into the current file
 
-> ⚠️ **Not yet supported.** `.include` is reserved for a future release. The
-> assembler recognizes the directive and validates its syntax, but assembly
-> stops with an `INCL UNSUPPORTED` error rather than importing the file. (In
-> earlier builds the directive silently truncated the assembled program —
-> failing loudly is the safe interim behavior.) Keep each source in a single
-> file for now.
+Reads another source file from disk and assembles its lines as if they were
+typed at the position of the directive. The filename must be enclosed in
+double quotes and can be up to 16 characters. The file is read from the same
+drive the assembler writes its output to.
 
 ```
-        .include "another_file.asm"      ; -> INCL UNSUPPORTED
+        .include "macros.asm"       ; assemble MACROS.ASM here
+        JSR CLRSCR                  ; labels defined there are visible
 ```
+
+Details worth knowing:
+
+- **Labels are shared.** Everything defined in an included file goes into the
+  same symbol table, so the main file can reference labels from the include
+  and vice versa (forward references work as usual).
+- **Nesting** is allowed up to 7 levels deep; an 8th level stops assembly
+  with `INCLUDE TOO DEEP`.
+- **Anything after the closing quote is ignored** — the rest of the line is
+  treated as a comment. Put code for the directive's line in the included
+  file instead.
+- **Line numbers in error messages are per-file.** An error on the second
+  line of an included file is reported as line 2, not as a position in the
+  main source. (The editor's jump-to-error will still move within the main
+  buffer, so open the included file to fix it.)
+- **Files are read twice**, once per assembly pass, so assembling from a
+  1541 is naturally slower with many includes.
+- A missing or unreadable file stops assembly with `I/O ERROR` on the
+  `.include` line. Included files saved by the editor work as-is; a SEQ
+  file created by another tool can be pulled in by appending the DOS type
+  suffix inside the quotes, e.g. `.include "helpers,s"` (the suffix counts
+  toward the 16 characters).
+- Source lines in included files can be up to 80 characters; longer lines
+  stop assembly with `LINE TOO LONG`.
 
 ---
 
@@ -541,16 +564,18 @@ All branches use REL mode. Write a label as the target.
 
 When an error occurs, assembly stops at the first error found. The status bar shows a red message and the line number. Fix the problem and reassemble.
 
-| Message         | Meaning                                                                                                     |
-| --------------- | ----------------------------------------------------------------------------------------------------------- |
-| `SYNTAX ERROR`  | The line couldn't be parsed — check for typos, missing colons, or bad `*=` syntax.                          |
-| `VALUE ERROR`   | A number or expression couldn't be evaluated — invalid hex digits, empty expression, etc.                   |
-| `SYMBOL ERROR`  | A label was defined more than once, or the symbol table is full (see [Limits](#12-limits-and-constraints)). |
-| `BAD MNEMONIC`  | The 3-letter instruction name couldn't be read — check your spelling and spacing.                           |
-| `UNKNWN OP`     | The mnemonic is not a known 6502 instruction.                                                               |
-| `BAD OPERAND`   | The operand syntax is wrong — mismatched parentheses, missing `X`/`Y`, etc.                                 |
-| `BAD ADDR MODE` | The instruction doesn't support the addressing mode you used, or a branch target is out of range.           |
-| `I/O ERROR`     | A problem occurred writing the output file — disk full, write-protected disk, etc.                          |
+| Message            | Meaning                                                                                                                          |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `SYNTAX ERROR`     | The line couldn't be parsed — check for typos, missing colons, or bad `*=` syntax.                                               |
+| `VALUE ERROR`      | A number or expression couldn't be evaluated — invalid hex digits, empty expression, etc.                                        |
+| `SYMBOL ERROR`     | A label was defined more than once, or the symbol table is full (see [Limits](#12-limits-and-constraints)).                      |
+| `BAD MNEMONIC`     | The 3-letter instruction name couldn't be read — check your spelling and spacing.                                                |
+| `UNKNWN OP`        | The mnemonic is not a known 6502 instruction.                                                                                    |
+| `BAD OPERAND`      | The operand syntax is wrong — mismatched parentheses, missing `X`/`Y`, etc.                                                      |
+| `BAD ADDR MODE`    | The instruction doesn't support the addressing mode you used, or a branch target is out of range.                                |
+| `I/O ERROR`        | A disk problem — the output file couldn't be written (disk full, write-protected), or an included file is missing or unreadable. |
+| `INCLUDE TOO DEEP` | `.include` files are nested more than 7 levels deep.                                                                             |
+| `LINE TOO LONG`    | A line in an included file is longer than 80 characters.                                                                         |
 
 ---
 
@@ -561,6 +586,9 @@ When an error occurs, assembly stops at the first error found. The status bar sh
 | Label name length         | 8 characters (extra characters are silently ignored)              |
 | Total labels              | 400                                                               |
 | Output filename length    | 16 characters                                                     |
+| `.include` filename       | 16 characters (including any DOS type suffix)                     |
+| `.include` nesting depth  | 7 levels                                                          |
+| Line length in includes   | 80 characters                                                     |
 | Branch range              | ±127 bytes from the instruction after the branch                  |
 | String content in `.text` | No escape sequences; no embedded double quotes                    |
 | Expression arithmetic     | Addition and subtraction of a single numeric offset only          |

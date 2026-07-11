@@ -13,7 +13,7 @@
 ;         Operands: #val  val  val,X  val,Y  (val)  (val,X)  (val),Y  A
 ;         Values: $xx/$xxxx hex, decimal, label, label+N, label-N, <expr, >expr
 ;         Directives: .org / *= addr    .byte val[,val...]    .word val[,val...]
-;                     .text "string"
+;                     .text "string"    .include "filename"
 ;
 ; Output: PRG file written directly to disk via Kernal channel I/O.
 ;         Filename: editor prompts for output name via status bar before assembly.
@@ -223,11 +223,20 @@ SRC_FRAME_LHI   = 5
 
 SRC_KIND_BUFFER = 0
 SRC_KIND_FILE   = 1
+SRC_KIND_FEOF   = 2       ; file frame whose final line has been read.  The
+                          ; last byte of a serial file arrives WITH the EOF
+                          ; status (EOI), so EOF is known one fill early;
+                          ; this latch makes the next fill_line_buf report
+                          ; EOF without touching the bus again (re-reading a
+                          ; drained channel would raise a timeout error).
 
 LINE_BUF        = $BF40   ; one shared line buffer for the active file frame
-LINE_BUF_MAX    = 80      ; ($BF40..$BF8F); longer lines truncate with error
+LINE_BUF_MAX    = 80      ; 80 content bytes ($BF40..$BF8F); longer lines
+                          ; truncate with LINE TOO LONG.  fill_line_buf
+                          ; appends CR + NUL after the content, so the
+                          ; buffer proper extends to $BF91.
 LINE_BUF_END    = $BF31   ; lo byte of address past last content byte (hi=$BF always)
-                          ; set by fill_line_buf; used by @file_skip to detect line end
+                          ; set by fill_line_buf (points at the CR terminator)
 INC_LFN_BASE    = 5       ; LFN for depth-1 include; depth-N uses LFN (INC_LFN_BASE+N-1)
 
 
@@ -499,8 +508,16 @@ run_pass:
     ; The editor buffer tail past the last CR may be NUL-filled.
     ; src_at_end only checks the address bounds; without this, the line loop
     ; would spin forever on NUL bytes between the last CR and BUF_END.
+    ; Only applies to the depth-0 editor buffer: a NUL inside an included
+    ; file is just junk content — ending the pass on it would silently
+    ; truncate the output.  parse_line treats a leading NUL as a blank
+    ; line, and skip_to_next_line still consumes one file line per
+    ; iteration, so the loop cannot spin.
     jsr src_peek
+    bne :+
+    lda SRC_DEPTH
     beq @done_pass
+:
 
     ; Increment line counter
     inc ASM_LINE_LO
@@ -530,6 +547,14 @@ run_pass:
     jmp @line_loop
 
 @done_pass:
+    ; Safety net: if the loop ended with include frames still open (only
+    ; possible via an abnormal exit), close them so their LFNs are free
+    ; for the next pass.
+    lda SRC_DEPTH
+    beq @pass_done
+    jsr pop_src_frame
+    jmp @done_pass
+@pass_done:
     rts
 
 ; ============================================================================
@@ -1760,15 +1785,13 @@ parse_directive:
     jsr src_advance             ; consume closing '"'
     cpx #0
     beq @inc_bad_syn            ; empty filename = syntax error
-    ; .include is parsed but NOT implemented.  The source walker
-    ; (src_peek / src_advance / run_pass's NUL check) is not frame-aware,
-    ; so pushing a file frame silently ended the pass: everything after
-    ; the .include — in both files — vanished from the output PRG with
-    ; NO error, the most dangerous failure an assembler can have.  Until
-    ; the walker is frame-aware, fail loudly instead.  The frame
-    ; machinery below (@inc_push, fill_line_buf, pop_src_frame) is kept
-    ; as groundwork but is now genuinely unreachable.
-    jsr set_err_include
+    ; Depth check: frame 0 is the editor buffer, so the stack holds at
+    ; most SRC_MAX_DEPTH-1 file frames.  The new frame goes at index
+    ; SRC_DEPTH+1, which must stay below SRC_MAX_DEPTH.
+    lda SRC_DEPTH
+    cmp #SRC_MAX_DEPTH-1
+    bcc @inc_push
+    jsr set_err_deep
     rts
 @inc_bad_dir:
     jmp @unknown_dir
@@ -1776,11 +1799,13 @@ parse_directive:
     jmp @err
 
 @inc_push:
-    ; Compute address of the NEW frame (at index SRC_DEPTH) into TMP2.
+    ; Compute address of the NEW frame (at index SRC_DEPTH+1) into TMP2.
     ; Same N*6 multiply used in src_at_end / skip_to_next_line.
-    ; At this point SRC_DEPTH is the index of the frame we're about to write
-    ; (it gets incremented AFTER the frame is set up).
+    ; SRC_DEPTH itself is incremented only after the file is open, so an
+    ; OPEN failure leaves the stack untouched.
     lda SRC_DEPTH
+    clc
+    adc #1                      ; new frame index = current top + 1
     asl                         ; *2
     sta TMP2
     asl                         ; *4
@@ -1836,24 +1861,39 @@ parse_directive:
     ldy #>LINE_BUF
     jsr SETNAM
 
+    ; OPEN sends commands on the serial bus, which drops any active
+    ; LISTEN — in pass 2 that is the output file's channel.  Release it
+    ; cleanly first, re-select it after (resume_output).
+    jsr CLRCHN
+
     ; OPEN the file
     jsr OPEN
     bcc @inc_opened
-    ; OPEN failed (file not found etc.)
+    ; OPEN failed (device not present, too many files, ...).  Release the
+    ; LFN in case OPEN half-registered it, restore the output channel,
+    ; and report.
+    lda TMP3                    ; LFN (still intact — Kernal leaves $3E alone)
+    jsr CLOSE
+    jsr resume_output
     jsr set_err_io
     rts
 
 @inc_opened:
-    ; Increment depth now that the frame is fully set up and file is open
+    ; Increment depth now that the frame is fully set up and file is open.
+    ; The first line is NOT loaded here: run_pass unconditionally calls
+    ; skip_to_next_line after this directive's line is parsed, and its
+    ; file-frame path does the first fill_line_buf.  Filling here too
+    ; would load line 1 and then immediately discard it.
     inc SRC_DEPTH
 
-    ; Load the first line of the included file.
-    ; fill_line_buf does CHKIN/CHRIN and sets SRC_PTR = LINE_BUF.
-    jsr fill_line_buf
-    bcc @inc_done               ; C=0: got a line, ready to parse
-    ; C=1: file was empty — pop the frame immediately (CLOSE + restore)
-    jsr pop_src_frame
-@inc_done:
+    ; Included file gets its own 1-based line numbers: run_pass increments
+    ; ASM_LINE at the top of its loop, so 0 here makes the include's first
+    ; line report as line 1.  (The parent's counter was saved in the frame.)
+    lda #0
+    sta ASM_LINE_LO
+    sta ASM_LINE_HI
+
+    jsr resume_output
     rts
 
 @dir_unknown:
@@ -2106,7 +2146,15 @@ sym_lookup:
 ; ============================================================================
 
 ; src_peek  -  A = byte at SRC_PTR, skipping gap. 0 if at end.
+; Frame-aware: depth 0 reads the editor gap buffer (original logic below);
+; depth >0 means the top frame is an include file whose current line sits
+; in LINE_BUF, so no gap or bounds logic applies — just return the byte.
+; fill_line_buf terminates every line with CR + NUL, so a scan can never
+; run past the line into garbage: the NUL reads as end-of-source, exactly
+; like the buffer path's end check.
 src_peek:
+    lda SRC_DEPTH
+    bne @file_peek
     ; Preserves Y via stack  -  callers (check_for_label, parse_label_ref) use Y as index.
     ; If SRC_PTR is in gap: jump to GAP_END
     lda SRC_PTR+1
@@ -2138,6 +2186,14 @@ src_peek:
     lda #0
     rts
 
+@file_peek:
+    sty ASM_YPEEK               ; same Y-preservation contract as above
+    ldy #0
+    lda (SRC_PTR),y
+    ldy ASM_YPEEK
+    ora #0                      ; re-assert Z based on A
+    rts
+
 ; src_advance  -  advance SRC_PTR by 1
 src_advance:
     inc SRC_PTR
@@ -2167,11 +2223,11 @@ src_at_end:
     lda #>SRC_STACK
     adc #0
     sta TMP3+1                   ; TMP3 hi = frame base hi
-    ; Read KIND field
+    ; Read KIND field (FILE or FEOF — both are file frames)
     ldy #SRC_FRAME_KIND
     lda (TMP3),y
     cmp #SRC_KIND_FILE
-    beq @file_frame
+    bcs @file_frame
 
 @buf_frame:
     ; Original gap-buffer end logic (inline, no JSR overhead):
@@ -2203,8 +2259,9 @@ src_at_end:
     rts
 
 @file_frame:
-    ; Step 2+ will fill this in.  Unreachable until .include push is wired.
-    ; For now: never at end (safe placeholder; step 2 replaces this).
+    ; A file frame always has a parsed-or-parseable line in LINE_BUF:
+    ; EOF is detected in skip_to_next_line, which pops the frame before
+    ; control returns to run_pass.  So a file frame is never "at end".
     lda #0
     rts
 
@@ -2240,7 +2297,7 @@ skip_to_next_line:
     ldy #SRC_FRAME_KIND
     lda (TMP3),y
     cmp #SRC_KIND_FILE
-    beq @file_skip
+    bcs @file_skip              ; FILE or FEOF
 
 @buf_skip:
     ; Original scan-for-CR logic:
@@ -2258,12 +2315,21 @@ skip_to_next_line:
 
 @file_skip:
     ; A line from an included file was just parsed.  Load the next one.
-    ; If the file is exhausted, close it and pop the frame so the parent
-    ; source (buffer or outer include) resumes seamlessly.
+    ; If the file is exhausted, close it, pop the frame, and finish
+    ; skipping the parent's .include line:
+    ;   - a FILE parent's copy of that line in the shared LINE_BUF was
+    ;     overwritten by the child's lines, so "skip" there means loading
+    ;     the parent's next line from disk — and popping again if THAT
+    ;     hits EOF (the .include was the parent's last line), hence the
+    ;     loop back to @file_skip;
+    ;   - the depth-0 buffer parent's line is intact in the editor
+    ;     buffer, so scan past its CR like any other line.
     jsr fill_line_buf           ; C=0: line ready, SRC_PTR = LINE_BUF
     bcc @file_done              ; C=1: EOF
-    ; EOF: close channel, pop frame, restore parent SRC_PTR
-    jsr pop_src_frame
+    jsr pop_src_frame           ; close file, restore parent SRC_PTR/line
+    lda SRC_DEPTH
+    bne @file_skip              ; parent is a file frame: fetch its next line
+    jmp @buf_skip               ; parent is the editor buffer: normal CR scan
 @file_done:
     rts
 
@@ -2356,6 +2422,21 @@ close_output:
     jsr CLOSE
     lda #0
     sta ASM_OUT_OPEN
+@done:
+    rts
+
+; resume_output  -  re-select the output file as the active output channel.
+; Pass 2 relies on the channel set once by open_output staying active for
+; every emit_byte (a bare CHROUT); any include-file I/O in between must
+; CLRCHN to switch serial bus roles, then call this to put it back.
+; No-op when the output file isn't open (pass 1). Clobbers A, X.
+resume_output:
+    lda ASM_OUT_OPEN
+    beq @done
+    ldx #ASM_OUT_LA_VAL
+    jsr CHKOUT
+    bcc @done
+    jsr set_err_io
 @done:
     rts
 
@@ -2481,6 +2562,23 @@ fill_line_buf:
     adc #0
     sta TMP2+1                  ; TMP2 = base of top frame
 
+    ; If a previous fill saw the EOF status arrive with the file's final
+    ; byte, the frame was latched to FEOF: the file is fully consumed.
+    ; Report EOF without touching the bus (no channel was selected yet,
+    ; so nothing to release or restore).
+    ldy #SRC_FRAME_KIND
+    lda (TMP2),y
+    cmp #SRC_KIND_FEOF
+    bne :+
+    sec
+    rts
+:
+
+    ; Release whatever channel is active before switching the serial bus
+    ; to TALK for this file.  In pass 2 that is the output file's LISTEN;
+    ; resume_output re-selects it on every exit path below.
+    jsr CLRCHN
+
     ; Get LFN from frame
     ldy #SRC_FRAME_LFN
     lda (TMP2),y                ; A = LFN
@@ -2504,7 +2602,9 @@ fill_line_buf:
     and #$42                    ; bit 6 = EOF, bit 1 = read error
     sta TMP                     ; save status
     pla                         ; restore char
-    bit TMP
+    ldx TMP                     ; X = status; Z reflects it (BIT would test
+                                ; A&status — wrong: a final CR has no bits
+                                ; in common with $42 and EOF would be missed)
     bne @check_eof_or_err       ; non-zero status: EOF or error
 
     ; Normal byte
@@ -2519,25 +2619,49 @@ fill_line_buf:
     jmp @read_loop
 
 @overflow:
-    ; Line exceeds LINE_BUF_MAX: drain chars until CR/EOF, report error
+    ; Line exceeds LINE_BUF_MAX: drain chars until CR/EOF, report error.
+    ; set_err_common's copy loop clobbers Y (our line index) — preserve it
+    ; so the drain keeps draining instead of resuming stores mid-buffer.
+    tya
+    pha
     jsr set_err_truncate
+    pla
+    tay
     ; keep reading to consume the rest of the line
     jmp @read_loop
 
 @check_eof_or_err:
+    tax                         ; X = the byte that arrived with the status
     lda TMP
-    and #$02                    ; bit 1 = read error
+    and #$02                    ; bit 1 = read error / timeout
     bne @io_err
-    ; bit 6 = EOF.  The last CHRIN may have returned the final byte
-    ; before the EOF status, so treat A (already restored) as valid
-    ; if Y==0 (no bytes yet, pure EOF) we return C=1.
-    ; If Y>0 the final partial line gets flushed normally below.
+    ; bit 6 = EOF.  On the serial bus the drive delivers the file's FINAL
+    ; byte together with the EOF status (EOI), so the byte in X is real
+    ; content — unless it's the line's own CR terminator.  Latch the
+    ; frame to FEOF so the next fill reports EOF without re-reading a
+    ; drained channel (which would raise a spurious timeout).
+    sty TMP                     ; save line index (status no longer needed)
+    lda #SRC_KIND_FEOF
+    ldy #SRC_FRAME_KIND
+    sta (TMP2),y
+    ldy TMP                     ; restore line index
+    txa
+    cmp #$0D
+    beq @eof_have_line          ; file ended with CR: line complete as-is
+    cpy #LINE_BUF_MAX
+    bcs @eof_have_line          ; no room: drop (LINE TOO LONG already set)
+    sta LINE_BUF,y              ; keep the final byte
+    iny
+@eof_have_line:
     cpy #0
     beq @eof_empty              ; nothing read at all → pure EOF
-    ; fall through: flush partial line as a valid line
+    ; fall through: flush final (possibly CR-less) line as a valid line
 
 @end_of_line:
-    ; Terminate LINE_BUF with CR (parser expects it)
+    ; Terminate LINE_BUF with CR (parser expects it), then a NUL sentinel
+    ; so a runaway scan reads end-of-source instead of stale bytes.
+    lda #0
+    sta LINE_BUF+1,y
     lda #$0D
     sta LINE_BUF,y              ; write CR terminator
     ; LINE_BUF_END = lo byte of &LINE_BUF[y] (hi is always $BF)
@@ -2547,6 +2671,7 @@ fill_line_buf:
     sta LINE_BUF_END            ; points at the CR byte
 
     jsr CLRCHN                  ; release input channel
+    jsr resume_output           ; pass 2: re-select the output file
 
     ; Point SRC_PTR at start of LINE_BUF
     lda #<LINE_BUF
@@ -2559,11 +2684,26 @@ fill_line_buf:
 
 @eof_empty:
     jsr CLRCHN
+    jsr resume_output
     sec                         ; C=1: EOF, no line
     rts
 
 @io_err:
+    ; A failure before any line of this file was read (a missing file
+    ; times out on the very first byte) would report "line 0" — point it
+    ; at the parent's .include line, saved in this frame, instead.
+    lda ASM_LINE_LO
+    ora ASM_LINE_HI
+    bne :+
+    ldy #SRC_FRAME_LLO
+    lda (TMP2),y
+    sta ASM_LINE_LO
+    ldy #SRC_FRAME_LHI
+    lda (TMP2),y
+    sta ASM_LINE_HI
+:
     jsr CLRCHN
+    jsr resume_output
     jsr set_err_io
     sec                         ; treat I/O error as EOF to avoid infinite loop
     rts
@@ -2592,10 +2732,14 @@ pop_src_frame:
     adc #0
     sta TMP2+1
 
-    ; Close the file: CLOSE(LFN)
+    ; Close the file: CLOSE(LFN).  CLOSE talks on the serial bus, which
+    ; drops any active LISTEN — release channels first and re-select the
+    ; output file after (pass 2).
+    jsr CLRCHN
     ldy #SRC_FRAME_LFN
     lda (TMP2),y
     jsr CLOSE                   ; Kernal CLOSE — always succeeds (ignores bad LFN)
+    jsr resume_output
 
     ; Restore ASM_LINE from frame (per-file line counter)
     ldy #SRC_FRAME_LLO
@@ -2625,10 +2769,10 @@ pop_src_frame:
 ; All check ASM_ERR first; only first error is kept.
 ; Each routine: loads message address into TMP/TMP+1, falls into set_err_common.
 
-set_err_include:
-    lda #<err_include_txt
+set_err_deep:
+    lda #<err_deep_txt
     sta TMP
-    lda #>err_include_txt
+    lda #>err_deep_txt
     sta TMP+1
     jmp set_err_common
 
@@ -2768,8 +2912,8 @@ err_io_txt:
     .byte $09,$2F,$0F,$20,$05,$12,$12,$0F,$12, 0                    ; I/O ERROR
 err_truncate_txt:
     .byte $0C,$09,$0E,$05,$20,$14,$0F,$0F,$20,$0C,$0F,$0E,$07, 0   ; LINE TOO LONG
-err_include_txt:
-    .byte $09,$0E,$03,$0C,$20,$15,$0E,$13,$15,$10,$10,$0F,$12,$14,$05,$04, 0   ; INCL UNSUPPORTED
+err_deep_txt:
+    .byte $09,$0E,$03,$0C,$15,$04,$05,$20,$14,$0F,$0F,$20,$04,$05,$05,$10, 0   ; INCLUDE TOO DEEP
 err_phase_txt:
     .byte $10,$08,$01,$13,$05,$20,$05,$12,$12,$0F,$12, 0            ; PHASE ERROR
 

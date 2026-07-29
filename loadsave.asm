@@ -350,22 +350,22 @@ load_body:
 
 do_save_file:
     ; ---- Compact gap so content is contiguous ----
-    jsr compact_gap                 ; WORK_PTR = one-past-end of content
+    jsr compact_gap                 ; TXT_PTR = one-past-end of content
 
 ; ---- Ensure content ends with CR ----
-    lda WORK_PTR
+    lda TXT_PTR
     cmp #<work_buf
     bne @check_last_cr
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     cmp #>work_buf
     beq @no_append_cr           ; empty buffer
 
 @check_last_cr:
-    ; Read byte at WORK_PTR-1 using Y offset trick: set ptr to WORK_PTR-1
-    ; Use TMP as the peek pointer to avoid corrupting WORK_PTR
-    lda WORK_PTR
+    ; Read byte at TXT_PTR-1 using Y offset trick: set ptr to TXT_PTR-1
+    ; Use TMP as the peek pointer to avoid corrupting TXT_PTR
+    lda TXT_PTR
     sta TMP
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     sta TMP+1
     lda TMP
     bne :+
@@ -376,15 +376,15 @@ do_save_file:
     cmp #PET_CR
     beq @no_append_cr
     lda #PET_CR
-    sta (WORK_PTR),y            ; Y is still 0
-    inc WORK_PTR
+    sta (TXT_PTR),y            ; Y is still 0
+    inc TXT_PTR
     bne @no_append_cr
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 
 @no_append_cr:
-    lda WORK_PTR
+    lda TXT_PTR
     sta IO_END_LO
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     sta IO_END_HI
 
     ; Re-open gap at end of compacted content
@@ -524,9 +524,9 @@ do_save_file:
 
 @restore_gap:
     ; Tokenize failed — restore gap pointers to plain-text content end
-    lda WORK_PTR
+    lda TXT_PTR
     sta GAP_START
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     sta GAP_START+1
     lda #<work_buf_end
     sta GAP_END
@@ -771,15 +771,15 @@ basic_yn_text:
 
 ; ============================================================================
 ; compact_gap — copy [GAP_END..work_buf_end) down to GAP_START.
-; Returns new content-end in WORK_PTR.
-; Clobbers: WORK_PTR, BUF_PTR, A, Y
+; Returns new content-end in TXT_PTR.
+; Clobbers: TXT_PTR, BUF_PTR, A, Y
 ; ============================================================================
 
 compact_gap:
     lda GAP_END
-    sta WORK_PTR
+    sta TXT_PTR
     lda GAP_END+1
-    sta WORK_PTR+1
+    sta TXT_PTR+1
 
     lda GAP_START
     sta BUF_PTR
@@ -787,20 +787,20 @@ compact_gap:
     sta BUF_PTR+1
 
 @loop:
-    lda WORK_PTR
+    lda TXT_PTR
     cmp #<work_buf_end
     bne @byte
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     cmp #>work_buf_end
     beq @done
 
 @byte:
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     sta (BUF_PTR),y
-    inc WORK_PTR
+    inc TXT_PTR
     bne :+
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 :   inc BUF_PTR
     bne @loop
     inc BUF_PTR+1
@@ -808,9 +808,9 @@ compact_gap:
 
 @done:
     lda BUF_PTR
-    sta WORK_PTR
+    sta TXT_PTR
     lda BUF_PTR+1
-    sta WORK_PTR+1
+    sta TXT_PTR+1
     rts
 
 ; ============================================================================

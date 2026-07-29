@@ -339,18 +339,18 @@ mpop_draw_box:
     jsr mpop_row_ptr
     ldy #MPOP_LEFT
     lda #$70                        ; top-left corner
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
 @top_bar:
     cpy #(MPOP_LEFT + MPOP_WIDTH + 1)
     beq @top_right
     lda #$40
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     bne @top_bar
 @top_right:
     lda #$6E                        ; top-right corner
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     lda #MPOP_TOP
     jsr mpop_color_chrome
 
@@ -364,16 +364,16 @@ mpop_draw_box:
     jsr mpop_row_ptr
     ldy #MPOP_LEFT
     lda #$5D
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     ldy #(MPOP_LEFT + MPOP_WIDTH + 1)
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     ; Clear inner content of this row
     ldy #(MPOP_LEFT + 1)
     lda #$20
 @clr:
     cpy #(MPOP_LEFT + MPOP_WIDTH + 1)
     beq @clr_done
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     bne @clr
 @clr_done:
@@ -387,18 +387,18 @@ mpop_draw_box:
     jsr mpop_row_ptr
     ldy #MPOP_LEFT
     lda #$6D                        ; bot-left
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
 @bot_bar:
     cpy #(MPOP_LEFT + MPOP_WIDTH + 1)
     beq @bot_right
     lda #$40
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     bne @bot_bar
 @bot_right:
     lda #$7D
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     lda #(MPOP_TOP + 8)
     jsr mpop_color_chrome
     rts
@@ -415,7 +415,7 @@ mpop_draw_title:
 @loop:
     lda mpop_title_text,x
     beq @done
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     inx
     bne @loop
@@ -443,7 +443,7 @@ mpop_draw_item:
     ; Compute screen row = MPOP_ITEM_ROW0 + item_index
     clc
     adc #MPOP_ITEM_ROW0
-    jsr mpop_row_ptr                ; WORK_PTR = screen addr of this row
+    jsr mpop_row_ptr                ; SCREEN_PTR = screen addr of this row
                                     ; (mpop_row_ptr clobbers A, X but not stack)
     pla                             ; restore item_index
     pha                             ; keep a copy on stack
@@ -456,7 +456,7 @@ mpop_draw_item:
 @clr_row:
     cpy #(MPOP_LEFT + MPOP_WIDTH + 1)
     beq @clr_done
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     bne @clr_row
 @clr_done:
@@ -466,13 +466,13 @@ mpop_draw_item:
     txa
     clc
     adc #$31                        ; screen code for '1'..'5' ($31..$35)
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     lda #$2E                        ; '.' screen code
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     lda #$20                        ; space
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny                             ; Y = MPOP_INNER_LEFT + 3 = first desc char column
 
     ; Point LPTR at description string for this item
@@ -498,7 +498,7 @@ mpop_draw_item:
     txa                             ; restore A and set Z correctly
     beq @desc_done                  ; zero terminator
 
-    sta (WORK_PTR),y                ; write to screen RAM
+    sta (SCREEN_PTR),y                ; write to screen RAM
     iny                             ; advance screen col
     cpy #(MPOP_LEFT + MPOP_WIDTH + 1) ; don't overflow row
     beq @desc_done
@@ -515,7 +515,7 @@ mpop_draw_item:
 @pad:
     cpy #(MPOP_LEFT + MPOP_WIDTH + 1)
     beq @pad_done
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     bne @pad
 @pad_done:
@@ -1065,7 +1065,7 @@ mod_call_trampoline:
     jmp (LPTR)
 
 ; ============================================================================
-; mpop_row_ptr — set WORK_PTR to screen RAM start of row A.
+; mpop_row_ptr — set SCREEN_PTR to screen RAM start of row A.
 ; Clobbers A, X. Does NOT touch MOD_TMP, MOD_ITEM_TMP, or stack.
 ; ============================================================================
 
@@ -1089,14 +1089,14 @@ mpop_row_ptr:
     lda #<SCREEN
     clc
     adc TMP
-    sta WORK_PTR
+    sta SCREEN_PTR
     lda #>SCREEN
     adc TMP+1
-    sta WORK_PTR+1
+    sta SCREEN_PTR+1
     rts
 
 ; ============================================================================
-; mpop_color_ptr — set WORK_PTR to color RAM start of row A.
+; mpop_color_ptr — set SCREEN_PTR to color RAM start of row A.
 ; ============================================================================
 
 mpop_color_ptr:
@@ -1119,10 +1119,10 @@ mpop_color_ptr:
     lda #<COLOR
     clc
     adc TMP
-    sta WORK_PTR
+    sta SCREEN_PTR
     lda #>COLOR
     adc TMP+1
-    sta WORK_PTR+1
+    sta SCREEN_PTR+1
     rts
 
 ; ============================================================================
@@ -1138,7 +1138,7 @@ mpop_color_chrome:
     ldy #0
     lda #POP_CHROME_CLR
 @loop:
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     cpy #COLS
     bne @loop
@@ -1152,7 +1152,7 @@ mpop_color_white:
     ldy #0
     lda #POP_HILITE_CLR
 @loop:
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     cpy #COLS
     bne @loop

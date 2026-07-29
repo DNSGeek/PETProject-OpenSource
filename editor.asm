@@ -136,7 +136,7 @@ SAVED_X:      .res 1        ; lookup_screen uses this to preserve X
 CURSOR_ROW:   .res 1        ; visible row 0..23 in content area
 CURSOR_COL:   .res 1        ; visible column 0..39 (after LEFT_COL applied)
 COL_SAVE:     .res 1        ; saved column for up/down movement
-WORK_PTR:     .res 2        ; scratch pointer for cursor walks
+TXT_PTR:      .res 2        ; text/buffer scratch pointer (never screen RAM)
 LPTR:         .res 2        ; load/save label pointer (loadsave.asm)
 CLR_PTR:      .res 2        ; color RAM row pointer
 CLR_KWLEN:    .res 1        ; keyword length returned by col_try_keyword
@@ -546,7 +546,7 @@ main_loop:
 ; Snapshots the viewport origin (for scroll detection in the @moved fast path)
 ; and erases the cursor at its CURRENT cell BEFORE the move routine changes
 ; CURSOR_ROW/COL, so the no-scroll fast path leaves no stale highlight behind.
-; Clobbers A, X, Y (erase_cursor), WORK_PTR.
+; Clobbers A, X, Y (erase_cursor), TXT_PTR.
 ; ============================================================================
 move_begin:
     lda TOP_LINE
@@ -777,27 +777,27 @@ setup_screen:
 
     ; Copy test content into work_buf.
     lda #<test_buffer
-    sta WORK_PTR
+    sta TXT_PTR
     lda #>test_buffer
-    sta WORK_PTR+1
+    sta TXT_PTR+1
     lda #<work_buf
     sta BUF_PTR
     lda #>work_buf
     sta BUF_PTR+1
 @copy:
-    lda WORK_PTR
+    lda TXT_PTR
     cmp #<buffer_end
     bne @do_byte
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     cmp #>buffer_end
     beq @copy_done
 @do_byte:
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     sta (BUF_PTR),y
-    inc WORK_PTR
+    inc TXT_PTR
     bne :+
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 :   inc BUF_PTR
     bne @copy
     inc BUF_PTR+1
@@ -871,11 +871,11 @@ setup_screen_blank:
 ; row's screen/color RAM only, not CURSOR_ROW/COL.
 ; ============================================================================
 modal_draw_text:
-    sta WORK_PTR
-    stx WORK_PTR+1
+    sta TXT_PTR
+    stx TXT_PTR+1
     ldy #0
 @mdt_str:
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     beq @mdt_fill                 ; NUL -> fill remainder of the row
     ora #SCR_REVERSE              ; reverse video for the alert bar
     sta STATUS_ROW,y
@@ -963,7 +963,7 @@ status_text:
 ; Up/down arrows move between rows.
 ; F2 or RUN/STOP closes. Changes apply live and are saved on close.
 ;
-; Screen-writing helpers use WORK_PTR as a screen RAM pointer and
+; Screen-writing helpers use SCREEN_PTR as a screen RAM pointer and
 ; TMP as scratch — safe since no editor operations run while open.
 ; ============================================================================
 
@@ -1181,22 +1181,22 @@ settings_draw_all:
 settings_draw_box:
     ; --- top border (row POP_TOP) ---
     lda #POP_TOP
-    jsr pop_row_ptr                ; WORK_PTR = screen addr of row start + POP_LEFT
+    jsr pop_row_ptr                ; SCREEN_PTR = screen addr of row start + POP_LEFT
 
     ldy #POP_LEFT
     lda #$70                       ; top-left corner
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
 @top_line:
     cpy #(POP_LEFT + POP_WIDTH + 1)
     beq @top_right
     lda #$40                       ; horizontal bar
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     bne @top_line
 @top_right:
     lda #$6E                       ; top-right corner
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
 
     ; color the top border row
     lda #POP_TOP
@@ -1212,9 +1212,9 @@ settings_draw_box:
     jsr pop_row_ptr
     ldy #POP_LEFT
     lda #$5D                       ; vertical bar left
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     ldy #(POP_LEFT + POP_WIDTH + 1)
-    sta (WORK_PTR),y               ; vertical bar right
+    sta (SCREEN_PTR),y               ; vertical bar right
 
     lda POP_ROW_CTR
     jsr pop_color_row
@@ -1228,18 +1228,18 @@ settings_draw_box:
     jsr pop_row_ptr
     ldy #POP_LEFT
     lda #$6D                       ; bottom-left corner
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
 @bot_line:
     cpy #(POP_LEFT + POP_WIDTH + 1)
     beq @bot_right
     lda #$40
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     bne @bot_line
 @bot_right:
     lda #$7D                       ; bottom-right corner
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
 
     lda #(POP_TOP + 9)
     jsr pop_color_row
@@ -1262,7 +1262,7 @@ settings_draw_title:
 @loop:
     lda a:pop_title_text,x
     beq @done
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     inx
     bne @loop
@@ -1295,7 +1295,7 @@ settings_draw_row:
     adc #(POP_TOP + 3)
     sta POP_ROW_TMP                ; remember for color pass
 
-    jsr pop_row_ptr                ; WORK_PTR = screen addr of this row
+    jsr pop_row_ptr                ; SCREEN_PTR = screen addr of this row
 
     ; Clear inner content of this row (cols POP_INNER_LEFT..POP_LEFT+POP_WIDTH)
     ldy #POP_INNER_LEFT
@@ -1303,7 +1303,7 @@ settings_draw_row:
 @clr:
     cpy #(POP_LEFT + POP_WIDTH + 1)
     beq @clr_done
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     bne @clr
 @clr_done:
@@ -1313,15 +1313,15 @@ settings_draw_row:
 
     ; Write label
     ldy #POP_INNER_LEFT
-    jsr settings_write_label       ; writes label at (WORK_PTR),Y; Y advances
+    jsr settings_write_label       ; writes label at (SCREEN_PTR),Y; Y advances
 
     ; Write value field "[ xx]" at fixed column 16
     ldy #16
     lda #$5B                       ; "[" screen code
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     lda #$20
-    sta (WORK_PTR),y               ; leading space
+    sta (SCREEN_PTR),y               ; leading space
     iny
 
     ; Get the current value and render it
@@ -1335,11 +1335,11 @@ settings_draw_row:
     bcs @two_digits
     pha                            ; single digit — save value
     lda #$20                       ; pad with space
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     pla
     jsr digit_to_screen            ; convert ones digit
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     jmp @close_bracket
 @two_digits:
@@ -1361,11 +1361,11 @@ settings_draw_row:
     pha
     lda TMP
     jsr digit_to_screen
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     pla
     jsr digit_to_screen
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     jmp @close_bracket
 
@@ -1378,48 +1378,48 @@ settings_draw_row:
     ; " ON" — 3-char field: back up to col 17 to fill the leading-space slot too
     dey                            ; back to col 17 (leading space position)
     lda #$20                       ; ' '
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     lda #$0F                       ; 'O'
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     lda #$0E                       ; 'N'
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     jmp @close_bracket
 @blink_off:
     ; "OFF" — 3-char field: back up to col 17
     dey                            ; back to col 17
     lda #$0F                       ; 'O'
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     lda #$06                       ; 'F'
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     lda #$06                       ; 'F'
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
 
 @close_bracket:
     lda #$5D                       ; "]" screen code
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
 
     ; Write "  < >" at cols 22-26
     ldy #22
     lda #$20
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     lda #$20
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     lda #$3C                       ; '<'
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     lda #$20
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     lda #$3E                       ; '>'
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
 
     ; Draw color swatch for color rows (border, bg, fg = rows 1, 2, 3)
     txa                            ; X = row index
@@ -1438,10 +1438,10 @@ settings_draw_row:
     ; repaint is deferred to @paint_swatch, after the full-row paint.
     ldy #POP_SWATCH_COL
     lda #$A0
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
-    sta (WORK_PTR),y
-    ; WORK_PTR still on screen RAM — no restoration step needed.
+    sta (SCREEN_PTR),y
+    ; SCREEN_PTR still on screen RAM — no restoration step needed.
 
 @color_row:
     ; Highlight selected row white, others chrome.
@@ -1475,21 +1475,21 @@ settings_draw_row:
 @do_swatch:
     stx SAVED_X                    ; pop_color_ptr clobbers X
     lda POP_ROW_TMP
-    jsr pop_color_ptr              ; WORK_PTR = color RAM for this row
+    jsr pop_color_ptr              ; SCREEN_PTR = color RAM for this row
     ldx SAVED_X
     ldy #POP_SWATCH_COL
     jsr settings_get_val           ; A = color index for row X
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
 @no_swatch:
     rts
 
 ; ============================================================================
-; settings_write_label — write label for row index X to WORK_PTR row.
+; settings_write_label — write label for row index X to SCREEN_PTR row.
 ; Label bytes are screen codes, zero-terminated, pre-padded to 14 chars.
 ; Uses TMP as label data pointer; POP_LBL_IDX as byte index into label.
-; WORK_PTR must already point to the screen row start.
+; SCREEN_PTR must already point to the screen row start.
 ; ============================================================================
 settings_write_label:
     stx SAVED_X                    ; preserve row index
@@ -1517,43 +1517,43 @@ settings_write_label:
     adc #POP_INNER_LEFT            ; screen column = label_index + POP_INNER_LEFT
     tay                            ; Y = screen column offset into row
     pla
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     inc POP_LBL_IDX
     jmp @lbl_loop
 @lbl_done:
     rts
 
 ; ============================================================================
-; pop_row_ptr — set WORK_PTR to screen RAM start of row A.
+; pop_row_ptr — set SCREEN_PTR to screen RAM start of row A.
 ; Row 0 = $0400, each row = 40 bytes. Uses 16-bit TMP for multiply.
 ; Clobbers A, X. Does NOT preserve X — callers must save if needed.
 ; ============================================================================
 pop_row_ptr:
-    ; WORK_PTR = SCREEN + (A * 40), via the shared row-offset table
+    ; SCREEN_PTR = SCREEN + (A * 40), via the shared row-offset table
     tax                            ; X = row number
     lda row40_lo,x
     clc
     adc #<SCREEN
-    sta WORK_PTR
+    sta SCREEN_PTR
     lda row40_hi,x
     adc #>SCREEN
-    sta WORK_PTR+1
+    sta SCREEN_PTR+1
     rts
 
 ; ============================================================================
-; pop_color_ptr — set WORK_PTR to color RAM start of row A.
+; pop_color_ptr — set SCREEN_PTR to color RAM start of row A.
 ; Clobbers A, X. Does NOT preserve X — callers must save if needed.
 ; ============================================================================
 pop_color_ptr:
-    ; WORK_PTR = COLOR + (A * 40), via the shared row-offset table
+    ; SCREEN_PTR = COLOR + (A * 40), via the shared row-offset table
     tax                            ; X = row number
     lda row40_lo,x
     clc
     adc #<COLOR
-    sta WORK_PTR
+    sta SCREEN_PTR
     lda row40_hi,x
     adc #>COLOR
-    sta WORK_PTR+1
+    sta SCREEN_PTR+1
     rts
 
 ; ============================================================================
@@ -1564,7 +1564,7 @@ pop_color_row:
     ldy #0
 @loop:
     lda #POP_CHROME_CLR
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     cpy #40
     bne @loop
@@ -1578,7 +1578,7 @@ pop_color_row_white:
     ldy #0
 @loop:
     lda #POP_HILITE_CLR
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     cpy #40
     bne @loop
@@ -1594,7 +1594,7 @@ pop_clear_inner:
 @loop:
     cpy #(POP_LEFT + POP_WIDTH + 1)
     beq @done
-    sta (WORK_PTR),y
+    sta (SCREEN_PTR),y
     iny
     bne @loop
 @done:
@@ -1659,10 +1659,10 @@ pop_lbl_blink:
 
 render_cursor_row:
     ; BUF_PTR = start of the cursor's logical line.
-    jsr line_start_of_cursor       ; -> WORK_PTR = line start
-    lda WORK_PTR
+    jsr line_start_of_cursor       ; -> TXT_PTR = line start
+    lda TXT_PTR
     sta BUF_PTR
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     sta BUF_PTR+1
     jsr buf_ptr_warp               ; warp if line start sits at the gap
 
@@ -1777,7 +1777,7 @@ rv_row_loop:
 ; On entry: A = token byte ($80-$CA), Y = current screen column (0-39)
 ; On exit:  Y = updated screen column (advanced by keyword length)
 ;           BUF_PTR advanced by 1 (past the token byte)
-; Clobbers: A, X, WORK_PTR, CLR_TMP
+; Clobbers: A, X, TXT_PTR, CLR_TMP
 ;
 ; Uses the C64 BASIC 2.0 ROM keyword table at $A09E (visible with $01=$37).
 ; Each entry: PETSCII chars, last char has bit 7 set. Token $80 = entry 0.
@@ -1791,9 +1791,9 @@ expand_token:
     sta SAVED_X                 ; SAVED_X = entries to skip (not clobbered by lookup_screen)
 
     lda #<$A09E
-    sta WORK_PTR
+    sta TXT_PTR
     lda #>$A09E
-    sta WORK_PTR+1
+    sta TXT_PTR+1
 
     ; Skip SAVED_X entries
 @et_skip:
@@ -1801,21 +1801,21 @@ expand_token:
     beq @et_found
 @et_skip_char:
     ldy #0
-    lda (WORK_PTR),y
-    inc WORK_PTR
+    lda (TXT_PTR),y
+    inc TXT_PTR
     bne :+
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 :   asl a                       ; old bit7 → carry (INC clobbered N, not A)
     bcc @et_skip_char           ; carry=0 → bit7 was 0 (non-last char) → loop
     dec SAVED_X
     jmp @et_skip
 
 @et_found:
-    ; Output chars from WORK_PTR to (SCREEN_PTR)+col
+    ; Output chars from TXT_PTR to (SCREEN_PTR)+col
     ; TMP = screen col
 @et_char:
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     sta CLR_TMP                 ; save with bit7
     and #$7F                    ; strip bit7 → PETSCII
     jsr lookup_screen           ; → screen code in A; X unchanged; SAVED_X clobbered (ok)
@@ -1824,9 +1824,9 @@ expand_token:
     bcs @et_done
     sta (SCREEN_PTR),y
     inc TMP                     ; advance screen col
-    inc WORK_PTR
+    inc TXT_PTR
     bne :+
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 :   lda CLR_TMP
     bpl @et_char                ; bit7 clear = more chars
 
@@ -1841,7 +1841,7 @@ expand_token:
 ; Same calling convention as expand_token:
 ; On entry: A = token byte ($CC-$D8), Y = current screen column (0-39)
 ; On exit:  Y = updated screen column, BUF_PTR advanced past token
-; Clobbers: A, WORK_PTR, CLR_TMP, TMP, SAVED_X
+; Clobbers: A, TXT_PTR, CLR_TMP, TMP, SAVED_X
 ; Uses kw_strtab/kw_len_tab from colorize.asm (included below).
 ; ============================================================================
 expand_extended_token:
@@ -1852,9 +1852,9 @@ expand_extended_token:
     sta SAVED_X
 
     lda #<kw_strtab
-    sta WORK_PTR
+    sta TXT_PTR
     lda #>kw_strtab
-    sta WORK_PTR+1
+    sta TXT_PTR+1
 
     ldx #0
 @ee_skip:
@@ -1862,10 +1862,10 @@ expand_extended_token:
     beq @ee_emit
     lda kw_len_tab,x
     clc
-    adc WORK_PTR
-    sta WORK_PTR
+    adc TXT_PTR
+    sta TXT_PTR
     bcc :+
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 :   inx
     jmp @ee_skip
 
@@ -1877,7 +1877,7 @@ expand_extended_token:
     sta COL_SAVE            ; COL_SAVE ($12) = keyword char index
 @ee_char:
     ldy COL_SAVE            ; Y = char index
-    lda (WORK_PTR),y        ; read keyword char
+    lda (TXT_PTR),y        ; read keyword char
     jsr lookup_screen       ; Y preserved (lookup_screen only touches A, X, SAVED_X)
     ldy TMP                 ; Y = screen col
     cpy #COLS
@@ -2068,29 +2068,29 @@ cursor_left:
 ; ============================================================================
 ; get_col — return current column (0-based) in A.
 ; Walks backward from GAP_START through pre-gap text to nearest CR or BOF.
-; Trashes WORK_PTR, TMP. Preserves X, Y.
+; Trashes TXT_PTR, TMP. Preserves X, Y.
 ; ============================================================================
 get_col:
     lda GAP_START
-    sta WORK_PTR
+    sta TXT_PTR
     lda GAP_START+1
-    sta WORK_PTR+1
+    sta TXT_PTR+1
     lda #0
     sta TMP                        ; column counter
 @loop:
-    lda WORK_PTR                   ; at BOF?
+    lda TXT_PTR                   ; at BOF?
     cmp #<work_buf
     bne @dec
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     cmp #>work_buf
     beq @done
 @dec:
-    lda WORK_PTR                   ; WORK_PTR--
+    lda TXT_PTR                   ; TXT_PTR--
     bne :+
-    dec WORK_PTR+1
-:   dec WORK_PTR
+    dec TXT_PTR+1
+:   dec TXT_PTR
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     cmp #PET_CR
     beq @done                      ; found CR: column = TMP
     inc TMP
@@ -2100,34 +2100,34 @@ get_col:
     rts
 
 ; ============================================================================
-; line_start_of_cursor — WORK_PTR = address of the first byte of the line the
+; line_start_of_cursor — TXT_PTR = address of the first byte of the line the
 ; cursor (GAP_START) is on; i.e. one past the preceding CR, or work_buf at BOF.
 ; Bounded by the current line's length. Trashes A; preserves X, Y.
 ; ============================================================================
 line_start_of_cursor:
     lda GAP_START
-    sta WORK_PTR
+    sta TXT_PTR
     lda GAP_START+1
-    sta WORK_PTR+1
+    sta TXT_PTR+1
 @back:
-    lda WORK_PTR                   ; at BOF? -> line starts at work_buf
+    lda TXT_PTR                   ; at BOF? -> line starts at work_buf
     cmp #<work_buf
     bne @dec
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     cmp #>work_buf
     beq @done
 @dec:
-    lda WORK_PTR                   ; WORK_PTR--
+    lda TXT_PTR                   ; TXT_PTR--
     bne :+
-    dec WORK_PTR+1
-:   dec WORK_PTR
+    dec TXT_PTR+1
+:   dec TXT_PTR
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     cmp #PET_CR
     bne @back                      ; not a CR: keep walking back
-    inc WORK_PTR                   ; step past the CR onto the line start
+    inc TXT_PTR                   ; step past the CR onto the line start
     bne @done
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 @done:
     rts
 
@@ -2185,15 +2185,15 @@ cursor_up:
     cmp #>work_buf
     beq @done
 :   lda GAP_START                  ; peek at char just before cursor
-    sta WORK_PTR
+    sta TXT_PTR
     lda GAP_START+1
-    sta WORK_PTR+1
-    lda WORK_PTR
+    sta TXT_PTR+1
+    lda TXT_PTR
     bne :+
-    dec WORK_PTR+1
-:   dec WORK_PTR
+    dec TXT_PTR+1
+:   dec TXT_PTR
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     cmp #PET_CR
     beq @at_cur_start              ; CR before cursor = we're at line start
     jsr cursor_left
@@ -2208,15 +2208,15 @@ cursor_up:
     cmp #>work_buf
     beq @at_prev_start             ; BOF = start of prev line
 :   lda GAP_START
-    sta WORK_PTR
+    sta TXT_PTR
     lda GAP_START+1
-    sta WORK_PTR+1
-    lda WORK_PTR
+    sta TXT_PTR+1
+    lda TXT_PTR
     bne :+
-    dec WORK_PTR+1
-:   dec WORK_PTR
+    dec TXT_PTR+1
+:   dec TXT_PTR
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     cmp #PET_CR
     beq @at_prev_start             ; CR before cursor = start of prev line
     jsr cursor_left
@@ -2303,40 +2303,40 @@ ensure_cursor_visible:
     bcc @cursor_above
 
 @find_row:
-    ; WORK_PTR = start of the cursor's current line (walk back to CR/BOF).
+    ; TXT_PTR = start of the cursor's current line (walk back to CR/BOF).
     ; This is bounded by the current line's length.
-    jsr line_start_of_cursor       ; -> WORK_PTR = cursor line start
+    jsr line_start_of_cursor       ; -> TXT_PTR = cursor line start
     ; If that line start is already <= TOP_LINE, the cursor line IS at/above
     ; the top; row 0 (the == case) is the normal "typing on the top line".
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     cmp TOP_LINE+1
     bcc @cursor_above              ; line start strictly above TOP_LINE
     bne @count_rows
-    lda WORK_PTR
+    lda TXT_PTR
     cmp TOP_LINE
     bcc @cursor_above
     ; line start >= TOP_LINE: count line starts from TOP_LINE up to here.
 @count_rows:
     lda #0
     sta CURSOR_ROW
-    ; Walk WORK_PTR backward, counting CRs crossed, until it reaches TOP_LINE.
+    ; Walk TXT_PTR backward, counting CRs crossed, until it reaches TOP_LINE.
     ; Bounded by viewport height: if the count reaches CONTENT_ROWS the cursor
     ; is below the visible region and we re-anchor.
 @cr_back:
-    lda WORK_PTR                   ; at TOP_LINE? (done)
+    lda TXT_PTR                   ; at TOP_LINE? (done)
     cmp TOP_LINE
     bne @cr_step
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     cmp TOP_LINE+1
     beq @row_done
 @cr_step:
-    ; WORK_PTR-- ; if the byte we step onto is a CR, we've crossed a line.
-    lda WORK_PTR
+    ; TXT_PTR-- ; if the byte we step onto is a CR, we've crossed a line.
+    lda TXT_PTR
     bne :+
-    dec WORK_PTR+1
-:   dec WORK_PTR
+    dec TXT_PTR+1
+:   dec TXT_PTR
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     cmp #PET_CR
     bne @cr_back
     inc CURSOR_ROW
@@ -2352,9 +2352,9 @@ ensure_cursor_visible:
 @cursor_above:
     ; Re-anchor TOP_LINE to start of cursor's line, then redo.
     jsr line_start_of_cursor
-    lda WORK_PTR
+    lda TXT_PTR
     sta TOP_LINE
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     sta TOP_LINE+1
     jmp ensure_cursor_visible
 
@@ -2363,9 +2363,9 @@ ensure_cursor_visible:
     ; the line that belongs at the top of the viewport. Bounded by
     ; CONTENT_ROWS lines of backward scanning.
     lda GAP_START
-    sta WORK_PTR
+    sta TXT_PTR
     lda GAP_START+1
-    sta WORK_PTR+1
+    sta TXT_PTR+1
     ; Count CONTENT_ROWS CRs back (not CONTENT_ROWS-1): after the k-th CR,
     ; one-past-it is the start of line L-k+1, so a counter of ROWS-1 put
     ; the cursor on row ROWS-2 and crossing the bottom edge visibly jumped
@@ -2373,31 +2373,31 @@ ensure_cursor_visible:
     lda #CONTENT_ROWS
     sta TMP+1               ; TMP+1: line counter (this routine uses TMP lo only)
 @cb_back:
-    lda WORK_PTR            ; at BOF?
+    lda TXT_PTR            ; at BOF?
     cmp #<work_buf
     bne @cb_dec
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     cmp #>work_buf
     beq @cb_set_top         ; BOF = start of first line
 @cb_dec:
-    lda WORK_PTR            ; WORK_PTR--
+    lda TXT_PTR            ; TXT_PTR--
     bne :+
-    dec WORK_PTR+1
-:   dec WORK_PTR
+    dec TXT_PTR+1
+:   dec TXT_PTR
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     cmp #PET_CR
     bne @cb_back
     dec TMP+1
     bne @cb_back            ; need more lines
     ; Found the CR that precedes the target top line — step past it
-    inc WORK_PTR
+    inc TXT_PTR
     bne @cb_set_top
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 @cb_set_top:
-    lda WORK_PTR
+    lda TXT_PTR
     sta TOP_LINE
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     sta TOP_LINE+1
     jmp ensure_cursor_visible
 
@@ -2424,10 +2424,10 @@ ensure_cursor_visible:
     rts
 
 ; ============================================================================
-; compute_cursor_addr — WORK_PTR = screen RAM address of cursor cell.
+; compute_cursor_addr — TXT_PTR = screen RAM address of cursor cell.
 ; ============================================================================
 compute_cursor_addr:
-    ; WORK_PTR = CONTENT_TOP + CURSOR_ROW*COLS + CURSOR_COL, via the
+    ; TXT_PTR = CONTENT_TOP + CURSOR_ROW*COLS + CURSOR_COL, via the
     ; row-offset table.  This runs on every idle poll (cursor blink), so
     ; the old repeated-addition multiply burned up to ~370 cycles
     ; thousands of times per second.  CONTENT_TOP is SCREEN + one row,
@@ -2437,17 +2437,17 @@ compute_cursor_addr:
     lda row40_lo,x
     clc
     adc CURSOR_COL
-    sta WORK_PTR
+    sta TXT_PTR
     lda row40_hi,x
     adc #0
-    sta WORK_PTR+1
-    lda WORK_PTR
+    sta TXT_PTR+1
+    lda TXT_PTR
     clc
     adc #<SCREEN
-    sta WORK_PTR
-    lda WORK_PTR+1
+    sta TXT_PTR
+    lda TXT_PTR+1
     adc #>SCREEN
-    sta WORK_PTR+1
+    sta TXT_PTR+1
     rts
 
 ; Row-offset table: row40[n] = n * COLS for screen rows 0-24.
@@ -2468,9 +2468,9 @@ row40_hi:
 draw_cursor:
     jsr compute_cursor_addr
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     ora #$80
-    sta (WORK_PTR),y
+    sta (TXT_PTR),y
     rts
 
 ; ============================================================================
@@ -2479,9 +2479,9 @@ draw_cursor:
 erase_cursor:
     jsr compute_cursor_addr
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     and #$7F
-    sta (WORK_PTR),y
+    sta (TXT_PTR),y
     rts
 
 ; ============================================================================
@@ -2558,10 +2558,10 @@ insert_return:
     bne @plain                      ; mid-line split → no auto-number
 @at_eol:
     ; Find the number N of the line we just finished. That line's text is the
-    ; pre-gap run ending just before the CR we inserted. Walk WORK_PTR back from
+    ; pre-gap run ending just before the CR we inserted. Walk TXT_PTR back from
     ; (GAP_START - 1) [the inserted CR] over the line body to its start (BOF or
     ; a preceding CR), then parse the leading digits.
-    jsr an_find_cur_line_start      ; WORK_PTR = first byte of current line (pre-gap)
+    jsr an_find_cur_line_start      ; TXT_PTR = first byte of current line (pre-gap)
     jsr an_parse_number             ; C=0 and AN_CUR=N if a number was found
     bcs @plain                      ; no leading number → plain CR
 
@@ -2625,50 +2625,50 @@ insert_return:
     rts
 
 ; ----------------------------------------------------------------------------
-; an_find_cur_line_start — set WORK_PTR to the first byte of the line that ends
+; an_find_cur_line_start — set TXT_PTR to the first byte of the line that ends
 ; at the CR just inserted (the byte right before GAP_START). Walks backward
 ; through pre-gap text to BOF or the CR that precedes this line.
-; On return WORK_PTR points at the first character of the current line.
+; On return TXT_PTR points at the first character of the current line.
 ; Note: operates entirely in the pre-gap region, so no gap warp is needed.
 ; ----------------------------------------------------------------------------
 an_find_cur_line_start:
-    ; WORK_PTR = GAP_START - 1  (the CR we just inserted)
+    ; TXT_PTR = GAP_START - 1  (the CR we just inserted)
     lda GAP_START
-    sta WORK_PTR
+    sta TXT_PTR
     lda GAP_START+1
-    sta WORK_PTR+1
+    sta TXT_PTR+1
     ; step back over the inserted CR
-    lda WORK_PTR
+    lda TXT_PTR
     bne :+
-    dec WORK_PTR+1
-:   dec WORK_PTR
+    dec TXT_PTR+1
+:   dec TXT_PTR
 @back:
-    ; at BOF? (WORK_PTR == work_buf)
-    lda WORK_PTR
+    ; at BOF? (TXT_PTR == work_buf)
+    lda TXT_PTR
     cmp #<work_buf
     bne @dec
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     cmp #>work_buf
     beq @at_start                   ; reached beginning of buffer
 @dec:
     ; peek the byte one to the left; if it's a CR, current line starts here
-    lda WORK_PTR
+    lda TXT_PTR
     bne :+
-    dec WORK_PTR+1
-:   dec WORK_PTR
+    dec TXT_PTR+1
+:   dec TXT_PTR
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     cmp #PET_CR
     bne @back
-    ; WORK_PTR is on the preceding CR — line starts one byte right
-    inc WORK_PTR
+    ; TXT_PTR is on the preceding CR — line starts one byte right
+    inc TXT_PTR
     bne @at_start
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 @at_start:
     rts
 
 ; ----------------------------------------------------------------------------
-; an_parse_number — parse decimal digits at WORK_PTR (pre-gap) into AN_CUR.
+; an_parse_number — parse decimal digits at TXT_PTR (pre-gap) into AN_CUR.
 ; C=0 if at least one digit was parsed (AN_CUR = value), C=1 if no digit.
 ; Stops at first non-digit. 16-bit, handles up to 63999.
 ; ----------------------------------------------------------------------------
@@ -2677,12 +2677,12 @@ an_parse_number:
     sta AN_CUR
     sta AN_CUR+1
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     jsr an_is_digit
     bcc @nodigit
 @loop:
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     jsr an_is_digit
     bcc @done
     ; AN_CUR = AN_CUR*10 + (A-'0')
@@ -2696,10 +2696,10 @@ an_parse_number:
     sta AN_CUR
     bcc :+
     inc AN_CUR+1
-:   ; advance WORK_PTR (pre-gap, no warp)
-    inc WORK_PTR
+:   ; advance TXT_PTR (pre-gap, no warp)
+    inc TXT_PTR
     bne @loop
-    inc WORK_PTR+1
+    inc TXT_PTR+1
     jmp @loop
 @done:
     clc
@@ -2950,7 +2950,7 @@ do_backspace:
 ;   COMPL_TOK     token of the last completion ($80..$D8)
 ;   TC_DELCNT     chars removed from GAP_START; used to restore on no-match
 ;
-; ZP used:  WORK_PTR (backward scan + kw_strtab walk),
+; ZP used:  TXT_PTR (backward scan + kw_strtab walk),
 ;           TMP      (pointer to prefix chars in gap, for comparison),
 ;           KW_TOKEN ($3A, current token during scan; safe to alias here
 ;                     because tab completion never overlaps colorization)
@@ -2964,28 +2964,28 @@ do_tab_complete:
 ; ---- Fresh: count the alphabetic prefix immediately before GAP_START ------
 @fresh:
     lda GAP_START
-    sta WORK_PTR
+    sta TXT_PTR
     lda GAP_START+1
-    sta WORK_PTR+1
+    sta TXT_PTR+1
     lda #0
     sta COMPL_PFXLEN
 
 @pfx_loop:
     ; Stop at BOF
-    lda WORK_PTR
+    lda TXT_PTR
     cmp #<work_buf
     bne @pfx_dec
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     cmp #>work_buf
     beq @pfx_done
 @pfx_dec:
-    lda WORK_PTR
+    lda TXT_PTR
     bne @pfx_noh
-    dec WORK_PTR+1
+    dec TXT_PTR+1
 @pfx_noh:
-    dec WORK_PTR
+    dec TXT_PTR
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     cmp #$41                    ; < 'A'?
     bcc @pfx_done
     cmp #$5B                    ; > 'Z' (i.e. $5A)?
@@ -3052,11 +3052,11 @@ do_tab_complete:
     lda GAP_START+1
     sta TMP+1
 
-    ; WORK_PTR = kw_strtab base; KW_TOKEN ($3A) walks token bytes $80..$D8.
+    ; TXT_PTR = kw_strtab base; KW_TOKEN ($3A) walks token bytes $80..$D8.
     lda #<kw_strtab
-    sta WORK_PTR
+    sta TXT_PTR
     lda #>kw_strtab
-    sta WORK_PTR+1
+    sta TXT_PTR+1
     lda #$80
     sta KW_TOKEN
 
@@ -3070,10 +3070,10 @@ do_tab_complete:
     tax
     lda kw_len_tab,x
     clc
-    adc WORK_PTR
-    sta WORK_PTR
+    adc TXT_PTR
+    sta TXT_PTR
     bcc @scan_skip_noh
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 @scan_skip_noh:
     inc KW_TOKEN
     jmp @scan_skip
@@ -3095,32 +3095,32 @@ do_tab_complete:
 @scan_try_cmp:
 
     ; Compare first COMPL_PFXLEN chars of keyword against prefix in gap.
-    ; WORK_PTR -> keyword, TMP -> prefix chars (both uppercase PETSCII).
+    ; TXT_PTR -> keyword, TMP -> prefix chars (both uppercase PETSCII).
     ldy #0
 @cmp_loop:
     cpy COMPL_PFXLEN
     beq @match                  ; all prefix chars matched
-    lda (WORK_PTR),y            ; keyword char
+    lda (TXT_PTR),y            ; keyword char
     cmp (TMP),y                 ; prefix char in buffer
     bne @scan_next              ; mismatch
     iny
     jmp @cmp_loop
 
 @scan_next:
-    ; Advance WORK_PTR past this keyword's chars; bump token.
+    ; Advance TXT_PTR past this keyword's chars; bump token.
     ; X = KW_TOKEN - $80 is still valid from @scan_try_cont on both paths here.
     lda kw_len_tab,x
     clc
-    adc WORK_PTR
-    sta WORK_PTR
+    adc TXT_PTR
+    sta TXT_PTR
     bcc @scan_nxt_noh
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 @scan_nxt_noh:
     inc KW_TOKEN
     jmp @scan_try
 
 ; ---- Match: insert the full keyword into the gap --------------------------
-; WORK_PTR points to the keyword's start in kw_strtab; KW_TOKEN is the token.
+; TXT_PTR points to the keyword's start in kw_strtab; KW_TOKEN is the token.
 ; X = KW_TOKEN - $80 on entry (set by @scan_try_cont, not clobbered by @cmp_loop).
 @match:
     lda KW_TOKEN
@@ -3134,11 +3134,11 @@ do_tab_complete:
     lda TC_DELCNT
     beq @ins_done
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     jsr do_insert
-    inc WORK_PTR
+    inc TXT_PTR
     bne @ins_noh
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 @ins_noh:
     dec TC_DELCNT
     jmp @ins_loop
@@ -3304,66 +3304,66 @@ work_buf_end:                      ; label sits immediately after work_buf
 ; the content may shrink; GAP_START is updated accordingly.
 ;
 ; Algorithm (two-pointer in-place compaction):
-;   SRC (WORK_PTR): scans forward from line start to GAP_START
+;   SRC (TXT_PTR): scans forward from line start to GAP_START
 ;   DST (LPTR):     trails SRC, writes tokenized result
 ;   in_string (CLR_TMP): $00=normal, $FF=inside "..."
 ;
 ; On entry:  GAP_START points one past the last typed char on the line.
 ; On exit:   GAP_START = DST (adjusted for any keyword compression).
-; Clobbers:  A, X, Y, WORK_PTR, LPTR, CLR_CTMP, CLR_TMP, KW_TOKEN, CLR_KWLEN
+; Clobbers:  A, X, Y, TXT_PTR, LPTR, CLR_CTMP, CLR_TMP, KW_TOKEN, CLR_KWLEN
 ; ============================================================================
 tokenize_line:
     ; ── Step 1: find start of current line ─────────────────────────────────
     ; Scan backwards from GAP_START-1 for a CR (or buffer start).
     lda GAP_START
-    sta WORK_PTR
+    sta TXT_PTR
     lda GAP_START+1
-    sta WORK_PTR+1
-    ; Decrement WORK_PTR to GAP_START-1
-    lda WORK_PTR
+    sta TXT_PTR+1
+    ; Decrement TXT_PTR to GAP_START-1
+    lda TXT_PTR
     bne @tl_gs_noborrow
-    dec WORK_PTR+1
+    dec TXT_PTR+1
 @tl_gs_noborrow:
-    dec WORK_PTR
+    dec TXT_PTR
 
 @tl_scan_back:
-    ; Stop if WORK_PTR < work_buf
-    lda WORK_PTR+1
+    ; Stop if TXT_PTR < work_buf
+    lda TXT_PTR+1
     cmp #>work_buf
     bcc @tl_at_buf_start
     bne @tl_check_cr
-    lda WORK_PTR
+    lda TXT_PTR
     cmp #<work_buf
     bcc @tl_at_buf_start
 @tl_check_cr:
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     cmp #PET_CR
     beq @tl_found_cr
-    lda WORK_PTR
+    lda TXT_PTR
     bne :+
-    dec WORK_PTR+1
-:   dec WORK_PTR
+    dec TXT_PTR+1
+:   dec TXT_PTR
     jmp @tl_scan_back
 
 @tl_found_cr:
-    ; Step past the CR so WORK_PTR = first char of line
-    inc WORK_PTR
+    ; Step past the CR so TXT_PTR = first char of line
+    inc TXT_PTR
     bne @tl_start_ok
-    inc WORK_PTR+1
+    inc TXT_PTR+1
     jmp @tl_start_ok
 
 @tl_at_buf_start:
     lda #<work_buf
-    sta WORK_PTR
+    sta TXT_PTR
     lda #>work_buf
-    sta WORK_PTR+1
+    sta TXT_PTR+1
 
 @tl_start_ok:
     ; ── Step 2: init DST = SRC = line start, in_string = 0 ────────────────
-    lda WORK_PTR
+    lda TXT_PTR
     sta LPTR
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     sta LPTR+1
     lda #0
     sta CLR_TMP             ; in_string flag
@@ -3371,13 +3371,13 @@ tokenize_line:
     ; ── Step 3: main tokenize loop ──────────────────────────────────────────
 @tl_loop:
     ; Done when SRC >= GAP_START
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     cmp GAP_START+1
     bcc @tl_process
     beq @tl_check_lo
     jmp @tl_done
 @tl_check_lo:
-    lda WORK_PTR
+    lda TXT_PTR
     cmp GAP_START
     bcc @tl_process
     jmp @tl_done
@@ -3390,7 +3390,7 @@ tokenize_line:
 
     ; Normal mode: read next byte
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
 
     cmp #$22                ; opening quote?
     bne @tl_not_quote
@@ -3418,9 +3418,9 @@ tokenize_line:
 :
     ; Advance SRC by keyword length
 @tl_src_advance:
-    inc WORK_PTR
+    inc TXT_PTR
     bne :+
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 :   dec CLR_KWLEN
     bne @tl_src_advance
 
@@ -3429,20 +3429,20 @@ tokenize_line:
     cmp #$8F
     bne @tl_loop
 @tl_rem_body:
-    lda WORK_PTR+1
+    lda TXT_PTR+1
     cmp GAP_START+1
     bcc @tl_rem_do
     bne @tl_done
-    lda WORK_PTR
+    lda TXT_PTR
     cmp GAP_START
     bcs @tl_done
 @tl_rem_do:
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     sta (LPTR),y
-    inc WORK_PTR
+    inc TXT_PTR
     bne :+
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 :   inc LPTR
     bne :+
     inc LPTR+1
@@ -3451,7 +3451,7 @@ tokenize_line:
 @tl_in_str:
     ; Inside string literal — copy verbatim, watch for closing quote
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     cmp #$22
     bne @tl_copy
     lda #0
@@ -3461,11 +3461,11 @@ tokenize_line:
 @tl_copy:
     ; Copy one byte SRC→DST, advance both pointers
     ldy #0
-    lda (WORK_PTR),y
+    lda (TXT_PTR),y
     sta (LPTR),y
-    inc WORK_PTR
+    inc TXT_PTR
     bne :+
-    inc WORK_PTR+1
+    inc TXT_PTR+1
 :   inc LPTR
     bne :+
     inc LPTR+1
@@ -3482,13 +3482,13 @@ tokenize_line:
 
 ; ============================================================================
 ; ============================================================================
-; tl_match_kw — match BASIC keyword at WORK_PTR against our own kw_strtab.
+; tl_match_kw — match BASIC keyword at TXT_PTR against our own kw_strtab.
 ;
 ; Walks kw_strtab (token order $80-$CB), comparing each keyword against the
-; buffer at WORK_PTR using kw_len_tab for lengths.  No ROM dependency, no
+; buffer at TXT_PTR using kw_len_tab for lengths.  No ROM dependency, no
 ; bit-7 terminator tricks, no PHA/PLA stack gymnastics.
 ;
-; On entry:  WORK_PTR points to candidate keyword start in buffer.
+; On entry:  TXT_PTR points to candidate keyword start in buffer.
 ; On exit:   C=1 → KW_TOKEN = token byte ($80-$CB), CLR_KWLEN = char count
 ;            C=0 → no match
 ; Clobbers:  A, X, Y, CLR_CTMP ($1A/$1B), KW_TOKEN ($3A), CLR_KWLEN ($19)
@@ -3515,7 +3515,7 @@ tl_match_kw:
     ldy #0
 @tmk_cmp:
     lda (CLR_CTMP),y        ; kwtab pointer — now using $1A/$1B
-    cmp (WORK_PTR),y
+    cmp (TXT_PTR),y
     bne @tmk_miss
 
     iny

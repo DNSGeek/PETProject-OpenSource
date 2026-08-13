@@ -110,17 +110,20 @@ META_VERSION    = 5   ; $01
 META_SIZE       = 6
 
 ; ---- ZP — same layout as modtok (no conflict between phases) ----
-LINENO      = $3A   ; line number lo (hi=$3B); = KW_TOKEN in try_keyword
-KW_TOKEN    = $3A
-KW_XSAVE    = $3B
-TMP16       = $3C   ; general 16-bit scratch lo (hi=$3D)
-IN_STRING   = $3E
-AFTER_REM   = $3F
-LINK_PTR    = $F7   ; lo (hi=$F8) — link word back-patch pointer / scan pointer
-BASIC_ADDR  = $F9   ; lo (hi=$FA) — running C64 address tracker
-SRC_PTR     = $FB   ; lo (hi=$FC) — source walker
-DST_PTR     = $FD   ; lo (hi=$FE) — staging output pointer
-OVFLAG      = $FF   ; staging overflow flag ($FF = overflowed, output invalid)
+; Addresses come from zp.inc (see docs/c128-port-notes.md).
+.include "zp.inc"
+
+LINENO      = ZP_SCRATCH+0  ; line number lo (hi=+1); = KW_TOKEN in try_keyword
+KW_TOKEN    = ZP_SCRATCH+0
+KW_XSAVE    = ZP_SCRATCH+1
+TMP16       = ZP_SCRATCH+2  ; general 16-bit scratch lo (hi=+3)
+IN_STRING   = ZP_SCRATCH+4
+AFTER_REM   = ZP_SCRATCH+5
+LINK_PTR    = ZP_PTR0       ; lo (hi=+1) — link word back-patch pointer / scan pointer
+BASIC_ADDR  = ZP_PTR1       ; lo (hi=+1) — running C64 address tracker
+SRC_PTR     = ZP_PTR2       ; lo (hi=+1) — source walker
+DST_PTR     = ZP_PTR3       ; lo (hi=+1) — staging output pointer
+OVFLAG      = ZP_OVFLAG     ; staging overflow flag ($FF = overflowed, output invalid)
 
 ; ---- Module scratch RAM ----
 ; The REU parameter block and include table are RESERVED INSIDE THE IMAGE

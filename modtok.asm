@@ -42,17 +42,20 @@ MOD_NEW_END_HI  = $0220
 MOD_GAP_START_LO = $0216
 MOD_GAP_START_HI = $0217
 
-LINENO          = $3A   ; line number lo (hi at $3B); also KW_TOKEN in try_keyword
-KW_TOKEN        = $3A   ; token byte (try_keyword) — same ZP, different phase
-KW_XSAVE        = $3B   ; saved source index (try_keyword)
-TMP16           = $3C   ; 16-bit scratch lo (hi at $3D)
-IN_STRING       = $3E
-AFTER_REM       = $3F
-LINK_PTR        = $F7   ; lo (hi at $F8)
-BASIC_ADDR      = $F9   ; lo (hi at $FA)
-SRC_PTR         = $FB   ; lo (hi at $FC)
-DST_PTR         = $FD   ; lo (hi at $FE)
-OVFLAG          = $FF   ; staging overflow flag ($FF = overflowed)
+; ---- ZP scratch — addresses come from zp.inc (see docs/c128-port-notes.md) --
+.include "zp.inc"
+
+LINENO          = ZP_SCRATCH+0  ; line number lo (hi at +1); also KW_TOKEN
+KW_TOKEN        = ZP_SCRATCH+0  ; token byte (try_keyword) — same ZP, different phase
+KW_XSAVE        = ZP_SCRATCH+1  ; saved source index (try_keyword)
+TMP16           = ZP_SCRATCH+2  ; 16-bit scratch lo (hi at +3)
+IN_STRING       = ZP_SCRATCH+4
+AFTER_REM       = ZP_SCRATCH+5
+LINK_PTR        = ZP_PTR0       ; lo (hi at +1)
+BASIC_ADDR      = ZP_PTR1       ; lo (hi at +1)
+SRC_PTR         = ZP_PTR2       ; lo (hi at +1)
+DST_PTR         = ZP_PTR3       ; lo (hi at +1)
+OVFLAG          = ZP_OVFLAG     ; staging overflow flag ($FF = overflowed)
 
 BASIC_START     = $0801
 ; STREAMING MODEL (no staging buffer): the source text is first relocated

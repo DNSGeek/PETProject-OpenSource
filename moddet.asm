@@ -60,14 +60,17 @@ MOD_NEW_END_HI   = $0220
 MOD_MAGIC_VAL    = $4D
 
 ; ---- Zero page -------------------------------------------------------------
-SRC_PTR          = $FB              ; source walk pointer (lo/hi)
-DST_PTR          = $FD              ; output write pointer (lo/hi)
-COPY_SRC         = $F7              ; copy-back source (lo/hi)
-COPY_DST         = $F9              ; copy-back dest  (lo/hi)
-LINENO           = $3A              ; 16-bit line number scratch (lo/hi)
-NZFLAG           = $3C              ; non-zero digit seen (decimal output)
-KWTAB            = $3D              ; keyword table walker (lo/hi)
-OVFLAG           = $3F              ; output-overflow flag ($FF = won't fit)
+; Addresses come from zp.inc (see docs/c128-port-notes.md).
+.include "zp.inc"
+
+SRC_PTR          = ZP_PTR2          ; source walk pointer (lo/hi)
+DST_PTR          = ZP_PTR3          ; output write pointer (lo/hi)
+COPY_SRC         = ZP_PTR0          ; copy-back source (lo/hi)
+COPY_DST         = ZP_PTR1          ; copy-back dest  (lo/hi)
+LINENO           = ZP_SCRATCH+0     ; 16-bit line number scratch (lo/hi)
+NZFLAG           = ZP_SCRATCH+2     ; non-zero digit seen (decimal output)
+KWTAB            = ZP_SCRATCH+3     ; keyword table walker (lo/hi)
+OVFLAG           = ZP_SCRATCH+5     ; output-overflow flag ($FF = won't fit)
 
 
 

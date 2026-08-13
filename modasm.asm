@@ -87,10 +87,13 @@ COLS        = 40
 DEFAULT_COLOR = 14          ; light blue
 
 ; ---- ZP ----
-SRC_PTR  = $FB   ; lo (hi=$FC)  -  source walker, gap-aware
-TMP      = $3A   ; general scratch (hi=$3B)
-TMP2     = $3C   ; (hi=$3D)
-TMP3     = $3E   ; (hi=$3F)
+; Addresses come from zp.inc (see docs/c128-port-notes.md).
+.include "zp.inc"
+
+SRC_PTR  = ZP_PTR2       ; lo (hi=+1)  -  source walker, gap-aware
+TMP      = ZP_SCRATCH+0  ; general scratch (hi=+1)
+TMP2     = ZP_SCRATCH+2  ; (hi=+3)
+TMP3     = ZP_SCRATCH+4  ; (hi=+5)
 
 ; ---- Mode constants ----
 MODE_IMP = 0
@@ -127,7 +130,9 @@ ASM_FNAME_LEN   = $C021   ; output filename length
 ASM_FNAME       = $C022   ; output filename (16 bytes)
 
 ; ---- ZP save area ----
-ZP_SAVE         = $C03A   ; 10 bytes: saves $3A-$3F, $FB-$FE
+; 10 bytes: saves the 6-byte ZP_SCRATCH block plus ZP_PTR2/ZP_PTR3.
+; (Not zero page itself — module scratch RAM above the $A000 image.)
+ZP_SAVE         = $C03A
 
 ; ---- Gap pointers (copied from params) ----
 ASM_GAP_S_LO    = $C032
@@ -276,18 +281,18 @@ assemble:
     ; Save ZP
     ldx #0
 @zpsave:
-    lda $3A,x
+    lda ZP_SCRATCH,x
     sta ZP_SAVE,x
     inx
-    cpx #6
+    cpx #ZP_SCRATCH_LEN
     bne @zpsave
-    lda $FB
+    lda ZP_PTR2
     sta ZP_SAVE+6
-    lda $FC
+    lda ZP_PTR2+1
     sta ZP_SAVE+7
-    lda $FD
+    lda ZP_PTR3
     sta ZP_SAVE+8
-    lda $FE
+    lda ZP_PTR3+1
     sta ZP_SAVE+9
 
     ; Copy gap/buffer params
@@ -453,18 +458,18 @@ assemble:
     ldx #0
 @zprest:
     lda ZP_SAVE,x
-    sta $3A,x
+    sta ZP_SCRATCH,x
     inx
-    cpx #6
+    cpx #ZP_SCRATCH_LEN
     bne @zprest
     lda ZP_SAVE+6
-    sta $FB
+    sta ZP_PTR2
     lda ZP_SAVE+7
-    sta $FC
+    sta ZP_PTR2+1
     lda ZP_SAVE+8
-    sta $FD
+    sta ZP_PTR3
     lda ZP_SAVE+9
-    sta $FE
+    sta ZP_PTR3+1
     cli                         ; re-enable IRQ before returning
     rts
 

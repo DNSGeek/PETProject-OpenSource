@@ -67,11 +67,14 @@ MOD_NEW_END_HI   = $0220
 CHROUT           = $FFD2
 
 ; ---- ZP ----
-SRC_PTR          = $FB          ; lo (hi=$FC) - source walker
-DST_PTR          = $FD          ; output pointer lo (hi at $FE); consecutive pair for (addr),y
-TMP              = $3A          ; scratch (hi=$3B)
-TMP2             = $3C          ; scratch (hi=$3D)
-TMP3             = $3E          ; scratch (hi=$3F)
+; Addresses come from zp.inc (see docs/c128-port-notes.md).
+.include "zp.inc"
+
+SRC_PTR          = ZP_PTR2      ; lo (hi=+1) - source walker
+DST_PTR          = ZP_PTR3      ; output pointer lo (hi at +1); consecutive pair for (addr),y
+TMP              = ZP_SCRATCH+0 ; scratch (hi=+1)
+TMP2             = ZP_SCRATCH+2 ; scratch (hi=+3)
+TMP3             = ZP_SCRATCH+4 ; scratch (hi=+5)
 
 ; ---- ZP save area and disassembler state ----
 ; Declared at the end of this file (after all code/tables) as plain labels
@@ -128,18 +131,18 @@ disassemble:
     ; Save ZP
     ldx #0
 @zpsave:
-    lda $3A,x
+    lda ZP_SCRATCH,x
     sta ZP_SAVE,x
     inx
-    cpx #6
+    cpx #ZP_SCRATCH_LEN
     bne @zpsave
-    lda $FB
+    lda ZP_PTR2
     sta ZP_SAVE+6
-    lda $FC
+    lda ZP_PTR2+1
     sta ZP_SAVE+7
-    lda $FD
+    lda ZP_PTR3
     sta ZP_SAVE+8
-    lda $FE
+    lda ZP_PTR3+1
     sta ZP_SAVE+9
 
     ; Copy params
@@ -321,18 +324,18 @@ disassemble:
     ldx #0
 @zprestore:
     lda ZP_SAVE,x
-    sta $3A,x
+    sta ZP_SCRATCH,x
     inx
-    cpx #6
+    cpx #ZP_SCRATCH_LEN
     bne @zprestore
     lda ZP_SAVE+6
-    sta $FB
+    sta ZP_PTR2
     lda ZP_SAVE+7
-    sta $FC
+    sta ZP_PTR2+1
     lda ZP_SAVE+8
-    sta $FD
+    sta ZP_PTR3
     lda ZP_SAVE+9
-    sta $FE
+    sta ZP_PTR3+1
 
     ; Report success
     lda #$02
@@ -1122,7 +1125,7 @@ mnem_strs:
 ; TXS/TYA corruption bug this file used to have.
 ; ============================================================================
 
-ZP_SAVE:          .res 10         ; saves $3A-$3F, $FB-$FE
+ZP_SAVE:          .res 10         ; saves ZP_SCRATCH (6) + ZP_PTR2/ZP_PTR3 (4)
 DIS_PC_LO:        .res 1          ; current PC lo
 DIS_PC_HI:        .res 1          ; current PC hi
 DIS_SRC_END_LO:   .res 1          ; end of source binary lo (= GAP_START)

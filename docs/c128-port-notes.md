@@ -44,7 +44,7 @@ sustain its fetches, and the KERNAL's `FAST` blanks the display rather than
 show garbage. The VDC is immune because it is an independent chip, which is
 why 80-column mode runs at 2 MHz by default.
 
-So on this target 2 MHz is a *blank-screen burst* around compute-only work:
+So on this target 2 MHz is a _blank-screen burst_ around compute-only work:
 the assembler's passes, tokenize/detokenize, renumber, search/replace. Two
 constraints:
 
@@ -71,24 +71,24 @@ read-only system locations.
 Declared as a `.zeropage` segment at `editor.asm:126`, placed by the `ZP:`
 entry in `petproject.cfg`.
 
-| Range | Sz | Symbol | Role |
-| --- | --- | --- | --- |
-| `$02-$03` | 2 | `GAP_START` | gap buffer |
-| `$04-$05` | 2 | `GAP_END` | gap buffer |
-| `$06-$07` | 2 | `BUF_PTR` | buffer walk |
-| `$08-$09` | 2 | `SCREEN_PTR` | screen RAM pointer |
-| `$0A-$0B` | 2 | `TOP_LINE` | viewport origin |
-| `$0C` | 1 | `LEFT_COL` | horizontal scroll |
-| `$0D-$0E` | 2 | `TMP` | scratch; aliased `CLR_SCOL` / `CLR_TMP` |
-| `$0F` | 1 | `SAVED_X` | X preservation |
-| `$10` | 1 | `CURSOR_ROW` | |
-| `$11` | 1 | `CURSOR_COL` | |
-| `$12` | 1 | `COL_SAVE` | aliased `CLR_LCOL` |
-| `$13-$14` | 2 | `TXT_PTR` | text scratch pointer |
-| `$15-$16` | 2 | `LPTR` | load/save + module trampoline |
-| `$17-$18` | 2 | `CLR_PTR` | color RAM pointer |
-| `$19` | 1 | `CLR_KWLEN` | |
-| `$1A-$1B` | 2 | `CLR_CTMP` | colortab walker |
+| Range     | Sz  | Symbol       | Role                                    |
+| --------- | --- | ------------ | --------------------------------------- |
+| `$02-$03` | 2   | `GAP_START`  | gap buffer                              |
+| `$04-$05` | 2   | `GAP_END`    | gap buffer                              |
+| `$06-$07` | 2   | `BUF_PTR`    | buffer walk                             |
+| `$08-$09` | 2   | `SCREEN_PTR` | screen RAM pointer                      |
+| `$0A-$0B` | 2   | `TOP_LINE`   | viewport origin                         |
+| `$0C`     | 1   | `LEFT_COL`   | horizontal scroll                       |
+| `$0D-$0E` | 2   | `TMP`        | scratch; aliased `CLR_SCOL` / `CLR_TMP` |
+| `$0F`     | 1   | `SAVED_X`    | X preservation                          |
+| `$10`     | 1   | `CURSOR_ROW` |                                         |
+| `$11`     | 1   | `CURSOR_COL` |                                         |
+| `$12`     | 1   | `COL_SAVE`   | aliased `CLR_LCOL`                      |
+| `$13-$14` | 2   | `TXT_PTR`    | text scratch pointer                    |
+| `$15-$16` | 2   | `LPTR`       | load/save + module trampoline           |
+| `$17-$18` | 2   | `CLR_PTR`    | color RAM pointer                       |
+| `$19`     | 1   | `CLR_KWLEN`  |                                         |
+| `$1A-$1B` | 2   | `CLR_CTMP`   | colortab walker                         |
 
 **This block is already fully relocatable.** No code references these by
 literal address; everything resolves through the ca65 zeropage segment.
@@ -104,16 +104,16 @@ lands.
 > describes the C64 map, which is unchanged. See
 > [Relocation strategy](#relocation-strategy) for what remains.
 
-| Range | Used by | As |
-| --- | --- | --- |
-| `$3A-$3B` | modtok, modsct, moddet, modasm, moddis, modren | `LINENO` / `KW_TOKEN`+`KW_XSAVE` / `TMP` |
-| `$3C-$3D` | above + modscr, modscrh | `TMP16` / `TMP2` / `NZFLAG`+`KWTAB` / `HND_TMP` |
-| `$3E-$3F` | modtok, modsct, moddet, modasm, moddis, modren | `IN_STRING`+`AFTER_REM` / `TMP3` / `OVFLAG` |
-| `$F7-$F8` | modtok, modsct, moddet | `LINK_PTR` / `COPY_SRC` |
-| `$F9-$FA` | modtok, modsct, moddet | `BASIC_ADDR` / `COPY_DST` |
-| `$FB-$FC` | all seven compute modules | `SRC_PTR` |
-| `$FD-$FE` | all seven compute modules | `DST_PTR` |
-| `$FF` | modtok, modsct | `OVFLAG` |
+| Range     | Used by                                        | As                                              |
+| --------- | ---------------------------------------------- | ----------------------------------------------- |
+| `$3A-$3B` | modtok, modsct, moddet, modasm, moddis, modren | `LINENO` / `KW_TOKEN`+`KW_XSAVE` / `TMP`        |
+| `$3C-$3D` | above + modscr, modscrh                        | `TMP16` / `TMP2` / `NZFLAG`+`KWTAB` / `HND_TMP` |
+| `$3E-$3F` | modtok, modsct, moddet, modasm, moddis, modren | `IN_STRING`+`AFTER_REM` / `TMP3` / `OVFLAG`     |
+| `$F7-$F8` | modtok, modsct, moddet                         | `LINK_PTR` / `COPY_SRC`                         |
+| `$F9-$FA` | modtok, modsct, moddet                         | `BASIC_ADDR` / `COPY_DST`                       |
+| `$FB-$FC` | all seven compute modules                      | `SRC_PTR`                                       |
+| `$FD-$FE` | all seven compute modules                      | `DST_PTR`                                       |
+| `$FF`     | modtok, modsct                                 | `OVFLAG`                                        |
 
 ### Cross-tier alias
 
@@ -125,11 +125,11 @@ contiguous.
 
 ### Save/restore discipline — inconsistent, and not load-bearing
 
-| Module | Saves | Does not save |
-| --- | --- | --- |
-| modasm, moddis, modren | `$3A-$3F` + `$FB-$FE` (10 B) | `$F7-$FA`, `$FF` |
-| moddsk | `$FB-$FE` (4 B) | — consistent, touches nothing else |
-| moddet, modtok, modsct, modscrh, modsfr | **nothing** | everything they use |
+| Module                                  | Saves                        | Does not save                      |
+| --------------------------------------- | ---------------------------- | ---------------------------------- |
+| modasm, moddis, modren                  | `$3A-$3F` + `$FB-$FE` (10 B) | `$F7-$FA`, `$FF`                   |
+| moddsk                                  | `$FB-$FE` (4 B)              | — consistent, touches nothing else |
+| moddet, modtok, modsct, modscrh, modsfr | **nothing**                  | everything they use                |
 
 An earlier revision of this document called the inconsistency "the main hazard
 in the whole port." **That was wrong.** On examination the saves protect
@@ -143,15 +143,15 @@ nothing that anything depends on:
   or `modules.asm` touches the pool at all.
 - **The saves carry no stated rationale** — the comments read only "Save ZP".
 - **What they would nominally protect is moot.** `$3A-$3F` is BASIC's and
-  `$F7-$FE` is RS-232's, but the editor quits through BASIC *cold start*
+  `$F7-$FE` is RS-232's, but the editor quits through BASIC _cold start_
   (`editor.asm:542`), which reinitialises all of it.
 - **The one real in-flight hazard is not addressed by saving.** The C64 KERNAL
   IRQ using `$FB`/`$FC` for cursor blink (`modasm.asm:260`) is a collision
-  *during* execution; entry/exit save/restore does nothing for it. `sei` does,
+  _during_ execution; entry/exit save/restore does nothing for it. `sei` does,
   which is why modasm holds one.
 
 So the requirement on any relocation is **disjointness alone** — the two tiers
-must not overlap. Making saving universal is *not* a substitute for that, and
+must not overlap. Making saving universal is _not_ a substitute for that, and
 is not worth doing on its own merits: it would mean threading save/restore
 through every exit path in five working modules (`modsfr` has 31 `rts`,
 `modsct` 30, `modscrh` 18), risking a regression on some error path in
@@ -167,11 +167,11 @@ on top of each other — which is the only scenario that ever mattered.
 
 ### System ZP — read, not owned
 
-| Addr | Symbol | Sites | C128 |
-| --- | --- | --- | --- |
-| `$A2` | `JIFFY_LO` | `editor.asm:32`, `moddsk.asm:110`, `modscrh.asm:441,444` | same address |
-| `$BA` | `FA` (device) | `editor.asm:26` | same address |
-| `$00`/`$01` | processor port | 6 banking sites | **see below** |
+| Addr        | Symbol         | Sites                                                    | C128          |
+| ----------- | -------------- | -------------------------------------------------------- | ------------- |
+| `$A2`       | `JIFFY_LO`     | `editor.asm:32`, `moddsk.asm:110`, `modscrh.asm:441,444` | same address  |
+| `$BA`       | `FA` (device)  | `editor.asm:26`                                          | same address  |
+| `$00`/`$01` | processor port | 6 banking sites                                          | **see below** |
 
 ### IRQ interaction
 
@@ -181,7 +181,7 @@ blink. So the ZP set to avoid is defined by **what the KERNAL IRQ handler
 touches 60 times a second**, not merely by the routines PETProject calls.
 That is a strictly larger set.
 
-`modasm` is the exception: it holds `sei` across an *entire assembly*, on
+`modasm` is the exception: it holds `sei` across an _entire assembly_, on
 explicitly C64-specific reasoning (`modasm.asm:260` — the C64 KERNAL IRQ uses
 `$FB`/`$FC` as cursor-blink scratch, which would corrupt `SRC_PTR`). That
 premise must be **re-derived** for the C128, not inherited. A multi-second
@@ -195,12 +195,12 @@ Source: the CBM archive's C128 RAM map,
 
 The C128 zero page divides cleanly in two, with almost nothing spare:
 
-| Range | Owner | Size |
-| --- | --- | --- |
-| `$02-$8F` | BASIC 7.0 — tokens, SYS registers, program/variable/array pointers, FP accumulators, `DS$`, graphics work values | 142 B |
+| Range     | Owner                                                                                                                                  | Size  |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------- | ----- |
+| `$02-$8F` | BASIC 7.0 — tokens, SYS registers, program/variable/array pointers, FP accumulators, `DS$`, graphics work values                       | 142 B |
 | `$90-$F9` | KERNAL + screen editor — `ST`, serial/tape/RS-232, jiffy clock, file tables, keyboard decode and buffer, all cursor/margin/color state | 106 B |
-| `$FA-$FE` | **"Not used"** — the only officially spare zero page | 5 B |
-| `$FF` | BASIC scratch | 1 B |
+| `$FA-$FE` | **"Not used"** — the only officially spare zero page                                                                                   | 5 B   |
+| `$FF`     | BASIC scratch                                                                                                                          | 1 B   |
 
 Five spare bytes against a 41-byte requirement, so the
 [relocation strategy](#relocation-strategy) is confirmed as the only viable
@@ -219,12 +219,12 @@ clock `$A0-$A2`, keyboard decode pointer `$CC-$CD`, key buffer and codes
 **Adopted layout** — packed from the bottom of the BASIC region, implemented
 in `zp_c128.inc`:
 
-| Range | Contents | Size |
-| --- | --- | --- |
+| Range     | Contents                            | Size |
+| --------- | ----------------------------------- | ---- |
 | `$02-$1B` | editor `.zeropage` segment (Tier 1) | 26 B |
-| `$1C-$21` | `ZP_SCRATCH` | 6 B |
-| `$22-$29` | `ZP_PTRS` (four pointer pairs) | 8 B |
-| `$2A` | `ZP_OVFLAG` | 1 B |
+| `$1C-$21` | `ZP_SCRATCH`                        | 6 B  |
+| `$22-$29` | `ZP_PTRS` (four pointer pairs)      | 8 B  |
+| `$2A`     | `ZP_OVFLAG`                         | 1 B  |
 
 Two consequences:
 
@@ -237,7 +237,7 @@ Two consequences:
   `KW_TOKEN` alias can be retired by giving colorize a byte of its own.
 
 **Residual empirical check.** The above comes from a static allocation map,
-which documents who *owns* each byte rather than what the ROM demonstrably
+which documents who _owns_ each byte rather than what the ROM demonstrably
 writes. Before trusting it in anger, run a poisoned-pattern test on a real
 C128 or in VICE: fill `$02-$2A` with a known pattern, exercise the IDE
 including disk I/O, and confirm only PETProject's own writes appear.
@@ -256,15 +256,15 @@ these should be converted **first**, before anything else is tested.
 
 Sites:
 
-| File:line | Current | Purpose |
-| --- | --- | --- |
-| `modasm.asm:273` | `#$36` | page BASIC out to run from `$A000` |
-| `moddsk.asm:214` | `#$37` | restore |
-| `modscr.asm:207` | `#$37` | restore, from `$033C` trampoline |
-| `modscrh.asm:1080` | `#$36` | page out for MODASM handoff |
-| `modscrh.asm:1126` | `#$37` | restore |
-| `modules.asm:724` | `#$36` | module execution banking |
-| `modules.asm:735` | `#$37` | restore |
+| File:line          | Current | Purpose                            |
+| ------------------ | ------- | ---------------------------------- |
+| `modasm.asm:273`   | `#$36`  | page BASIC out to run from `$A000` |
+| `moddsk.asm:214`   | `#$37`  | restore                            |
+| `modscr.asm:207`   | `#$37`  | restore, from `$033C` trampoline   |
+| `modscrh.asm:1080` | `#$36`  | page out for MODASM handoff        |
+| `modscrh.asm:1126` | `#$37`  | restore                            |
+| `modules.asm:724`  | `#$36`  | module execution banking           |
+| `modules.asm:735`  | `#$37`  | restore                            |
 
 Use the MMU's `$FF01–$FF04` preconfiguration registers so each switch stays a
 single store, preserving the shape of the existing code.
@@ -276,13 +276,13 @@ that load a stored config in a single store. The `$FF00–$FF04` window is
 visible from **every** bank, which is what makes it usable from switching
 code.
 
-| Field | Controls |
-| --- | --- |
-| bit 0 | `$D000-$DFFF` — I/O vs ROM/RAM |
-| bit 1 | `$4000-$7FFF` |
-| bits 2-3 | `$8000-$BFFF` |
-| **bits 4-5** | **`$C000-$FFFF`** |
-| bits 6-7 | RAM bank select |
+| Field        | Controls                       |
+| ------------ | ------------------------------ |
+| bit 0        | `$D000-$DFFF` — I/O vs ROM/RAM |
+| bit 1        | `$4000-$7FFF`                  |
+| bits 2-3     | `$8000-$BFFF`                  |
+| **bits 4-5** | **`$C000-$FFFF`**              |
+| bits 6-7     | RAM bank select                |
 
 Essentially **one config covers the whole session** — `$0E`: RAM from
 `$0000-$BFFF`, I/O at `$D000`, KERNAL ROM above. That is strictly better than
@@ -291,8 +291,8 @@ dance around the big modules does not get translated, it **disappears** —
 along with the "do not restore `$01` while executing here" hazard at
 `modasm.asm:449`.
 
-*(CR bit assignments and the `$0E` value want confirming against the C128
-Programmer's Reference — see [Open items](#open-items).)*
+_(CR bit assignments and the `$0E` value want confirming against the C128
+Programmer's Reference — see [Open items](#open-items).)_
 
 ### The `$C000` collision — the real work in this phase
 
@@ -302,9 +302,9 @@ is the screen editor ROM, sharing that field with the KERNAL at `$E000`. So
 
 PETProject leans on `$C000-$CFFF` heavily:
 
-| What | Detail |
-| --- | --- |
-| 6 modules load there | moddet, modtok, moddsk, modren, modsfr, modscrh — largest is moddsk at 3,255 bytes |
+| What                          | Detail                                                                                                                               |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 6 modules load there          | moddet, modtok, moddsk, modren, modsfr, modscrh — largest is moddsk at 3,255 bytes                                                   |
 | modasm's entire working state | 44 equates at `$C0xx` — symbol table, PC, pass counter, error state, output filename, `ZP_SAVE`, gap pointers (`modasm.asm:115-151`) |
 
 That is 7 of 10 modules. On the C64 it was the natural choice: `$C000-$CFFF`
@@ -357,7 +357,7 @@ is wrong regardless of banking — and page 3 is much more crowded on the C128
 than the C64, so there is no drop-in replacement. See
 [Open items](#open-items) #2.
 
-Rehoming `$C000` *reduces* how much trampolining is needed, since one config
+Rehoming `$C000` _reduces_ how much trampolining is needed, since one config
 then covers the session.
 
 ### `SETBNK`
@@ -395,22 +395,22 @@ Choosing 40 columns makes the largest category of work vanish:
 
 ## Component status
 
-| Component | C128 effort | Notes |
-| --- | --- | --- |
-| `editor.asm` | **Low** | ZP relocation via cfg; one line for the quit path |
-| `colorize.asm` | **None** | aliases editor ZP only; moves with it |
-| `loadsave.asm` | **Low** | add `SETBNK` |
-| `modules.asm` | **Low** | MMU conversion + `SETBNK` |
-| `modsfr.asm` | **None** | no banking, no ROM calls |
-| `moddet.asm` | **Low** | ZP scratch equates only |
-| `modtok.asm` | **Low** | ZP scratch equates only |
-| `modren.asm` | **Low** | ZP scratch + save loop |
-| `moddis.asm` | **Low** | ZP scratch + save loop |
-| `modasm.asm` | **Medium** | MMU + ZP + re-derive the `sei` decision |
-| `moddsk.asm` | **Medium** | MMU + ZP + `SETBNK` |
-| `modsct.asm` | **High** | REU staging at `$B000`; BASIC ABI |
-| `modscr.asm` | **High** | BASIC ROM entry points; `$B000` staging |
-| `modscrh.asm` | **Highest** | 12 BASIC ROM entry points; BASIC 2.0 ZP ABI |
+| Component      | C128 effort | Notes                                             |
+| -------------- | ----------- | ------------------------------------------------- |
+| `editor.asm`   | **Low**     | ZP relocation via cfg; one line for the quit path |
+| `colorize.asm` | **None**    | aliases editor ZP only; moves with it             |
+| `loadsave.asm` | **Low**     | add `SETBNK`                                      |
+| `modules.asm`  | **Low**     | MMU conversion + `SETBNK`                         |
+| `modsfr.asm`   | **None**    | no banking, no ROM calls                          |
+| `moddet.asm`   | **Low**     | ZP scratch equates only                           |
+| `modtok.asm`   | **Low**     | ZP scratch equates only                           |
+| `modren.asm`   | **Low**     | ZP scratch + save loop                            |
+| `moddis.asm`   | **Low**     | ZP scratch + save loop                            |
+| `modasm.asm`   | **Medium**  | MMU + ZP + re-derive the `sei` decision           |
+| `moddsk.asm`   | **Medium**  | MMU + ZP + `SETBNK`                               |
+| `modsct.asm`   | **High**    | REU staging at `$B000`; BASIC ABI                 |
+| `modscr.asm`   | **High**    | BASIC ROM entry points; `$B000` staging           |
+| `modscrh.asm`  | **Highest** | 12 BASIC ROM entry points; BASIC 2.0 ZP ABI       |
 
 ### The script runner is a BASIC-ABI problem, not a ZP problem
 
@@ -418,20 +418,20 @@ This is the single most-affected subsystem, and it is worse than it first
 appears. It hardcodes **12 C64 BASIC ROM entry points**, none of which exist
 at those addresses in BASIC 7.0:
 
-| Addr | Symbol | Site |
-| --- | --- | --- |
+| Addr    | Symbol                  | Site                                 |
+| ------- | ----------------------- | ------------------------------------ |
 | `$A7AE` | `NEWSTT` / `BASIC_RUNC` | `modscr.asm:78`, `modscrh.asm:47,58` |
-| `$A871` | `RUNC` | `modscr.asm:79` |
-| `$A659` | `CLR` | `modscr.asm:80`, `modscrh.asm:57` |
-| `$A533` | `RELINK` | `modscrh.asm:56` |
-| `$A437` | `ERROR` | `modscrh.asm:75` |
-| `$A7E7` | `GONE_ORIG` | `modscrh.asm:48` |
-| `$B08B` | `PTRGET` | `modscrh.asm:73` |
-| `$B79E` | `GETBYT` | `modscrh.asm:50` |
-| `$AD9E` | `FRMNUM` | `modscrh.asm:535` |
-| `$B1AA` | `AYINT` | `modscrh.asm:536` |
-| `$E544` | `CLRSCR` (KERNAL) | `modscr.asm:82` |
-| `$E394` | BASIC cold start | `editor.asm:542` |
+| `$A871` | `RUNC`                  | `modscr.asm:79`                      |
+| `$A659` | `CLR`                   | `modscr.asm:80`, `modscrh.asm:57`    |
+| `$A533` | `RELINK`                | `modscrh.asm:56`                     |
+| `$A437` | `ERROR`                 | `modscrh.asm:75`                     |
+| `$A7E7` | `GONE_ORIG`             | `modscrh.asm:48`                     |
+| `$B08B` | `PTRGET`                | `modscrh.asm:73`                     |
+| `$B79E` | `GETBYT`                | `modscrh.asm:50`                     |
+| `$AD9E` | `FRMNUM`                | `modscrh.asm:535`                    |
+| `$B1AA` | `AYINT`                 | `modscrh.asm:536`                    |
+| `$E544` | `CLRSCR` (KERNAL)       | `modscr.asm:82`                      |
+| `$E394` | BASIC cold start        | `editor.asm:542`                     |
 
 Plus the BASIC 2.0 zero-page ABI: `$2B`/`$2D` (TXTTAB/VARTAB), `$37` (MEMSIZ),
 `$47` (VARPNT), `$7A`/`$7B` (TXTPTR), and `$14`/`$15` as AYINT's big-endian
@@ -474,8 +474,8 @@ Mechanically:
    (every `lda (SRC_PTR),y` moved `$FB`→`$26`, same counts, no stale
    references, identical binary sizes).
 3. **Assert non-overlap at link time** via `__ZP_START__` / `__ZP_SIZE__` and
-   `lderror`, as described above. *(Not yet done. Small, safe, independent of
-   the C128 map — can land at any point.)*
+   `lderror`, as described above. _(Not yet done. Small, safe, independent of
+   the C128 map — can land at any point.)_
 
    This replaces an earlier plan to make ZP saving universal across all
    modules. That plan was dropped: it guarded against nothing real and would
@@ -483,10 +483,10 @@ Mechanically:
 
 #### Files
 
-| File | Role |
-| --- | --- |
-| `zp.inc` | target dispatch, derived `ZP_PTR0..3`, contract + assertions |
-| `zp_c64.inc` | the historical C64 map — `$3A`, `$F7`, `$FF` |
+| File          | Role                                                                           |
+| ------------- | ------------------------------------------------------------------------------ |
+| `zp.inc`      | target dispatch, derived `ZP_PTR0..3`, contract + assertions                   |
+| `zp_c64.inc`  | the historical C64 map — `$3A`, `$F7`, `$FF`                                   |
 | `zp_c128.inc` | the C128 map — `$1C`, `$22`, `$2A`, with the derivation and the residual check |
 
 Each module now aliases its own local names onto pool slots
@@ -575,6 +575,7 @@ allocation throughout: the CBM archive's C128 RAM map,
    common region (`$0000-$0FFF`) to be bank-visible. Both halves of that need
    confirming: that `$0B00` is genuinely free in our configuration, and the
    RCR setting.
+
 3. **MMU configuration register details** — the CR bit assignments tabulated
    under [Banking](#mmu-configuration-register), and that `$0E` is the right
    whole-session config value (RAM `$0000-$BFFF`, I/O, KERNAL ROM). The

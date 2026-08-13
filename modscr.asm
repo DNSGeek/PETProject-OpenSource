@@ -90,7 +90,12 @@ IDE_LEN_LO = <($9FFF - $0801 + 1)
 IDE_LEN_HI = >($9FFF - $0801 + 1)
 
 ; ---- Scratch ----
-TMP16      = $3C      ; lo (hi=$3D)
+; Address comes from zp.inc (see docs/c128-port-notes.md). The BASIC ABI
+; locations above (TXTTAB, VARTAB, MEMSIZ) are fixed by the ROM and are
+; deliberately NOT part of the relocatable pool.
+.include "zp.inc"
+
+TMP16      = ZP_SCRATCH+2  ; lo (hi=+3)
 
 ; Metadata fetch buffer (module RAM, reused after verify)
 META_BUF   = $B000

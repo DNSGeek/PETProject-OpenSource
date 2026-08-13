@@ -53,11 +53,14 @@ SPIN_COLOR_A     = $01
 SPIN_COLOR_B     = $00
 
 ; ---- Zero page (saved / restored around module call) ----
-SRC_PTR          = $FB          ; 16-bit source walker    ($FC = hi)
-DST_PTR          = $FD          ; 16-bit destination ptr  ($FE = hi)
-TMP              = $3A          ; scratch lo              ($3B = hi)
-TMP2             = $3C          ; number lo               ($3D = TMP2+1 = hi)
-TMP3             = $3E          ; table ptr lo            ($3F = TMP3+1 = hi)
+; Addresses come from zp.inc (see docs/c128-port-notes.md).
+.include "zp.inc"
+
+SRC_PTR          = ZP_PTR2      ; 16-bit source walker    (+1 = hi)
+DST_PTR          = ZP_PTR3      ; 16-bit destination ptr  (+1 = hi)
+TMP              = ZP_SCRATCH+0 ; scratch lo              (+1 = hi)
+TMP2             = ZP_SCRATCH+2 ; number lo               (TMP2+1 = hi)
+TMP3             = ZP_SCRATCH+4 ; table ptr lo            (TMP3+1 = hi)
 
 ; ============================================================================
 .segment "LOADADDR"
@@ -78,22 +81,22 @@ modren_entry:
     cli
     rts
 :
-    ; Save ZP $3A-$3F
+    ; Save the ZP_SCRATCH block
     ldx #0
 @zpsave:
-    lda $3A,x
+    lda ZP_SCRATCH,x
     sta ZP_SAVE,x
     inx
-    cpx #6
+    cpx #ZP_SCRATCH_LEN
     bne @zpsave
-    ; Save $FB-$FE
-    lda $FB
+    ; Save ZP_PTR2 / ZP_PTR3
+    lda ZP_PTR2
     sta ZP_SAVE+6
-    lda $FC
+    lda ZP_PTR2+1
     sta ZP_SAVE+7
-    lda $FD
+    lda ZP_PTR3
     sta ZP_SAVE+8
-    lda $FE
+    lda ZP_PTR3+1
     sta ZP_SAVE+9
 
     ; Copy MOD parameters into local state
@@ -164,18 +167,18 @@ modren_entry:
     ldx #0
 @zprestore:
     lda ZP_SAVE,x
-    sta $3A,x
+    sta ZP_SCRATCH,x
     inx
-    cpx #6
+    cpx #ZP_SCRATCH_LEN
     bne @zprestore
     lda ZP_SAVE+6
-    sta $FB
+    sta ZP_PTR2
     lda ZP_SAVE+7
-    sta $FC
+    sta ZP_PTR2+1
     lda ZP_SAVE+8
-    sta $FD
+    sta ZP_PTR3
     lda ZP_SAVE+9
-    sta $FE
+    sta ZP_PTR3+1
 
     cli
     rts

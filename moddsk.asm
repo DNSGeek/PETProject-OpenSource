@@ -167,7 +167,7 @@ DSK_FREE_LO:     .res 1     ; blocks free lo
 DSK_FREE_HI:     .res 1     ; blocks free hi
 DSK_DISKNAME:    .res 16    ; disk name, 16 bytes PETSCII
 DSK_DISKID:      .res 2     ; disk id, 2 bytes
-DSK_ZP_SAVE:     .res 4     ; saved ZP $FB-$FE
+DSK_ZP_SAVE:     .res 4     ; saved ZP_PTR2 / ZP_PTR3
 DSK_TMP:         .res 1     ; general scratch byte
 DSK_TMP2:        .res 1     ; second scratch byte
 DSK_NAMELEN_TMP: .res 1     ; scratch for rename/format input length
@@ -186,8 +186,11 @@ DSK_CACHE:       .res 680   ; directory cache: 34 entries × 20 bytes
 ; throughout the code will resolve correctly via the linker.
 
 ; Zero page pointers (saved/restored)
-DSK_PTR         = $FB       ; lo (hi = $FC)
-DSK_PTR2        = $FD       ; lo (hi = $FE)
+; Addresses come from zp.inc (see docs/c128-port-notes.md).
+.include "zp.inc"
+
+DSK_PTR         = ZP_PTR2   ; lo (hi = +1)
+DSK_PTR2        = ZP_PTR3   ; lo (hi = +1)
 
 ; ============================================================================
 ; Module entry point
@@ -215,13 +218,13 @@ disk_main:
     sta $01
 
     ; Save ZP
-    lda $FB
+    lda ZP_PTR2
     sta DSK_ZP_SAVE+0
-    lda $FC
+    lda ZP_PTR2+1
     sta DSK_ZP_SAVE+1
-    lda $FD
+    lda ZP_PTR3
     sta DSK_ZP_SAVE+2
-    lda $FE
+    lda ZP_PTR3+1
     sta DSK_ZP_SAVE+3
 
     ; Copy drive from parameter block
@@ -328,13 +331,13 @@ disk_main:
 dsk_exit:
     ; Restore ZP
     lda DSK_ZP_SAVE+0
-    sta $FB
+    sta ZP_PTR2
     lda DSK_ZP_SAVE+1
-    sta $FC
+    sta ZP_PTR2+1
     lda DSK_ZP_SAVE+2
-    sta $FD
+    sta ZP_PTR3
     lda DSK_ZP_SAVE+3
-    sta $FE
+    sta ZP_PTR3+1
     rts
 
 ; ============================================================================

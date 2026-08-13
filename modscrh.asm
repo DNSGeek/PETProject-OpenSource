@@ -137,8 +137,13 @@ VEC_IERROR  = $0300
 VEC_IMAIN   = $0302
 VEC_IGONE   = $0308
 
-; ZP scratch
-HND_TMP     = $3C     ; lo (hi=$3D) — scratch pointer (no conflict during script)
+; ZP scratch — address comes from zp.inc (see docs/c128-port-notes.md).
+; NOTE: the BASIC ABI locations this module also uses (TXTTAB, VARTAB,
+; VARPNT, BASIC_TXTPTR, and AYINT's $14/$15 output) are fixed by the ROM and
+; are deliberately NOT part of the relocatable pool.
+.include "zp.inc"
+
+HND_TMP     = ZP_SCRATCH+2  ; lo (hi=+3) — scratch pointer (no conflict during script)
 
 ; Module status
 MOD_STATUS  = $021E

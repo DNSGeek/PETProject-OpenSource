@@ -142,11 +142,18 @@ CLR_PTR:      .res 2        ; color RAM row pointer
 CLR_KWLEN:    .res 1        ; keyword length returned by col_try_keyword
 CLR_CTMP:     .res 2        ; colortab walk pointer (col_try_keyword internal)
 
-; col_try_keyword uses ZP scratch at $3A for the matched token byte.
-; This byte is above the editor's reserved ZP block ($02-$1B) and is
-; the same address used by modtok.asm — safe to alias here since the
+; col_try_keyword needs one byte of scratch for the matched token byte.
+; It borrows the first byte of the *module* scratch pool rather than
+; spending one of the editor's own reserved bytes — safe only because the
 ; editor never calls tokenizer code directly.
-KW_TOKEN      = $3A          ; token byte from col_try_keyword (colorize scratch)
+;
+; This is the one place the editor reaches across into module zero page, so
+; it must track any relocation of that pool: hence zp.inc rather than a
+; literal. See docs/c128-port-notes.md ("Cross-tier alias") — the intent is
+; to retire this alias once the C128 map puts both tiers in one region.
+.include "zp.inc"
+
+KW_TOKEN      = ZP_SCRATCH+0 ; token byte from col_try_keyword (colorize scratch)
 
 
 .segment "LOADADDR"

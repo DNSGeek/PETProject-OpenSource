@@ -68,6 +68,19 @@ C128_PKYLEN         = $1000
 C128_PKYDEF         = $100A
 
 ; ---------------------------------------------------------------------------
+; 2 MHz
+; ---------------------------------------------------------------------------
+; VIC-IIe clock-rate register: bit 0 set = 2 MHz. The 40-column VIC cannot
+; fetch at 2 MHz, so the display is blanked (VIC control register 1, bit 4
+; clear) for the duration — the "blank-screen burst" of the port notes. The
+; KERNAL's jiffy IRQ is raster-driven and keeps running. Only used around
+; module calls that do no KERNAL I/O (serial timing is CIA-driven and would
+; break) and show nothing the user needs to see.
+C128_VIC_CLKRATE    = $D030
+C128_VIC_CTRL1      = $D011
+C128_VIC_DEN        = $10   ; display enable bit in C128_VIC_CTRL1
+
+; ---------------------------------------------------------------------------
 ; BASIC 7.0
 ; ---------------------------------------------------------------------------
 C128_BASIC_COLD     = $4000 ; JMP cold start; needs C128_CFG_BASIC in the MMU

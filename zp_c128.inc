@@ -65,14 +65,14 @@
 ;     if only one of those moves.
 ;
 ; ---------------------------------------------------------------------------
-; STILL TO CONFIRM ON HARDWARE / IN VICE
+; CONFIRMED ON HARDWARE
 ; ---------------------------------------------------------------------------
 ; The reasoning above comes from a static allocation map, which documents who
-; OWNS each byte, not empirically what the ROM writes. Before trusting this in
-; anger, verify on a running C128 that nothing disturbs $02-$2A across a long
-; editing session with disk I/O — the cheap check is a poisoned-pattern test:
-; fill $02-$2A with a known pattern, run the IDE, and confirm only PETProject's
-; own writes appear.
+; OWNS each byte, not empirically what the ROM writes. It has held up: the
+; C128 build runs on a real C128 with editing, module loads and disk I/O
+; (September 2026). If this map ever changes, re-check with a poisoned-pattern
+; test: fill $02-$2A with a known pattern, run the IDE, and confirm only
+; PETProject's own writes appear.
 ; ============================================================================
 
 ZP_EDITOR       = $02   ; must match petproject.cfg  ZP: start

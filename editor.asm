@@ -3394,6 +3394,23 @@ c128_restore_keys:
     bpl :-
     rts
 
+    ; 2 MHz with the display blanked, and back. Used by the module call
+    ; wrapper in modules.asm for compute-only modules (c128_fast_ok).
+c128_fast:
+    lda C128_VIC_CTRL1
+    and #<~C128_VIC_DEN
+    sta C128_VIC_CTRL1
+    lda #1
+    sta C128_VIC_CLKRATE
+    rts
+c128_slow:
+    lda #0
+    sta C128_VIC_CLKRATE
+    lda C128_VIC_CTRL1
+    ora #C128_VIC_DEN
+    sta C128_VIC_CTRL1
+    rts
+
     ; Undo c128_init's MMU changes: back to bank 0 with I/O, then the
     ; original preconfiguration registers and common-RAM size.
 c128_restore_mmu:

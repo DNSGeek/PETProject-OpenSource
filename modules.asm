@@ -151,6 +151,14 @@ mod_fname_7: mod_name {$4D,$4F,$44,$53,$43,$54}  ; MODSCT
 mod_fname_8: mod_name {$4D,$4F,$44,$53,$43,$52,$48}  ; MODSCRH (7 chars)
 mod_fname_9: mod_name {$4D,$4F,$44,$53,$43,$52}  ; MODSCR
 
+.ifdef TARGET_C128
+; Which modules may run at 2 MHz with the screen blanked (index order as
+; above): only those that do no KERNAL I/O and have no interactive UI.
+; modasm writes its output file and reads includes mid-run, moddsk is all
+; disk I/O, modsfr is a form the user drives; the script runner is absent.
+c128_fast_ok: .byte 0, 1, 1, 0, 1, 1, 0, 0, 0, 0
+.endif
+
 mod_fname_lo: .byte <mod_fname_0, <mod_fname_1, <mod_fname_2, <mod_fname_3, <mod_fname_4, <mod_fname_5, <mod_fname_6, <mod_fname_7, <mod_fname_8, <mod_fname_9
 mod_fname_hi: .byte >mod_fname_0, >mod_fname_1, >mod_fname_2, >mod_fname_3, >mod_fname_4, >mod_fname_5, >mod_fname_6, >mod_fname_7, >mod_fname_8, >mod_fname_9
 
@@ -752,6 +760,14 @@ run_sel_loaded:
 @no_page_out:
 .endif
 .ifdef TARGET_C128
+    ; Compute-only modules (no KERNAL I/O, nothing to watch) run at 2 MHz
+    ; with the display blanked — see c128_fast / c128_slow in editor.asm and
+    ; the table below. c128_slow is unconditional: harmless when not fast.
+    ldx MOD_LAST_IDX
+    lda c128_fast_ok,x
+    beq :+
+    jsr c128_fast
+:
     ; The module lives in bank 0 and the editor runs in bank 1: switch for
     ; the call and back afterwards. Everything the module needs from us —
     ; zero page, the parameter block, this code — is in common RAM; the
@@ -761,6 +777,7 @@ run_sel_loaded:
     jsr mod_call_trampoline
 .ifdef TARGET_C128
     sta C128_MMU_LOAD_A
+    jsr c128_slow
 .endif
 .ifndef TARGET_C128
     ; Decide the bank restore from OUR stash ($0229), not LPTR: LPTR is

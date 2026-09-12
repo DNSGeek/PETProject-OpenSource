@@ -63,7 +63,9 @@ no modern PC, no special hardware required.
 That's it — you're in the editor. Press `F8` to open the module picker, or start
 typing to write some BASIC.
 
-> 💡 **Tip:** Your experience will be much smoother with a fastloader cartridge.
+> 💡 **Tip:** On a C64, your experience will be much smoother with a fastloader
+> cartridge. A C128 with a 1571 or 1581 needs none: module loads use the
+> KERNAL's burst mode and everything else runs over the fast serial bus.
 
 ---
 
@@ -213,7 +215,9 @@ Security policy: [`SECURITY.md`](SECURITY.md).
 
 ## Tips
 
-- Use a **fastloader cartridge** for a much snappier experience.
+- On a C64, use a **fastloader cartridge** for a much snappier experience
+  (a C128 with a 1571/1581 is already fast: burst-mode module loads, fast
+  serial for file I/O, and the compute-only modules run at 2 MHz).
 - Keep the **program disk in drive 8**; point Settings (`F1`) at a separate data
   drive if you have one.
 - The scripting engine needs an **REU** for script tokenization and IDE snapshots.

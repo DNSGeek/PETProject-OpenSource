@@ -17,6 +17,8 @@ explicitly under [Open items](#open-items).
 - [Component status](#component-status)
 - [Relocation strategy](#relocation-strategy)
 - [Phasing](#phasing)
+- [Script runner on the C128](#script-runner-on-the-c128)
+- [BASIC 7.0 keywords — investigation](#basic-70-keywords--investigation)
 - [Open items](#open-items)
 
 ---
@@ -244,11 +246,13 @@ Two consequences:
   goal: non-overlap becomes obvious rather than incidental, and the
   `KW_TOKEN` alias can be retired by giving colorize a byte of its own.
 
-**Residual empirical check.** The above comes from a static allocation map,
-which documents who _owns_ each byte rather than what the ROM demonstrably
-writes. Before trusting it in anger, run a poisoned-pattern test on a real
-C128 or in VICE: fill `$02-$2A` with a known pattern, exercise the IDE
-including disk I/O, and confirm only PETProject's own writes appear.
+**Empirical check.** The above comes from a static allocation map, which
+documents who _owns_ each byte rather than what the ROM demonstrably writes.
+It has since been borne out in practice: the C128 build runs on a real C128
+(September 2026) with editing, module loads and disk I/O working, which is
+what a zero-page collision would have broken first. A poisoned-pattern test
+(fill `$02-$2A`, exercise the IDE, confirm only PETProject's writes) remains
+the way to re-check after any change to the map.
 
 ---
 
@@ -665,11 +669,12 @@ byte-identical throughout; `-D TARGET_C128` assembles and links.
 
 **Phase 1 — rehome `$C000`.** ✅ **Done at the link level.** `layout.inc`
 carries the per-target addresses; `TARGET=c128 bash make_petproject.sh`
-links the editor at `$1C01` under `petproject_c128.cfg` and the low modules at
-`$9000` under `module_c128.cfg` / `modsfr_c128.cfg`, with modasm's state block
-following `MOD_LO_BASE`. The 225-byte margin is a linker overflow error. See
+links the editor under `petproject_c128.cfg` (now at `$1300` in common RAM —
+see [Bank-1 buffer](#bank-1-buffer)) and the low modules at `$9000` under
+`module_c128.cfg` / `modsfr_c128.cfg`, with modasm's state block following
+`MOD_LO_BASE`. Overflowing the editor's area is a linker error. See
 [The `$C000` collision](#the-c000-collision--the-real-work-in-this-phase) for
-the layout and the buffer trade-off. Not yet exercised on hardware.
+the original layout and the buffer trade-off it forced.
 
 **Phase 2 — banking.** ✅ **Done.** MMU session config set as the editor's
 first instruction and asserted by modasm/moddsk; the loader's `$01` dance
@@ -678,7 +683,7 @@ key-repeat flag and 40-column swap in `c128_init`; quit restores the keys,
 banks BASIC ROM in and takes BASIC 7.0's cold start. Trampolines needed no
 work (script runner only). Verified in VICE 3.10: the C128 build boots from
 `petproject_c128.d64`, shows the editor, opens the module menu on F8, and F7
-returns to the BASIC 7.0 banner. Not yet run on hardware.
+returns to the BASIC 7.0 banner.
 
 **Phase 3 — build and packaging.** ✅ **Done.** `make_petproject.sh` builds
 both sets by default (`TARGET=all`) and writes one `petproject.d64` carrying
@@ -693,15 +698,39 @@ cooperate with the quit path. Verified in VICE with a true-drive 1571: reset
 boots into the editor, both machines list both sets, F7 returns to `READY.`
 without relaunching.
 
+**Hardware.** ✅ The combined `petproject.d64` — boot sector, bank-1 buffer,
+modules — runs on a real C128 (September 2026). Everything above that was
+marked "verified in VICE" is now also confirmed on the machine.
+
 **Phase 4 — the payoff.** In value-per-effort order:
 
 1. **REU-free scripting.** `modscr.asm` stashes `$0801–$9FFF` to REU `$009000`
    purely to make room. Bank 1 does that job, which would remove the one
-   hardware requirement in the README. (Gated on the script runner rework.)
-2. **Burst mode** with a 1571/1581 — retires the "use a fastloader cartridge"
-   advice.
-3. **2 MHz bursts** around the assembler's passes, screen blanked, disk I/O
-   excluded.
+   hardware requirement in the README. **Not done** — it is gated on porting
+   the script runner itself, which is the one large job left; see
+   [Script runner on the C128](#script-runner-on-the-c128) for the plan and
+   the two design problems it has to solve first.
+2. **Burst mode** — ✅ **already in effect, nothing to write.** Module loads
+   go through KERNAL `LOAD`, which the C128 KERNAL runs in burst mode on a
+   1571/1581 without being asked. The editor's own file reads stream through
+   `CHRIN`, which cannot burst, but on a C128 that traffic already uses the
+   fast serial protocol (about 10× the C64's rate) — and switching those
+   reads to `LOAD` is not an option: `LOAD` consumes the file's first two
+   bytes as a load address, which PETProject's header-less text files do not
+   have (the comment at the top of `loadsave.asm` explains why they are
+   read byte by byte). A custom block-level burst reader would need a file
+   format change to buy back the last factor; not worth it. The README's
+   fastloader-cartridge advice is now C64-only.
+3. **2 MHz bursts** — ✅ **done.** The module call wrapper in `modules.asm`
+   runs the compute-only modules — detokenize, tokenize, renumber,
+   disassemble (`c128_fast_ok`) — at 2 MHz with the display blanked, and
+   restores 1 MHz and the display on return (`c128_fast`/`c128_slow` in
+   `editor.asm`). Excluded: modasm (writes its output file and reads
+   includes mid-run; CIA-driven serial timing would break), moddsk (all
+   disk I/O) and modsfr (a form the user drives). Verified in VICE: the VIC
+   clock register reads 2 MHz at modtok's and moddet's entry and 1 MHz with
+   the display re-enabled at the idle loop afterwards, and the save/reload
+   round trip is pixel-identical to the 1 MHz run.
 4. **Bigger buffer** via bank 1 — ✅ **done**, 32 K (up from 19.75 K on the
    first C128 layout and 24 K on the C64). See
    [Bank-1 buffer](#bank-1-buffer). The windowing scheme once feared turned
@@ -710,9 +739,101 @@ without relaunching.
    helpers far cheaper than `INDFET`/`INDSTA`.
 
 BASIC 7.0 token support — extending `modtok`, `moddet`, `colorize` and
-`modren` to the two-byte `$CE xx` / `$FE xx` tokens, including which new
-keywords take line-number arguments (`TRAP`, `RESUME`, the `GO` forms) — is a
-separate content project, not part of the port.
+`modren` — is a separate content project, not part of the port. It has been
+scoped: see [BASIC 7.0 keywords](#basic-70-keywords--investigation).
+
+## Script runner on the C128
+
+What the port would have to do to bring `modsct`/`modscrh`/`modscr` over,
+beyond the ROM entry points already listed under
+[The script runner is a BASIC-ABI problem](#the-script-runner-is-a-basic-abi-problem-not-a-zp-problem):
+
+- **Where the script's BASIC program lives.** BASIC 7.0 keeps program text
+  in bank 0 from `$1C01` — on top of the editor image (`$1300-$38B9`). The
+  C64 version stashes the whole IDE to the REU to make room. On the C128 the
+  editor image (~10 K) can be stashed into bank 0 `$4000-$8FFF`, which the
+  bank-1 layout leaves entirely free, so no REU is needed for that half.
+- **Where BASIC's variables live.** BASIC 7.0 puts variables in bank 1 from
+  `$0400` upward and strings from the top of bank 1 downward — straight
+  through the 32 K buffer at `$4000-$BFFF`, which holds the user's text
+  while the script runs. The runner would have to lower BASIC's bank-1 top
+  of memory to `$4000` (its `MEMSIZ`/`FRETOP` in bank 1), giving scripts
+  15 K of variable and string space, before handing control to BASIC. That
+  is the design decision that does not exist on the C64.
+- **The ROM ABI.** `CHRGET` is in common RAM on the C128 (`$0380`) rather
+  than zero page, and every BASIC 2.0 entry the handler calls (`PTRGET`,
+  `GETBYT`, `FRMNUM`, `AYINT`, `RELINK`, `CLR`, `NEWSTT`) has a BASIC 7.0
+  counterpart to be located in the 318018/318019 images — the same way the
+  boot routine was located for Phase 3. The `IGONE`/`IERROR`/`IMAIN`
+  vectors keep their `$0300-$030B` addresses.
+- **Trampolines** move from `$033C` to the cassette buffer at `$0B00`, and
+  with 16 K common RAM already in place they no longer need the RCR change
+  the open item worried about.
+
+Estimate: the largest remaining piece of the port by some margin, mostly
+ROM archaeology plus the memory-map design above. Everything else in this
+document is done without it.
+
+## BASIC 7.0 keywords — investigation
+
+**Token table, from the ROM (318018-04/318019-04).** BASIC 7.0 keeps BASIC
+2.0's 76 one-byte tokens `$80-$CB` unchanged and continues the same list to
+`$FD`: 126 one-byte tokens in all, `$CC RGR` … `$FD WHILE`, with `$CE` and
+`$FE` reserved as escape prefixes. Two second-level lists follow: `$FE xx`
+statements, 37 entries `$02 BANK` … `$26 SLOW` (with `$20` and `$22`
+unused), and `$CE xx` functions, 9 entries `$02 POT` … `$0A POINTER`. So the
+job is 50 new one-byte keywords and 46 two-byte ones, 96 strings, about
+650 bytes of text.
+
+**The collision.** PETProject's script language already uses `$CC-$D8` for
+its own pseudo-keywords (`ASSEMBLE` `$CC`, `INCLUDE` `$CD`, `RUNPROG` `$CE`,
+`SCRATCH` `$CF`, `DELETE` `$D0`, `EXISTS` `$D1`, `RENAME` `$D2`, …), and all
+four components know about them: `modtok` and `modsct` tokenize them,
+`moddet` and `colorize` carry tables to `$D8`. Those values are `RGR`,
+`RCLR`, the `$CE` escape, `JOY`, `RDOT`, `DEC`, `HEX$` … in BASIC 7.0. On the
+C128 build the script runner is absent, so the C128 tables can simply be the
+BASIC 7.0 ones; if the runner is ever ported, the script pseudo-tokens should
+move into the unused `$FE` codes (`$20`, `$22`, `$27` and up) rather than
+overload real keywords.
+
+**Per component.**
+
+- `modtok` (tokenize on save): table is `[token][chars, last|$80]…`,
+  longest-first, one token byte per entry. Needs a two-byte entry form (a
+  prefix byte before the escape code) and the 96 new strings, ordered so
+  that longer keywords still win (`RESTORE` before `RESUME`? no — but
+  `GO` vs `GOTO`, `TRAP` vs `TRON`, `SCNCLR`, `COLLISION` vs `COLOR`,
+  `PAINT` vs `POINTER` all need the existing longest-first discipline). It
+  also writes the program header as `$0801`; a native C128 file should carry
+  `$1C01` and link pointers based on it (`BASIC_START` in `modtok.asm`
+  becomes a per-target constant). BASIC 7.0 relinks on `LOAD`, so this is
+  hygiene rather than a correctness bug.
+- `moddet` (detokenize on load): indexes `kwtab` by `token - $80` up to
+  `$D8`. Needs the list extended to `$FD`, and a branch for `$CE`/`$FE`
+  that reads the second byte and indexes the two escape lists. Bytes it
+  does not know are currently emitted raw, which is what happens to a real
+  BASIC 7.0 program today.
+- `colorize`: matches the editor's text against `kw_strtab`/`kw_len_tab` in
+  token order. Two-byte tokens never appear in text, so it just needs the
+  longer string list and a wider `$D9` limit. About 650 bytes more in the
+  editor image; the C128 image has 1.9 K left under `$4000`, so it fits,
+  but this is the component that will feel the common-RAM ceiling first.
+- `modren`: works on text, scanning for `GOTO`, `GOSUB` and `THEN`
+  (`try_goto_gosub`, `try_then`). BASIC 7.0 adds line-number arguments to
+  `TRAP n`, `RESUME n`, `ELSE n`, `GO TO n` (with the space), `RUN n`,
+  `RESTORE n`, and the second argument of `COLLISION type, n`. Each is one
+  more scanner in the same style.
+- Dialect switch: the module parameter block already carries `MOD_DIALECT`
+  (`$021D`), written as 0 by the editor and declared but unused by moddet.
+  That is the natural place to select BASIC 2.0 or 7.0 tables at run time,
+  or the tables can simply follow `TARGET_C128` at assembly time (fewer
+  bytes in each module, no runtime choice). Assembly-time selection is the
+  recommendation: a C128 build edits BASIC 7.0, a C64 build BASIC 2.0.
+
+**Effort.** Table work in four files plus the two-byte token path in modtok
+and moddet and seven small scanners in modren; testable end to end in VICE
+with the save/reload round trip already scripted. Days, not weeks, and
+independent of the script runner.
 
 ---
 

@@ -2177,7 +2177,7 @@ src_peek:
     bcs @at_end
     sty ASM_YPEEK               ; save Y (dedicated scratch, never shared)
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     ldy ASM_YPEEK               ; restore Y — NOTE: this clobbers Z flag!
     ora #0                      ; re-assert Z based on A (Z=1 iff A=0)
     rts
@@ -2188,7 +2188,7 @@ src_peek:
 @file_peek:
     sty ASM_YPEEK               ; same Y-preservation contract as above
     ldy #0
-    lda (SRC_PTR),y
+    lda (SRC_PTR),y             ; LINE_BUF is module RAM, not the buffer: native on every target
     ldy ASM_YPEEK
     ora #0                      ; re-assert Z based on A
     rts

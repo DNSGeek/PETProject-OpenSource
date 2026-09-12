@@ -161,10 +161,10 @@ disassemble:
 
     ; Read 2-byte PRG load address from first two bytes
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta DIS_PC_LO
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta DIS_PC_HI
 
     ; Advance SRC_PTR past the 2-byte header
@@ -246,7 +246,7 @@ disassemble:
 
     ; Fetch opcode
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta TMP                     ; TMP = opcode
 
     ; Look up mnemonic index and mode
@@ -428,7 +428,7 @@ emit_line:
 @op_imm:
     ; immediate: "#$XX   " (7 chars)
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$23                    ; '#'
     jsr emit_dst
@@ -445,7 +445,7 @@ emit_line:
 @op_zp:
     ; zero page: "$XX    " (7 chars)
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$24                    ; '$'
     jsr emit_dst
@@ -461,7 +461,7 @@ emit_line:
 @op_zpx:
     ; zero page,X: "$XX,X  " (7 chars)
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$24
     jsr emit_dst
@@ -479,7 +479,7 @@ emit_line:
 @op_zpy:
     ; zero page,Y: "$XX,Y  " (7 chars)
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$24
     jsr emit_dst
@@ -497,10 +497,10 @@ emit_line:
 @op_abs:
     ; absolute: "$XXXX  " (7 chars)
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta TMP+1                   ; save lo (reuse, mnem_idx no longer needed)
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax                         ; hi
     lda #$24
     jsr emit_dst
@@ -516,10 +516,10 @@ emit_line:
 @op_abx:
     ; absolute,X: "$XXXX,X"
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta TMP+1
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$24
     jsr emit_dst
@@ -536,10 +536,10 @@ emit_line:
 @op_aby:
     ; absolute,Y: "$XXXX,Y"
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta TMP+1
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$24
     jsr emit_dst
@@ -556,10 +556,10 @@ emit_line:
 @op_ind:
     ; indirect: "($XXXX)"
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta TMP+1
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$28                    ; '('
     jsr emit_dst
@@ -576,7 +576,7 @@ emit_line:
 @op_izx:
     ; (indirect,X): "($XX,X)"
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$28
     jsr emit_dst
@@ -595,7 +595,7 @@ emit_line:
 @op_izy:
     ; (indirect),Y: "($XX),Y"
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$28
     jsr emit_dst
@@ -613,7 +613,7 @@ emit_line:
 
 @op_rel:
     ldy #1
-    lda (SRC_PTR),y             ; signed offset
+    buf_lda SRC_PTR             ; signed offset
     sta TMP+1                   ; save offset
     ; target = PC + 2 + signed_offset
     lda DIS_PC_LO
@@ -671,7 +671,7 @@ emit_line:
     ; so the PETSCII hint column lands in the same place on every line,
     ; no matter how many bytes this instruction actually has.
     ldy #0
-    lda (SRC_PTR),y             ; opcode
+    buf_lda SRC_PTR             ; opcode
     jsr emit_hex_byte
     lda TMP3+1                  ; size
     cmp #1
@@ -679,7 +679,7 @@ emit_line:
     lda #$20
     jsr emit_dst
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr emit_hex_byte
     lda TMP3+1
     cmp #2
@@ -687,7 +687,7 @@ emit_line:
     lda #$20
     jsr emit_dst
     ldy #2
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr emit_hex_byte
     jmp @emit_cr
 @pad_size1:
@@ -725,7 +725,7 @@ emit_illegal:
     sta TMP3+1
 
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta TMP                     ; opcode byte
 
     ; "    .BYTE $XX   ;XXXX:XX\r" — semicolon at column 16
@@ -857,8 +857,8 @@ relocate_output:
     bcs @copy_done
 @copy_one:
     ldy #0
-    lda (SRC_PTR),y
-    sta (DST_PTR),y
+    buf_lda SRC_PTR
+    buf_sta DST_PTR
     inc SRC_PTR
     bne :+
     inc SRC_PTR+1
@@ -921,7 +921,7 @@ emit_dst:
     bcs @emit_discard           ; TMP3 >= work_buf_end hi → past end
     pha
     ldy #0
-    sta (DST_PTR),y
+    buf_sta DST_PTR
     inc DST_PTR
     bne :+
     inc DST_PTR+1
@@ -945,7 +945,7 @@ emit_petscii_hint:
     lda #$7C                    ; '|'
     jsr emit_dst
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr emit_petscii_char
     lda TMP3+1
     cmp #1
@@ -956,7 +956,7 @@ emit_petscii_hint:
     jmp @hint_close
 @hint_byte2:
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr emit_petscii_char
     lda TMP3+1
     cmp #2
@@ -966,7 +966,7 @@ emit_petscii_hint:
     jmp @hint_close
 @hint_byte3:
     ldy #2
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr emit_petscii_char
 @hint_close:
     lda #$7C                    ; '|'

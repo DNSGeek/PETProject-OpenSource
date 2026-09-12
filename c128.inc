@@ -22,8 +22,32 @@
 ; collision" section of docs/c128-port-notes.md for why $C000-$CFFF cannot
 ; hold code and why MOD_LO moved to $9000.
 C128_MMU_CR         = $FF00
-C128_CFG_SESSION    = $0E   ; RAM $0002-$BFFF, I/O at $D000, KERNAL ROM above
+C128_CFG_SESSION    = $0E   ; bank 0: RAM $0002-$BFFF, I/O at $D000, KERNAL ROM above
+C128_CFG_EDITOR     = $4E   ; same map over bank 1 — the editor's session config
 C128_CFG_BASIC      = $00   ; BASIC 7.0's "bank 15": BASIC + KERNAL ROM, I/O
+
+; Preconfiguration registers: $D501-$D504 hold four configs; a write of ANY
+; value to the mirror $FF01-$FF04 loads the matching one into the CR without
+; disturbing A. The editor sets A = C128_CFG_EDITOR (bank 1) and
+; B = C128_CFG_SESSION (bank 0), so a bank switch is a single `sta` with no
+; register to spare — which is what makes the far-access helpers cheap.
+; The KERNAL never writes these (checked in the 318020-05 image); the
+; originals are saved at startup and restored on quit for BASIC's sake.
+C128_MMU_PCR_A      = $D501
+C128_MMU_PCR_B      = $D502
+C128_MMU_LOAD_A     = $FF01 ; write anything: CR := PCR A (bank 1, editor)
+C128_MMU_LOAD_B     = $FF02 ; write anything: CR := PCR B (bank 0, modules)
+
+; RAM configuration register: bits 0-1 = size of the bottom common area
+; (00 1 K, 01 4 K, 10 8 K, 11 16 K), bit 2 = bottom common enabled, bit 3 =
+; top common enabled, bits 6-7 = VIC RAM bank. The editor needs 16 K bottom
+; common so that $0000-$3FFF — its own code and variables, the screen, and
+; everything the KERNAL touches — is the same memory in bank 0 and bank 1.
+; The screen editor ROM rewrites this register only to change bits 6-7 and
+; puts the original back (disassembled at $CF80), so the setting survives.
+C128_MMU_RCR        = $D506
+C128_RCR_COMMON16K  = $07   ; bits 0-2: 16 K, bottom common on
+C128_RCR_COMMON_MASK = $F8  ; bits we leave alone when setting the above
 
 ; ---------------------------------------------------------------------------
 ; KERNAL entries the port adds (C64 code needs none of these)
@@ -55,9 +79,10 @@ C128_BASIC_COLD     = $4000 ; JMP cold start; needs C128_CFG_BASIC in the MMU
 ; disk's boot sector — so quitting the editor via BASIC_COLD on an autoboot
 ; disk would relaunch it. The quit path leaves this marker; the boot sector
 ; sees it, clears it and returns to BASIC instead of loading the editor.
-; $1BFF is in the $1300-$1BFF application area: untouched by BASIC's init,
-; by the boot loader ($0B00 sector buffer) and by the editor's own load
-; ($1C01 up). A power cycle randomises it, a reset does not — which is why
-; the boot sector clears it, so the next reset boots normally.
-C128_BOOT_FLAG      = $1BFF
+; $0FFF is the last byte of the sprite-definition area ($0E00-$0FFF), which
+; nothing in the session uses: untouched by BASIC's init, by the boot loader
+; ($0B00 sector buffer) and by the editor's own load ($1300 up). A power
+; cycle randomises it, a reset does not — which is why the boot sector
+; clears it, so the next reset boots normally.
+C128_BOOT_FLAG      = $0FFF
 C128_BOOT_FLAG_QUIT = $51   ; 'Q'

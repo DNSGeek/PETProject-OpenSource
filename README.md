@@ -138,8 +138,9 @@ To build one machine's set alone (`TARGET=c64` writes a C64-only
 TARGET=c128 bash make_petproject.sh
 ```
 
-The C128 build is native mode, 40 columns; the script runner is not part of
-it, everything else is. See `docs/c128-port-notes.md` for the memory map and
+The C128 build is native mode, 40 columns, with a 32 K editing buffer in RAM
+bank 1 (the C64 build has 24 K); the script runner is not part of it,
+everything else is. See `docs/c128-port-notes.md` for the memory map and
 status.
 
 To (re)create the disk image manually:

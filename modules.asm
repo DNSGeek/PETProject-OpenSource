@@ -751,7 +751,17 @@ run_sel_loaded:
     sta $01
 @no_page_out:
 .endif
+.ifdef TARGET_C128
+    ; The module lives in bank 0 and the editor runs in bank 1: switch for
+    ; the call and back afterwards. Everything the module needs from us —
+    ; zero page, the parameter block, this code — is in common RAM; the
+    ; buffer it reaches through the far-access table.
+    sta C128_MMU_LOAD_B
+.endif
     jsr mod_call_trampoline
+.ifdef TARGET_C128
+    sta C128_MMU_LOAD_A
+.endif
 .ifndef TARGET_C128
     ; Decide the bank restore from OUR stash ($0229), not LPTR: LPTR is
     ; editor zero page that the module just had full control over, and a

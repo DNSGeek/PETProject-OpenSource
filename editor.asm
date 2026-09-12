@@ -121,7 +121,7 @@ DEFAULT_BG_COLOR     = $00        ; black
 MODAL_BAR_COLOR      = $07        ; yellow — the alert bar color
 SCR_REVERSE          = $80        ; OR into a screen code for reverse video
 
-BUF_SIZE     = EDITOR_BUF_SIZE    ; working buffer (24 K on C64, 19.75 K on C128 — layout.inc)
+BUF_SIZE     = EDITOR_BUF_SIZE    ; working buffer (24 K on C64; 32 K in bank 1 on C128 — layout.inc)
 
 ; ============================================================================
 ; Zero-page allocations
@@ -224,10 +224,35 @@ start:
     ; If this assertion fires, the stub changed size — update "2061" to match.
     .assert * = EDITOR_LOAD + 12, error, "BASIC SYS address mismatch: start: must be at EDITOR_LOAD+12 (the SYS target in the BASIC stub)"
 .ifdef TARGET_C128
-    ; FIRST thing on the C128: BASIC's SYS hands us its own memory map
-    ; ($00 — BASIC ROM over $4000-$BFFF), under which everything from the
-    ; end of our code to $8F1E is invisible. Switch to the session map: RAM
-    ; to $BFFF, I/O, KERNAL ROM. Stays this way until the quit path.
+    jmp c128_entry
+    ; ---- Far-access API for the modules (FAR_* in layout.inc) ----------
+    ; Fixed-position jump table: modules run in bank 0 and reach the bank-1
+    ; buffer only through here. Must stay exactly at FAR_API, one 3-byte
+    ; JMP per entry, in this order.
+far_api:
+    jmp far_lda_ptr0
+    jmp far_sta_ptr0
+    jmp far_lda_ptr1
+    jmp far_sta_ptr1
+    jmp far_lda_ptr2
+    jmp far_sta_ptr2
+    jmp far_lda_ptr3
+    jmp far_sta_ptr3
+    jmp far_lda_txtptr
+    jmp far_sta_txtptr
+    jmp far_lda_lptr
+    jmp far_sta_lptr
+    jmp far_lda_scr4
+    jmp far_sta_scr4
+    .assert far_api = FAR_API, lderror, "far_api jump table is not at FAR_API (layout.inc)"
+    .assert * = FAR_API + FAR_API_ENTRIES * 3, error, "far_api jump table has the wrong number of entries"
+
+c128_entry:
+    ; FIRST thing on the C128: the boot sector (or a SYS) hands us BASIC's
+    ; memory map ($00 — BASIC ROM over $4000-$BFFF). Our whole image is
+    ; below $4000, so it is visible in every map; switch to bank 0 with
+    ; I/O and KERNAL ROM for the setup in c128_init, which then moves the
+    ; session to bank 1 once the common area is enlarged.
     lda #C128_CFG_SESSION
     sta C128_MMU_CR
 .endif
@@ -273,61 +298,6 @@ cold_start:
     jsr setup_screen               ; clear display, init gap buffer
     jmp editor_ready
 
-.ifdef TARGET_C128
-    ; ------------------------------------------------------------------
-    ; c128_init — one-time C128 setup, called from start after the MMU
-    ; store. Everything here is undone by the quit path.
-    ; ------------------------------------------------------------------
-c128_init:
-    ; KERNAL LOAD/SAVE/OPEN take their data and filename banks from $C6/$C7.
-    ; BASIC sets them before each of its own DOS commands; nothing in the
-    ; editor session writes them, so pointing both at bank 0 once is enough.
-    ; The module loader repeats it before LOAD anyway.
-    lda #0
-    tax
-    jsr C128_SETBNK
-    ; This is a 40-column program. If the 80-column screen is active, swap —
-    ; the KERNAL keeps both editors' state, so the user's 80-column session
-    ; is intact when we swap back.
-    bit C128_MODE
-    bpl :+
-    jsr C128_SWAPPER
-:
-    ; F1-F8 are programmable keys on the C128: the screen editor expands them
-    ; into strings ("GRAPHIC", "DLOAD", ...) before GETIN sees anything, so
-    ; the $85-$8C codes the key dispatch expects never arrive. Redefine each
-    ; as the single byte the C64 KERNAL delivers, and make SHIFT-RUN and HELP
-    ; produce nothing. We overwrite PKYLEN[0..9] and PKYDEF[0..7] — 18
-    ; contiguous bytes — and save exactly those so quit can restore them.
-    ldx #C128_PKEY_SAVE_LEN-1
-:   lda C128_PKYLEN,x
-    sta C128_PKEY_SAVE,x
-    dex
-    bpl :-
-    ldx #7
-:   lda #1
-    sta C128_PKYLEN,x
-    lda c128_fkey_codes,x
-    sta C128_PKYDEF,x
-    dex
-    bpl :-
-    lda #0
-    sta C128_PKYLEN+8              ; SHIFT-RUN/STOP
-    sta C128_PKYLEN+9              ; HELP
-    rts
-
-c128_fkey_codes:                   ; key 1..8 = F1..F8, as C64 PETSCII
-    .byte $85,$89,$86,$8A,$87,$8B,$88,$8C
-
-    ; Undo c128_init's key table change (called from the quit path).
-c128_restore_keys:
-    ldx #C128_PKEY_SAVE_LEN-1
-:   lda C128_PKEY_SAVE,x
-    sta C128_PKYLEN,x
-    dex
-    bpl :-
-    rts
-.endif
 
     ; ------------------------------------------------------------------
     ; Warm start — IDE was reloaded after running user's program.
@@ -652,6 +622,7 @@ main_loop:
     ; hardware-style reset would re-run the disk boot sequence, and once the
     ; disk carries a C128 boot sector that would relaunch the editor.
     jsr c128_restore_keys
+    jsr c128_restore_mmu
     lda #C128_BOOT_FLAG_QUIT       ; tell the boot sector not to relaunch us
     sta C128_BOOT_FLAG
     lda #C128_CFG_BASIC
@@ -3343,6 +3314,130 @@ buffer_end:
 ; Uninitialized data (BSS)
 ; ============================================================================
 
+; ============================================================================
+; C128-only code: startup, MMU/keys restore, far-access helpers (at the end
+; of the code so the entry-path branches above stay in range).
+; ============================================================================
+.ifdef TARGET_C128
+    ; ------------------------------------------------------------------
+    ; c128_init — one-time C128 setup, called from start after the MMU
+    ; store. Everything here is undone by the quit path.
+    ; ------------------------------------------------------------------
+c128_init:
+    ; Memory map for the session (layout.inc, "C128"): make the bottom 16 K
+    ; common to both banks — that is this whole image plus everything the
+    ; KERNAL and the screen use — then map bank 1, where the 32 K buffer
+    ; lives. The two preconfiguration registers hold the editor's map
+    ; (bank 1) and the modules' map (bank 0); the module call and the
+    ; far-access helpers switch between them with one store each. The
+    ; originals are saved for the quit path.
+    lda C128_MMU_RCR
+    sta C128_MMU_SAVE+0
+    and #C128_RCR_COMMON_MASK
+    ora #C128_RCR_COMMON16K
+    sta C128_MMU_RCR
+    lda C128_MMU_PCR_A
+    sta C128_MMU_SAVE+1
+    lda C128_MMU_PCR_B
+    sta C128_MMU_SAVE+2
+    lda #C128_CFG_EDITOR
+    sta C128_MMU_PCR_A
+    lda #C128_CFG_SESSION
+    sta C128_MMU_PCR_B
+    sta C128_MMU_LOAD_A            ; CR := bank-1 map; the buffer is now addressable
+    ; KERNAL LOAD/SAVE/OPEN take their data and filename banks from $C6/$C7.
+    ; BASIC sets them before each of its own DOS commands; nothing in the
+    ; editor session writes them, so pointing both at bank 0 once is enough.
+    ; The module loader repeats it before LOAD anyway.
+    lda #0
+    tax
+    jsr C128_SETBNK
+    ; This is a 40-column program. If the 80-column screen is active, swap —
+    ; the KERNAL keeps both editors' state, so the user's 80-column session
+    ; is intact when we swap back.
+    bit C128_MODE
+    bpl :+
+    jsr C128_SWAPPER
+:
+    ; F1-F8 are programmable keys on the C128: the screen editor expands them
+    ; into strings ("GRAPHIC", "DLOAD", ...) before GETIN sees anything, so
+    ; the $85-$8C codes the key dispatch expects never arrive. Redefine each
+    ; as the single byte the C64 KERNAL delivers, and make SHIFT-RUN and HELP
+    ; produce nothing. We overwrite PKYLEN[0..9] and PKYDEF[0..7] — 18
+    ; contiguous bytes — and save exactly those so quit can restore them.
+    ldx #C128_PKEY_SAVE_LEN-1
+:   lda C128_PKYLEN,x
+    sta C128_PKEY_SAVE,x
+    dex
+    bpl :-
+    ldx #7
+:   lda #1
+    sta C128_PKYLEN,x
+    lda c128_fkey_codes,x
+    sta C128_PKYDEF,x
+    dex
+    bpl :-
+    lda #0
+    sta C128_PKYLEN+8              ; SHIFT-RUN/STOP
+    sta C128_PKYLEN+9              ; HELP
+    rts
+
+c128_fkey_codes:                   ; key 1..8 = F1..F8, as C64 PETSCII
+    .byte $85,$89,$86,$8A,$87,$8B,$88,$8C
+
+    ; Undo c128_init's key table change (called from the quit path).
+c128_restore_keys:
+    ldx #C128_PKEY_SAVE_LEN-1
+:   lda C128_PKEY_SAVE,x
+    sta C128_PKYLEN,x
+    dex
+    bpl :-
+    rts
+
+    ; Undo c128_init's MMU changes: back to bank 0 with I/O, then the
+    ; original preconfiguration registers and common-RAM size.
+c128_restore_mmu:
+    sta C128_MMU_LOAD_B            ; CR := bank-0 map (I/O visible for the rest)
+    lda C128_MMU_SAVE+1
+    sta C128_MMU_PCR_A
+    lda C128_MMU_SAVE+2
+    sta C128_MMU_PCR_B
+    lda C128_MMU_SAVE+0
+    sta C128_MMU_RCR
+    rts
+
+    ; ------------------------------------------------------------------
+    ; Far-access helpers — the targets of the far_api jump table.
+    ; Called by modules running in bank 0. Switch to the bank-1 map, do
+    ; the one indirect access, switch back. `sta` to the MMU load
+    ; registers ignores the value and leaves A and the flags alone, so
+    ; the caller sees exactly what `lda (ptr),y` / `sta (ptr),y` would
+    ; have given it. This code is in common RAM, so it stays visible
+    ; across the switch; the pointers are zero page, also common.
+    ; ------------------------------------------------------------------
+.macro far_helpers ptr, ldaname, staname
+ldaname:
+    sta C128_MMU_LOAD_A
+    lda (ptr),y
+    sta C128_MMU_LOAD_B
+    rts
+staname:
+    sta C128_MMU_LOAD_A
+    sta (ptr),y
+    sta C128_MMU_LOAD_B
+    rts
+.endmacro
+    far_helpers ZP_PTR0, far_lda_ptr0, far_sta_ptr0
+    far_helpers ZP_PTR1, far_lda_ptr1, far_sta_ptr1
+    far_helpers ZP_PTR2, far_lda_ptr2, far_sta_ptr2
+    far_helpers ZP_PTR3, far_lda_ptr3, far_sta_ptr3
+    far_helpers TXT_PTR, far_lda_txtptr, far_sta_txtptr
+    far_helpers LPTR,    far_lda_lptr,   far_sta_lptr
+    far_helpers ZP_SCRATCH+4, far_lda_scr4, far_sta_scr4
+    .assert TXT_PTR = ZP_EDITOR + $11, lderror, "TXT_PTR moved; update buf_lda/buf_sta in layout.inc"
+    .assert LPTR = ZP_EDITOR + $13, lderror, "LPTR moved; update buf_lda/buf_sta in layout.inc"
+.endif
+
 .segment "BSS"
 
 ; Screen code lookup table
@@ -3410,9 +3505,15 @@ TC_DELCNT:    .res 1    ; chars removed from gap (used to restore on no-match)
 .ifdef TARGET_C128
 C128_PKEY_SAVE_LEN = 18            ; PKYLEN[0..9] + PKYDEF[0..7], contiguous
 C128_PKEY_SAVE: .res C128_PKEY_SAVE_LEN
-.endif
+C128_MMU_SAVE:  .res 3             ; RCR, PCR A, PCR B as found at startup
+; The buffer is not part of this image: it is bank 1, $4000-$BFFF
+; (layout.inc). Same symbols as the C64 build, so nothing else changes.
+work_buf     = EDITOR_BUF_BASE
+work_buf_end = EDITOR_BUF_BASE + EDITOR_BUF_SIZE
+.else
 work_buf:      .res BUF_SIZE
 work_buf_end:                      ; label sits immediately after work_buf
+.endif
 .segment "CODE"
 
 

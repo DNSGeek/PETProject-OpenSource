@@ -599,7 +599,7 @@ sfr_replace_at_match:
     cpy sfr_repl_len
     beq @done
     lda sfr_repl_buf,y
-    sta (LPTR),y
+    buf_sta LPTR
     iny
     bne @wr
 @done:
@@ -672,8 +672,8 @@ sfr_fwd_copy:
     lda sfr_mv_cnt_hi
     beq @tail
 @full:
-    lda (WORK_PTR),y
-    sta (LPTR),y
+    buf_lda WORK_PTR
+    buf_sta LPTR
     iny
     bne @full
     inc WORK_PTR+1
@@ -685,8 +685,8 @@ sfr_fwd_copy:
     ldx sfr_mv_cnt_lo
     beq @done
 @tl:
-    lda (WORK_PTR),y
-    sta (LPTR),y
+    buf_lda WORK_PTR
+    buf_sta LPTR
     iny
     dex
     bne @tl
@@ -729,8 +729,8 @@ sfr_bwd_copy:
     dec LPTR+1
 :   dec LPTR
     ldy #0
-    lda (WORK_PTR),y
-    sta (LPTR),y
+    buf_lda WORK_PTR
+    buf_sta LPTR
     lda sfr_mv_cnt_lo
     bne :+
     dec sfr_mv_cnt_hi
@@ -778,7 +778,7 @@ sfr_vbyte:
     sta LPTR+1
 @load:
     ldy #0
-    lda (LPTR),y
+    buf_lda LPTR
     rts
 
 ; =============================================================================

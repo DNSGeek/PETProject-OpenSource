@@ -397,6 +397,60 @@ Moot for the C128 build as shipped: those are the only two trampolines in the
 tree and both live in the script runner, which refuses `TARGET_C128`. Nothing
 else needs one — one config covers the session.
 
+### Bank-1 buffer
+
+The MMU selects the RAM bank for all non-common memory at once, so code and
+the data it addresses natively must share a bank, and a bank has only
+`$4000-$BFFF` (32 K) outside ROM and I/O. That is why the first C128 layout
+ended up with a 19.75 K buffer: the editor, its buffer and the modules were
+all squeezed into bank 0 under `$C000`. The bank-1 layout splits the machine
+three ways instead (`layout.inc`, "C128"):
+
+- **The editor lives in common RAM.** `c128_init` sets the MMU's RAM
+  configuration register to a 16 K bottom common area, so `$0000-$3FFF` is
+  the same physical memory in every bank: the screen, everything the KERNAL
+  touches, and the editor's own code and variables. The editor therefore
+  loads at `$1300` (2.3 K lower than BASIC's `$1C01`, which is what makes it
+  fit) and must end below `$4000` — `petproject_c128.cfg` makes that a link
+  error. Today it ends at `$3885`.
+- **The buffer is bank 1, `$4000-$BFFF`: 32 K.** The editor runs with bank 1
+  mapped (`C128_CFG_EDITOR`, `$4E`) and addresses the buffer natively, as on
+  the C64; `work_buf`/`work_buf_end` are constants on this target instead of
+  a `.res`. Load and save stream through `CHRIN`/`CHROUT`, which do not care
+  which bank the bytes land in.
+- **The modules stay in bank 0** at `$9000`/`$A000` and run with bank 0 mapped
+  (`C128_CFG_SESSION`, `$0E`); the module call switches banks each way. They
+  cannot see the buffer, so every buffer access in a module goes through a
+  far-access table the editor keeps in common RAM right after its entry point
+  (`FAR_*` in `layout.inc`, `far_api` in `editor.asm`): one `JSR` per byte
+  that flips to the bank-1 map, does the one `lda`/`sta (ptr),y`, and flips
+  back. The flips are single stores to the MMU's preconfiguration-load
+  registers (`$FF01`/`$FF02`), which ignore the value written and leave A and
+  the flags alone — so a helper behaves exactly like the instruction it
+  replaces, at about 25 cycles instead of 5. In the sources the sites read
+  `buf_lda ptr` / `buf_sta ptr`, macros that are the plain instruction on the
+  C64 and the call on the C128.
+
+Which sites are buffer accesses was decided per site, not per pointer: a
+module's own tables and RAM (modasm's symbol table, modren's mapping table,
+modtok's keyword table, modasm's include-file line buffer, all of moddsk)
+stay native, since they are in bank 0 with the module. The one pointer that
+does both — modasm's `SRC_PTR`, buffer for the main source and module RAM for
+include frames — is far only on the buffer path.
+
+Cost: modules that walk the whole buffer byte by byte (tokenize, detokenize,
+renumber, search/replace) run their inner loops several times slower on the
+C128 than on the C64 — on the order of a second per 32 K of text. The
+editor's own rendering and editing are unaffected.
+
+Verified in VICE 3.10 (true-drive 1571): at the idle loop the MMU reads
+`$4E`, the preconfiguration registers `$4E`/`$0E`, the RAM configuration
+register `$07`, and the gap runs `$4065-$C000` with the demo text at bank-1
+`$4000`; Renumber and Disk Utility produce the same screens as before; saving
+the demo as BASIC writes a correctly tokenized PRG (modtok, far access) and
+loading it back detokenizes it (moddet), with the C64 build producing the
+pixel-identical screen for the same key sequence; F7 quits to `READY.`
+
 ### Boot sector
 
 `boot128.asm`, linked by `boot128.cfg` into a raw 256-byte image that
@@ -587,9 +641,10 @@ as before and the diff stays small. Converted: `editor.asm` (the `KW_TOKEN`
 alias), `modasm`, `moddet`, `moddis`, `modren`, `moddsk`, `modscrh`,
 `modsct`, `modtok`. `modscr` defined a scratch symbol it never used, now
 removed. `modsfr` uses no pool scratch, but does borrow editor ZP — see
-Tier 1 above. `modscr` and `modscrh` refuse to assemble under
-`TARGET_C128` (`.error`), since the C128 map's premise that BASIC is never
-called does not hold for them.
+Tier 1 above. `modscr`, `modscrh` and `modsct` refuse to assemble under
+`TARGET_C128` (`.error`): the first two because the C128 map's premise that
+BASIC is never called does not hold for them, `modsct` because it exists only
+to feed them.
 
 BASIC/KERNAL ABI addresses (`TXTTAB`, `VARTAB`, `MEMSIZ`, `VARPNT`, `TXTPTR`,
 AYINT's `$14`/`$15`, `JIFFY_LO`, `FA`) were deliberately **left as literals**.
@@ -647,9 +702,12 @@ without relaunching.
    advice.
 3. **2 MHz bursts** around the assembler's passes, screen blanked, disk I/O
    excluded.
-4. **Bigger buffer** via bank 1. Real, but the most invasive: the gap buffer
-   needs a windowing scheme rather than per-byte far access through
-   `INDFET`/`INDSTA` (`$FF74`/`$FF77`), which are correct but slow.
+4. **Bigger buffer** via bank 1 — ✅ **done**, 32 K (up from 19.75 K on the
+   first C128 layout and 24 K on the C64). See
+   [Bank-1 buffer](#bank-1-buffer). The windowing scheme once feared turned
+   out to be unnecessary: with the editor in common RAM it addresses bank 1
+   natively, and only the modules pay for far access, through a table of
+   helpers far cheaper than `INDFET`/`INDSTA`.
 
 BASIC 7.0 token support — extending `modtok`, `moddet`, `colorize` and
 `modren` to the two-byte `$CE xx` / `$FE xx` tokens, including which new

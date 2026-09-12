@@ -44,7 +44,7 @@ jobs:
           done
           # The default build also carries the C128 set and its boot sector.
           test -s build/c128/editor.prg
-          for m in modasm moddet moddis moddsk modren modtok modsfr modsct; do
+          for m in modasm moddet moddis moddsk modren modtok modsfr; do
             test -s "build/c128/${m}.prg"
           done
           test -s build/c128/boot128.bin
@@ -81,7 +81,7 @@ jobs:
         run: |
           set -e
           test -s build/c128/editor.prg
-          for m in modasm moddet moddis moddsk modren modtok modsfr modsct; do
+          for m in modasm moddet moddis moddsk modren modtok modsfr; do
             test -s "build/c128/${m}.prg"
           done
           test -s build/c128/boot128.bin
@@ -90,7 +90,7 @@ jobs:
 
       - name: Confirm the script runner refuses the C128 map
         run: |
-          for m in modscr modscrh; do
+          for m in modsct modscr modscrh; do
             if ca65 -t none -D TARGET_C128 -o "build/c128/${m}.o" "${m}.asm" 2>/dev/null; then
               echo "${m}.asm assembled under TARGET_C128 but is documented as excluded from the C128 port"
               exit 1

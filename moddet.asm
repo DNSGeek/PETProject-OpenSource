@@ -153,8 +153,8 @@ detokenize:
     dec COPY_DST+1
 :   dec COPY_DST
     ldy #0
-    lda (COPY_SRC),y
-    sta (COPY_DST),y
+    buf_lda COPY_SRC
+    buf_sta COPY_DST
     lda LINENO
     bne :+
     dec LINENO+1
@@ -174,13 +174,13 @@ detokenize:
     ;             header_hi = MOD_BUF_HI AND header_lo < MOD_BUF_LO → header
     ;             otherwise → raw BASIC, no skip needed.
     ldy #1
-    lda (SRC_PTR),y             ; buf[1] = candidate header hi byte
+    buf_lda SRC_PTR             ; buf[1] = candidate header hi byte
     cmp MOD_BUF_HI
     bcc @skip_header            ; header_hi < MOD_BUF_HI -> definitely a header
     bne @no_header              ; header_hi > MOD_BUF_HI -> not a header
     ; header_hi == MOD_BUF_HI: check lo byte
     ldy #0
-    lda (SRC_PTR),y             ; buf[0] = candidate header lo byte
+    buf_lda SRC_PTR             ; buf[0] = candidate header lo byte
     cmp MOD_BUF_LO
     bcs @no_header              ; header_lo >= MOD_BUF_LO -> raw BASIC
 @skip_header:
@@ -210,10 +210,10 @@ detokenize:
 
     ; Check for end-of-program sentinel ($0000 link word)
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     bne @has_line
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     beq @all_done           ; both bytes zero = sentinel
 
 @has_line:
@@ -223,10 +223,10 @@ detokenize:
 
     ; Read line number
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta LINENO
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta LINENO+1
 
     ; Skip past line number bytes
@@ -250,7 +250,7 @@ detokenize:
 
 @token_loop:
     ldy #0
-    lda (SRC_PTR),y             ; read next byte
+    buf_lda SRC_PTR             ; read next byte
     beq @end_line               ; $00 = end of this line
     jsr inc_src_ptr             ; advance past the byte we just read
 
@@ -646,7 +646,7 @@ emit_byte:
     bcs @overflow
 @ok:
     ldy #0
-    sta (DST_PTR),y
+    buf_sta DST_PTR
     inc DST_PTR
     bne :+
     inc DST_PTR+1

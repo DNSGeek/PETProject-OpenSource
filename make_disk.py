@@ -348,7 +348,7 @@ C128_EDITOR_NAME = "PETPROJECT128"
 MODULES_C128 = [
     (fname, diskname + "128")
     for fname, diskname in MODULES
-    if fname not in ("modscr.prg", "modscrh.prg")
+    if fname not in ("modsct.prg", "modscr.prg", "modscrh.prg")
 ]
 
 

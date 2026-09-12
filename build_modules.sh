@@ -70,11 +70,11 @@ build_module moddsk || exit 1
 build_module moddis || exit 1
 build_module modren || exit 1
 build_module modsfr || exit 1
-build_module modsct || exit 1
 if [[ "${TARGET}" == c64 ]]; then
+  build_module modsct || exit 1
   build_module modscr || exit 1
   build_module modscrh || exit 1
 else
-  echo "Skipping modscr/modscrh: the script runner is not part of the ${TARGET} port."
+  echo "Skipping modsct/modscr/modscrh: the script runner is not part of the ${TARGET} port."
 fi
 rm -f "${BUILD}"/*.o

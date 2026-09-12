@@ -110,6 +110,9 @@ META_VERSION    = 5   ; $01
 META_SIZE       = 6
 
 ; ---- ZP — same layout as modtok (no conflict between phases) ----
+.ifdef TARGET_C128
+    .error "modsct: the script tokenizer exists only for the script runner, which is not part of the C128 port"
+.endif
 ; Addresses come from zp.inc (see docs/c128-port-notes.md).
 .include "zp.inc"
 

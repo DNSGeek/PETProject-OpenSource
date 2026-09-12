@@ -397,6 +397,28 @@ Moot for the C128 build as shipped: those are the only two trampolines in the
 tree and both live in the script runner, which refuses `TARGET_C128`. Nothing
 else needs one — one config covers the session.
 
+### Boot sector
+
+`boot128.asm`, linked by `boot128.cfg` into a raw 256-byte image that
+`make_disk.py --boot-sector` writes to track 1 sector 0. The KERNAL's boot
+routine (BOOT_CALL, `$FF53`, called at the end of BASIC's cold start;
+disassembled from the 318020-05 image at `$F890`) reads the sector to `$0B00`,
+checks `CBM`, prints `BOOTING` plus the message string, optionally loads a
+named file, and then enters the code after the filename through `JSRFAR` in
+bank 15 — KERNAL and BASIC ROM in, so the jump table works and an `RTS`
+returns to `READY.`
+
+Our sector leaves the filename empty and loads `PETPROJECT128` itself (with
+`SETBNK 0,0` and secondary address 1, so the file's own `$1C01` header is
+honoured), then jumps to the editor's entry, which sets the session MMU config
+first thing. Loading ourselves matters for the other half of the design: since
+BASIC's cold start runs the boot sector, the editor's quit path — which ends in
+BASIC's cold start — would relaunch the editor. So quit leaves `$51` at `$1BFF`
+(`C128_BOOT_FLAG`, in the `$1300-$1BFF` application area nothing else
+touches), and the sector checks it _before_ loading: if set, clear it and
+`RTS` to `READY.`; otherwise boot. The flag is one-shot, so a reset after
+quitting boots normally, and a power cycle randomises it.
+
 ### `SETBNK`
 
 C128 KERNAL LOAD/SAVE/OPEN take their data and filename banks from `$C6`/`$C7`,
@@ -553,9 +575,11 @@ Mechanically:
 | `zp_c64.inc`          | the historical C64 map — `$3A`, `$F7`, `$FF`                                   |
 | `zp_c128.inc`         | the C128 map — `$1C`, `$22`, `$2A`, with the derivation and the residual check |
 | `layout.inc`          | per-target load addresses, buffer size and module regions                      |
+| `c128.inc`            | MMU, KERNAL entries and variables, boot-flag handshake (C128 only)             |
 | `petproject_c128.cfg` | editor at `$1C01`, MAIN capped at `$9000`                                      |
 | `module_c128.cfg`     | low modules at `$9000` (was `$C000`)                                           |
 | `modsfr_c128.cfg`     | search/replace at `$9000` (was `$C000`)                                        |
+| `boot128.asm/.cfg`    | the C128 boot sector (track 1 sector 0 of `petproject.d64`)                    |
 
 Each module now aliases its own local names onto pool slots
 (`SRC_PTR = ZP_PTR2`, `TMP = ZP_SCRATCH+0`, …), so module code reads exactly
@@ -601,12 +625,18 @@ work (script runner only). Verified in VICE 3.10: the C128 build boots from
 `petproject_c128.d64`, shows the editor, opens the module menu on F8, and F7
 returns to the BASIC 7.0 banner. Not yet run on hardware.
 
-**Phase 3 — build and packaging.** Partly done: `TARGET=c128` selects the
-`-D TARGET_C128` assemble, the `*_c128.cfg` set and `build/c128/` in both
-build scripts, and CI builds it on every change. Still to do: the C128
-autoboot sector in `make_disk.py`. One disk can carry both builds — the C64
-BASIC stub and the C128 boot sector select between them, so no runtime
-machine detection is needed.
+**Phase 3 — build and packaging.** ✅ **Done.** `make_petproject.sh` builds
+both sets by default (`TARGET=all`) and writes one `petproject.d64` carrying
+both: the C64 files first, so `LOAD"*",8` on a C64 still gets `PETPROJECT`,
+then the C128 set as `PETPROJECT128`, `MODASM128`, … (the suffix is added by
+`modules.asm` under `TARGET_C128`, so the C128 editor asks for the right
+files). Track 1 sector 0 holds the boot sector from `boot128.asm`, so a C128
+autoboots straight into the editor; no runtime machine detection anywhere.
+`TARGET=c64` / `TARGET=c128` build one set alone. See
+[Boot sector](#boot-sector) for how the sector works and why it has to
+cooperate with the quit path. Verified in VICE with a true-drive 1571: reset
+boots into the editor, both machines list both sets, F7 returns to `READY.`
+without relaunching.
 
 **Phase 4 — the payoff.** In value-per-effort order:
 

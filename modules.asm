@@ -109,6 +109,20 @@ MOD_IDX_MODASM   = 0
 
 ; 6-byte PETSCII filenames (exact, no padding needed for SETNAM).
 ; MODSCRH is the only 7-byte name; mod_fname_lens carries the per-entry length.
+; On the C128 every name carries a "128" suffix (MODASM128, ...): the C128
+; modules load at different addresses, and one disk carries both sets (see
+; make_disk.py and docs/c128-port-notes.md, Phase 3).
+.ifdef TARGET_C128
+MOD_SUFFIX_LEN = 3
+.else
+MOD_SUFFIX_LEN = 0
+.endif
+.macro mod_name bytes
+    .byte bytes
+.ifdef TARGET_C128
+    .byte $31,$32,$38               ; "128"
+.endif
+.endmacro
 ;
 ; Index   Name      Visibility / invoker
 ;   0     MODASM    visible (F8 popup row 0) — assemble
@@ -124,18 +138,18 @@ MOD_IDX_MODASM   = 0
 ;
 ; F8 popup row 4 is "RUN SCRIPT" which routes to do_run_script, not a single
 ; module load — so it doesn't appear in this table.
-mod_fname_lens: .byte 6, 6, 6, 6, 6, 6, 6, 6, 7, 6
+mod_fname_lens: .byte 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 7+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN
 
-mod_fname_0: .byte $4D,$4F,$44,$41,$53,$4D  ; MODASM
-mod_fname_1: .byte $4D,$4F,$44,$44,$49,$53  ; MODDIS
-mod_fname_2: .byte $4D,$4F,$44,$52,$45,$4E  ; MODREN
-mod_fname_3: .byte $4D,$4F,$44,$44,$53,$4B  ; MODDSK
-mod_fname_4: .byte $4D,$4F,$44,$44,$45,$54  ; MODDET
-mod_fname_5: .byte $4D,$4F,$44,$54,$4F,$4B  ; MODTOK
-mod_fname_6: .byte $4D,$4F,$44,$53,$46,$52  ; MODSFR
-mod_fname_7: .byte $4D,$4F,$44,$53,$43,$54  ; MODSCT
-mod_fname_8: .byte $4D,$4F,$44,$53,$43,$52,$48  ; MODSCRH (7 chars)
-mod_fname_9: .byte $4D,$4F,$44,$53,$43,$52  ; MODSCR
+mod_fname_0: mod_name {$4D,$4F,$44,$41,$53,$4D}  ; MODASM
+mod_fname_1: mod_name {$4D,$4F,$44,$44,$49,$53}  ; MODDIS
+mod_fname_2: mod_name {$4D,$4F,$44,$52,$45,$4E}  ; MODREN
+mod_fname_3: mod_name {$4D,$4F,$44,$44,$53,$4B}  ; MODDSK
+mod_fname_4: mod_name {$4D,$4F,$44,$44,$45,$54}  ; MODDET
+mod_fname_5: mod_name {$4D,$4F,$44,$54,$4F,$4B}  ; MODTOK
+mod_fname_6: mod_name {$4D,$4F,$44,$53,$46,$52}  ; MODSFR
+mod_fname_7: mod_name {$4D,$4F,$44,$53,$43,$54}  ; MODSCT
+mod_fname_8: mod_name {$4D,$4F,$44,$53,$43,$52,$48}  ; MODSCRH (7 chars)
+mod_fname_9: mod_name {$4D,$4F,$44,$53,$43,$52}  ; MODSCR
 
 mod_fname_lo: .byte <mod_fname_0, <mod_fname_1, <mod_fname_2, <mod_fname_3, <mod_fname_4, <mod_fname_5, <mod_fname_6, <mod_fname_7, <mod_fname_8, <mod_fname_9
 mod_fname_hi: .byte >mod_fname_0, >mod_fname_1, >mod_fname_2, >mod_fname_3, >mod_fname_4, >mod_fname_5, >mod_fname_6, >mod_fname_7, >mod_fname_8, >mod_fname_9
@@ -660,12 +674,12 @@ run_module_by_index:
     jsr SETNAM
 
     ; ---- LOAD: A=0 → load (not verify); SA=1 from SETLFS uses PRG header ----
-    lda #0
 .ifdef TARGET_C128
     lda #0                          ; data bank 0
     tax                             ; filename bank 0
     jsr C128_SETBNK
 .endif
+    lda #0
     jsr LOAD
     bcc :+
     jmp run_sel_load_err        ; bcs branch was out of range (>127 bytes)

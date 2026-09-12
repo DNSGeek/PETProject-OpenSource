@@ -42,7 +42,14 @@ jobs:
           for m in modasm moddet moddis moddsk modren modtok modsfr modsct modscr modscrh; do
             test -s "build/${m}.prg"
           done
-          echo "All PRGs and the disk image are present."
+          # The default build also carries the C128 set and its boot sector.
+          test -s build/c128/editor.prg
+          for m in modasm moddet moddis moddsk modren modtok modsfr modsct; do
+            test -s "build/c128/${m}.prg"
+          done
+          test -s build/c128/boot128.bin
+          head -c 3 build/c128/boot128.bin | grep -q CBM
+          echo "All PRGs (C64 + C128), the boot sector and the disk image are present."
 
       - name: Upload disk image artifact
         uses: actions/upload-artifact@v4
@@ -77,8 +84,9 @@ jobs:
           for m in modasm moddet moddis moddsk modren modtok modsfr modsct; do
             test -s "build/c128/${m}.prg"
           done
+          test -s build/c128/boot128.bin
           test -s build/c128/petproject_c128.d64
-          echo "All C128 PRGs and the disk image are present."
+          echo "All C128 PRGs, the boot sector and the disk image are present."
 
       - name: Confirm the script runner refuses the C128 map
         run: |

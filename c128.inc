@@ -47,3 +47,17 @@ C128_PKYDEF         = $100A
 ; BASIC 7.0
 ; ---------------------------------------------------------------------------
 C128_BASIC_COLD     = $4000 ; JMP cold start; needs C128_CFG_BASIC in the MMU
+
+; ---------------------------------------------------------------------------
+; Boot-sector handshake (boot128.asm)
+; ---------------------------------------------------------------------------
+; BASIC's cold start ends by calling the KERNAL boot routine, which runs the
+; disk's boot sector — so quitting the editor via BASIC_COLD on an autoboot
+; disk would relaunch it. The quit path leaves this marker; the boot sector
+; sees it, clears it and returns to BASIC instead of loading the editor.
+; $1BFF is in the $1300-$1BFF application area: untouched by BASIC's init,
+; by the boot loader ($0B00 sector buffer) and by the editor's own load
+; ($1C01 up). A power cycle randomises it, a reset does not — which is why
+; the boot sector clears it, so the next reset boots normally.
+C128_BOOT_FLAG      = $1BFF
+C128_BOOT_FLAG_QUIT = $51   ; 'Q'

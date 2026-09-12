@@ -652,6 +652,8 @@ main_loop:
     ; hardware-style reset would re-run the disk boot sequence, and once the
     ; disk carries a C128 boot sector that would relaunch the editor.
     jsr c128_restore_keys
+    lda #C128_BOOT_FLAG_QUIT       ; tell the boot sector not to relaunch us
+    sta C128_BOOT_FLAG
     lda #C128_CFG_BASIC
     sta C128_MMU_CR
     jmp C128_BASIC_COLD

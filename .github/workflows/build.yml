@@ -77,7 +77,8 @@ jobs:
           for m in modasm moddet moddis moddsk modren modtok modsfr modsct; do
             test -s "build/c128/${m}.prg"
           done
-          echo "All C128 PRGs are present."
+          test -s build/c128/petproject_c128.d64
+          echo "All C128 PRGs and the disk image are present."
 
       - name: Confirm the script runner refuses the C128 map
         run: |

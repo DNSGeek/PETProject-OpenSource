@@ -189,6 +189,9 @@ DSK_CACHE:       .res 680   ; directory cache: 34 entries × 20 bytes
 ; Zero page pointers (saved/restored)
 ; Addresses come from zp.inc (see docs/c128-port-notes.md).
 .include "zp.inc"
+.ifdef TARGET_C128
+.include "c128.inc"     ; MMU session config
+.endif
 
 DSK_PTR         = ZP_PTR2   ; lo (hi = +1)
 DSK_PTR2        = ZP_PTR3   ; lo (hi = +1)
@@ -214,14 +217,20 @@ DSK_PTR2        = ZP_PTR3   ; lo (hi = +1)
 ; ============================================================================
 
 disk_main:
-    ; Ensure normal C64 memory map: BASIC+Kernal+I/O all mapped in.
-    ; The editor may have left $01 in any state; Kernal calls will crash
+    ; Ensure a memory map with Kernal+I/O mapped in.
+    ; C64: the editor may have left $01 in any state; Kernal calls will crash
     ; if it isn't $37. Set direction register first (bits 0-2 must be outputs).
+    ; C128: (re)assert the session config — RAM to $BFFF, I/O, KERNAL ROM.
+.ifdef TARGET_C128
+    lda #C128_CFG_SESSION
+    sta C128_MMU_CR
+.else
     lda $00
     ora #$07
     sta $00
     lda #$37
     sta $01
+.endif
 
     ; Save ZP
     zp_save_ptrs DSK_ZP_SAVE

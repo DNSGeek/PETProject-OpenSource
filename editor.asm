@@ -30,7 +30,11 @@ FA           = $BA                 ; current device number (kernal ZP)
 ; ============================================================================
 
 JIFFY_LO     = $A2                 ; jiffy counter low byte (updated by IRQ)
+.ifdef TARGET_C128
+RPTFLG       = C128_KEYRPT         ; KERNAL key-repeat control: $80 = all keys ($0A22, c128.inc)
+.else
 RPTFLG       = $028A               ; KERNAL key-repeat control: $80 = all keys
+.endif
                                    ; repeat, $40 = none, $00 = cursor/space/del
                                    ; only (the power-on default)
 RPTFLG_ALL   = $80                 ; value that makes every key auto-repeat
@@ -128,6 +132,9 @@ BUF_SIZE     = EDITOR_BUF_SIZE    ; working buffer (24 K on C64, 19.75 K on C128
 ; segment, so nothing they define can land in the .zeropage block below.
 .include "zp.inc"
 .include "layout.inc"
+.ifdef TARGET_C128
+.include "c128.inc"                ; MMU, SETBNK, programmable keys, BASIC entry
+.endif
 
 .zeropage
 
@@ -216,10 +223,21 @@ start:
     ; Verify the BASIC stub above is exactly 12 bytes so SYS 2061 lands here.
     ; If this assertion fires, the stub changed size — update "2061" to match.
     .assert * = EDITOR_LOAD + 12, error, "BASIC SYS address mismatch: start: must be at EDITOR_LOAD+12 (the SYS target in the BASIC stub)"
+.ifdef TARGET_C128
+    ; FIRST thing on the C128: BASIC's SYS hands us its own memory map
+    ; ($00 — BASIC ROM over $4000-$BFFF), under which everything from the
+    ; end of our code to $8F1E is invisible. Switch to the session map: RAM
+    ; to $BFFF, I/O, KERNAL ROM. Stays this way until the quit path.
+    lda #C128_CFG_SESSION
+    sta C128_MMU_CR
+.endif
     ; The editor never returns to BASIC's SYS handler.  Reset the stack now
     ; to discard BASIC's call frames so OPEN/CHKIN frames have room to run.
     ldx #$FF
     txs
+.ifdef TARGET_C128
+    jsr c128_init                  ; SETBNK, 40 columns, C64-style F-keys
+.endif
     jsr build_screen_lookup
 
     ; Enable auto-repeat on ALL keys. The KERNAL default ($00) repeats only the
@@ -254,6 +272,62 @@ cold_start:
     jsr init_settings              ; write defaults into SETTING_* bytes
     jsr setup_screen               ; clear display, init gap buffer
     jmp editor_ready
+
+.ifdef TARGET_C128
+    ; ------------------------------------------------------------------
+    ; c128_init — one-time C128 setup, called from start after the MMU
+    ; store. Everything here is undone by the quit path.
+    ; ------------------------------------------------------------------
+c128_init:
+    ; KERNAL LOAD/SAVE/OPEN take their data and filename banks from $C6/$C7.
+    ; BASIC sets them before each of its own DOS commands; nothing in the
+    ; editor session writes them, so pointing both at bank 0 once is enough.
+    ; The module loader repeats it before LOAD anyway.
+    lda #0
+    tax
+    jsr C128_SETBNK
+    ; This is a 40-column program. If the 80-column screen is active, swap —
+    ; the KERNAL keeps both editors' state, so the user's 80-column session
+    ; is intact when we swap back.
+    bit C128_MODE
+    bpl :+
+    jsr C128_SWAPPER
+:
+    ; F1-F8 are programmable keys on the C128: the screen editor expands them
+    ; into strings ("GRAPHIC", "DLOAD", ...) before GETIN sees anything, so
+    ; the $85-$8C codes the key dispatch expects never arrive. Redefine each
+    ; as the single byte the C64 KERNAL delivers, and make SHIFT-RUN and HELP
+    ; produce nothing. We overwrite PKYLEN[0..9] and PKYDEF[0..7] — 18
+    ; contiguous bytes — and save exactly those so quit can restore them.
+    ldx #C128_PKEY_SAVE_LEN-1
+:   lda C128_PKYLEN,x
+    sta C128_PKEY_SAVE,x
+    dex
+    bpl :-
+    ldx #7
+:   lda #1
+    sta C128_PKYLEN,x
+    lda c128_fkey_codes,x
+    sta C128_PKYDEF,x
+    dex
+    bpl :-
+    lda #0
+    sta C128_PKYLEN+8              ; SHIFT-RUN/STOP
+    sta C128_PKYLEN+9              ; HELP
+    rts
+
+c128_fkey_codes:                   ; key 1..8 = F1..F8, as C64 PETSCII
+    .byte $85,$89,$86,$8A,$87,$8B,$88,$8C
+
+    ; Undo c128_init's key table change (called from the quit path).
+c128_restore_keys:
+    ldx #C128_PKEY_SAVE_LEN-1
+:   lda C128_PKEY_SAVE,x
+    sta C128_PKYLEN,x
+    dex
+    bpl :-
+    rts
+.endif
 
     ; ------------------------------------------------------------------
     ; Warm start — IDE was reloaded after running user's program.
@@ -558,7 +632,7 @@ main_loop:
     ; Clear screen before handing back to BASIC.
     lda #$93                        ; PETSCII clear-screen character
     jsr $FFD2                       ; CHROUT
-    ; Hand back to BASIC via its COLD-start entry ($E394), NOT warm start.
+    ; Hand back to BASIC via its COLD-start entry, NOT warm start.
     ;
     ; At boot we did `ldx #$FF / txs`, discarding BASIC's call stack, and the
     ; editor has overwritten zero page (gap pointers, module scratch, etc.) and page 2
@@ -571,7 +645,19 @@ main_loop:
     ; Trade-off: this resets BASIC fully (banner shown, any BASIC program in
     ; memory is cleared). That is the correct, safe contract for a SYS-launched
     ; tool that took over the machine.
+.ifdef TARGET_C128
+    ; Same contract on the C128: put the F-key table back, bank BASIC ROM in
+    ; (our code here is below $4000, RAM in every map, so the switch is safe
+    ; mid-routine) and take BASIC 7.0's cold start. Not the reset vector: a
+    ; hardware-style reset would re-run the disk boot sequence, and once the
+    ; disk carries a C128 boot sector that would relaunch the editor.
+    jsr c128_restore_keys
+    lda #C128_CFG_BASIC
+    sta C128_MMU_CR
+    jmp C128_BASIC_COLD
+.else
     jmp $E394                       ; BASIC cold start (per ($A000) in this ROM)
+.endif
 
 ; ============================================================================
 ; move_begin — preamble shared by all cursor-movement keys.
@@ -3319,6 +3405,10 @@ COMPL_TOK:    .res 1    ; BASIC token of the last completion ($80..$D8)
 TC_DELCNT:    .res 1    ; chars removed from gap (used to restore on no-match)
 
 ; ---- Editor buffer ----
+.ifdef TARGET_C128
+C128_PKEY_SAVE_LEN = 18            ; PKYLEN[0..9] + PKYDEF[0..7], contiguous
+C128_PKEY_SAVE: .res C128_PKEY_SAVE_LEN
+.endif
 work_buf:      .res BUF_SIZE
 work_buf_end:                      ; label sits immediately after work_buf
 .segment "CODE"

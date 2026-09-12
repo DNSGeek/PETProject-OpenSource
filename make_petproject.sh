@@ -19,8 +19,8 @@ LD65=${LD65:-ld65}
 # share zp.inc and layout.inc, so they must agree): c64 (default) or c128.
 #   TARGET=c128 bash make_petproject.sh
 # builds into build/c128 with petproject_c128.cfg and the *_c128.cfg module
-# configs, and stops before the disk image (the C128 boot sector is not
-# written yet — see docs/c128-port-notes.md, Phase 3).
+# configs, and writes build/c128/petproject_c128.d64 (a plain disk: no
+# C128 boot sector yet — see docs/c128-port-notes.md, Phase 3).
 TARGET=${TARGET:-c64}
 # Extra ca65 flags on top of what TARGET implies. Exported as-is so that
 # build_modules.sh adds the target define itself, exactly once.
@@ -74,9 +74,16 @@ bash "${SRC}/build_modules.sh" || exit 1
 
 # ── Create disk image ─────────────────────────────────────────────────────────
 if [[ "${TARGET}" != c64 ]]; then
+  # Plain disk, no C128 boot sector yet: LOAD"PETPROJECT",8 then RUN from
+  # BASIC 7.0 (or let VICE autostart it). See docs/c128-port-notes.md, Phase 3.
+  python3 "${SRC}/make_disk.py" \
+    --build-dir "${BUILD}" \
+    --name petproject \
+    --id pp \
+    "${BUILD}/petproject_${TARGET}.d64" || exit 1
   rm -f "${BUILD}"/*.o
   echo ""
-  echo "Build complete (${TARGET}): PRGs in ${BUILD}. No disk image for this target yet."
+  echo "Build complete (${TARGET}): ${BUILD}/petproject_${TARGET}.d64"
   exit 0
 fi
 python3 "${SRC}/make_disk.py" \

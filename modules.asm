@@ -661,6 +661,11 @@ run_module_by_index:
 
     ; ---- LOAD: A=0 → load (not verify); SA=1 from SETLFS uses PRG header ----
     lda #0
+.ifdef TARGET_C128
+    lda #0                          ; data bank 0
+    tax                             ; filename bank 0
+    jsr C128_SETBNK
+.endif
     jsr LOAD
     bcc :+
     jmp run_sel_load_err        ; bcs branch was out of range (>127 bytes)
@@ -718,6 +723,10 @@ run_sel_loaded:
     ; ---- Bank-switch for execution only ----
     ; $A000 modules need BASIC ROM out so their code is visible.
     ; Reads from $A000-$BFFF go to RAM when $01 = $36 (BASIC out, kernal in).
+    ; On the C128 there is nothing to switch: the session map set at start
+    ; (C128_CFG_SESSION) already has RAM at $A000-$BFFF, and $01 is the
+    ; 8502's tape/caps-lock port, not a banking register.
+.ifndef TARGET_C128
     lda LPTR+1
     cmp #$A0
     bne @no_page_out
@@ -727,7 +736,9 @@ run_sel_loaded:
     lda #$36                ; BASIC RAM, Kernal ROM, I/O
     sta $01
 @no_page_out:
+.endif
     jsr mod_call_trampoline
+.ifndef TARGET_C128
     ; Decide the bank restore from OUR stash ($0229), not LPTR: LPTR is
     ; editor zero page that the module just had full control over, and a
     ; clobbered $16 here would silently skip the restore and leave BASIC
@@ -738,6 +749,7 @@ run_sel_loaded:
     lda #$37                ; normal: BASIC ROM, Kernal ROM, I/O
     sta $01
 @no_page_in:
+.endif
     ; Handle return status
     lda MOD_STATUS
     cmp #$02

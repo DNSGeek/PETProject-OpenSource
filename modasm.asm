@@ -90,6 +90,9 @@ DEFAULT_COLOR = 14          ; light blue
 ; Addresses come from zp.inc (see docs/c128-port-notes.md).
 .include "zp.inc"
 .include "layout.inc"   ; MOD_LO_BASE / MOD_LO_SIZE for the ASM_STATE block
+.ifdef TARGET_C128
+.include "c128.inc"     ; MMU session config
+.endif
 
 SRC_PTR  = ZP_PTR2       ; lo (hi=+1)  -  source walker, gap-aware
 TMP      = ZP_SCRATCH+0  ; general scratch (hi=+1)
@@ -279,17 +282,23 @@ assemble:
     ; bytes with IRQs enabled.
     sei
 
-    ; Ensure $01=$36 (BASIC ROM out, Kernal+I/O in, RAM at $A000-$BFFF visible).
+    ; Ensure the memory map we need: Kernal+I/O in, RAM at $A000-$BFFF visible
+    ; (C64: $01=$36, BASIC ROM out; C128: the session config in the MMU).
     ; Do this FIRST before touching any state  -  if caller failed to set banking,
     ; our code here would be unreadable (BASIC ROM at $A000). But since we're
     ; already executing (caller's JMP got us here), banking must be at least
     ; partially working. Belt-and-suspenders: force it explicitly.
+.ifdef TARGET_C128
+    lda #C128_CFG_SESSION
+    sta C128_MMU_CR
+.else
     ; Must set $00 first to make bits 0-2 outputs, then write $01.
     lda $00
     ora #$07
     sta $00
     lda #$36
     sta $01
+.endif
 
     ; Save ZP
     zp_save ZP_SAVE

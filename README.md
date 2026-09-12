@@ -126,6 +126,17 @@ To build only the modules:
 bash build_modules.sh
 ```
 
+To build for the Commodore 128 (native mode, 40 columns):
+
+```bash
+TARGET=c128 bash make_petproject.sh
+```
+
+This writes `build/c128/petproject_c128.d64`. It has no C128 boot sector yet,
+so `LOAD"PETPROJECT",8` then `RUN` from BASIC 7.0 (or let VICE's `x128`
+autostart it). The script runner is not part of the C128 build; everything
+else is. See `docs/c128-port-notes.md` for the memory map and status.
+
 To (re)create the disk image manually:
 
 ```bash

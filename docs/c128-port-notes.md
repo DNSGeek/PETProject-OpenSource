@@ -274,8 +274,12 @@ Sites:
 | `modules.asm:724`  | `#$36`  | module execution banking           |
 | `modules.asm:735`  | `#$37`  | restore                            |
 
-Use the MMU's `$FF01–$FF04` preconfiguration registers so each switch stays a
-single store, preserving the shape of the existing code.
+Done: each site is now `.ifdef TARGET_C128` — a single `sta $FF00` of the
+session config where the module wants to assert its map (modasm, moddsk),
+and nothing at all in the loader, whose `$36`/`$37` dance exists only to
+expose RAM at `$A000` that the session config already exposes. The
+preconfiguration registers turned out to be unnecessary: `$FF00` is visible
+from every bank, so one immediate store is already a single instruction.
 
 ### MMU configuration register
 
@@ -299,8 +303,9 @@ dance around the big modules does not get translated, it **disappears** —
 along with the "do not restore `$01` while executing here" hazard at
 `modasm.asm:449`.
 
-_(CR bit assignments and the `$0E` value want confirming against the C128
-Programmer's Reference — see [Open items](#open-items).)_
+_Confirmed in VICE: the editor sets `$0E` as its first instruction and runs the
+whole session under it; the monitor reads `$FF00 = $0E` at the idle loop, and
+the BSS at `$3F03-$8F70` (under BASIC ROM in BASIC's own map) is live._
 
 ### The `$C000` collision — the real work in this phase
 
@@ -388,14 +393,19 @@ is wrong regardless of banking — and page 3 is much more crowded on the C128
 than the C64, so there is no drop-in replacement. See
 [Open items](#open-items) #2.
 
-Rehoming `$C000` _reduces_ how much trampolining is needed, since one config
-then covers the session.
+Moot for the C128 build as shipped: those are the only two trampolines in the
+tree and both live in the script runner, which refuses `TARGET_C128`. Nothing
+else needs one — one config covers the session.
 
 ### `SETBNK`
 
-C128 KERNAL LOAD/SAVE take a bank argument via `SETBNK` (`$FF68`), which must
-be called before each. Few sites, since everything funnels through wrappers:
-`modules.asm:661` (module loader) and the `loadsave.asm` paths.
+C128 KERNAL LOAD/SAVE/OPEN take their data and filename banks from `$C6`/`$C7`,
+set via `SETBNK` (`$FF68`). BASIC sets them before each of its own DOS
+commands; nothing in the editor session writes them (grep: no `$C6`/`$C7`
+stores anywhere), so `c128_init` in `editor.asm` calls `SETBNK` once with both
+banks = 0, and the module loader repeats it before its `LOAD` as belt and
+braces. `loadsave.asm` and `moddsk` go through `OPEN`/`CHRIN`/`CHROUT`, which
+read the same two bytes.
 
 ---
 
@@ -413,8 +423,9 @@ Choosing 40 columns makes the largest category of work vanish:
   still correct.
 - **Instruction set.** The 8502 is instruction-compatible with the 6502,
   illegal opcodes included. `modasm` and `moddis` need no ISA work.
-- **Keyboard.** `GETIN` is compatible. The C128's TAB key already emits `$09`,
-  matching `KEY_CTRL_I`.
+- **Keyboard.** `GETIN` is compatible for ordinary keys, and the C128's TAB
+  key already emits `$09`, matching `KEY_CTRL_I`. F1-F8 are the exception —
+  see [Function keys](#function-keys) below.
 - **`$A000–$BFFF` modules get simpler.** That range is plain bank-0 RAM on the
   C128, so the "don't restore `$01` while executing here" hazard
   (`modasm.asm:449`) largely stops being a hazard.
@@ -424,24 +435,42 @@ Choosing 40 columns makes the largest category of work vanish:
 
 ---
 
+## Function keys
+
+On the C128 F1-F8 are programmable keys: the screen editor expands each into
+its string (`GRAPHIC`, `DLOAD"`, …) before `GETIN` sees anything, so the
+`$85-$8C` codes the editor's key dispatch expects never arrive. `c128_init`
+rewrites the KERNAL's table at `$1000` (`PKYLEN`, ten lengths) and `$100A`
+(`PKYDEF`, the strings) so that each of F1-F8 is a one-byte string holding
+the C64 code, and SHIFT-RUN and HELP are empty. The 18 bytes overwritten are
+saved and restored on quit, so the user's definitions survive the session.
+Verified in VICE: the monitor shows `$1000` = `01 ×8, 00, 00` and `$100A` =
+`85 89 86 8A 87 8B 88 8C` at the idle loop, and F8 opens the module menu.
+
+Two related KERNAL details handled at the same time: the key-repeat flag
+moved from `$028A` to `$0A22` (`RPTFLG` is target-selected; checked against
+the KERNAL image, which references `$0A22` from its repeat logic), and the
+program starts by swapping to the 40-column screen if the 80-column one is
+active (`MODE` at `$D7`, `SWAPPER` at `$FF5F`).
+
 ## Component status
 
-| Component      | C128 effort | Notes                                             |
-| -------------- | ----------- | ------------------------------------------------- |
-| `editor.asm`   | **Low**     | ZP relocation via cfg; one line for the quit path |
-| `colorize.asm` | **None**    | aliases editor ZP only; moves with it             |
-| `loadsave.asm` | **Low**     | add `SETBNK`                                      |
-| `modules.asm`  | **Low**     | MMU conversion + `SETBNK`                         |
-| `modsfr.asm`   | **None**    | no banking, no ROM calls                          |
-| `moddet.asm`   | **Low**     | ZP scratch equates only                           |
-| `modtok.asm`   | **Low**     | ZP scratch equates only                           |
-| `modren.asm`   | **Low**     | ZP scratch + save loop                            |
-| `moddis.asm`   | **Low**     | ZP scratch + save loop                            |
-| `modasm.asm`   | **Medium**  | MMU + ZP + re-derive the `sei` decision           |
-| `moddsk.asm`   | **Medium**  | MMU + ZP + `SETBNK`                               |
-| `modsct.asm`   | **High**    | REU staging at `$B000`; BASIC ABI                 |
-| `modscr.asm`   | **High**    | BASIC ROM entry points; `$B000` staging           |
-| `modscrh.asm`  | **Highest** | 12 BASIC ROM entry points; BASIC 2.0 ZP ABI       |
+| Component      | C128 effort | Notes                                         |
+| -------------- | ----------- | --------------------------------------------- |
+| `editor.asm`   | ✅ done     | MMU at entry, `c128_init`, quit via BASIC 7.0 |
+| `colorize.asm` | ✅ none     | aliases editor ZP only; moves with it         |
+| `loadsave.asm` | ✅ none     | `SETBNK` once at startup covers its `OPEN`s   |
+| `modules.asm`  | ✅ done     | banking removed, `SETBNK` before `LOAD`       |
+| `modsfr.asm`   | ✅ done     | editor ZP offsets via `layout.inc`            |
+| `moddet.asm`   | ✅ done     | ZP scratch equates, header from cfg           |
+| `modtok.asm`   | ✅ done     | ZP scratch equates, header from cfg           |
+| `modren.asm`   | ✅ done     | ZP scratch + save macro, header from cfg      |
+| `moddis.asm`   | ✅ done     | ZP scratch + save macro, header from cfg      |
+| `modasm.asm`   | ✅ done     | MMU store, state block rebased to `$9000`     |
+| `moddsk.asm`   | ✅ done     | MMU store; `SETBNK` inherited from startup    |
+| `modsct.asm`   | **High**    | REU staging at `$B000`; BASIC ABI             |
+| `modscr.asm`   | **High**    | BASIC ROM entry points; `$B000` staging       |
+| `modscrh.asm`  | **Highest** | 12 BASIC ROM entry points; BASIC 2.0 ZP ABI   |
 
 ### The script runner is a BASIC-ABI problem, not a ZP problem
 
@@ -563,9 +592,14 @@ following `MOD_LO_BASE`. The 225-byte margin is a linker overflow error. See
 [The `$C000` collision](#the-c000-collision--the-real-work-in-this-phase) for
 the layout and the buffer trade-off. Not yet exercised on hardware.
 
-**Phase 2 — banking.** MMU conversion (7 sites), trampoline relocation,
-`SETBNK`, quit path. Small once nothing depends on `$C000`. Ends with a native
-C128 build that boots.
+**Phase 2 — banking.** ✅ **Done.** MMU session config set as the editor's
+first instruction and asserted by modasm/moddsk; the loader's `$01` dance
+compiled out; `SETBNK` at startup and before module `LOAD`; F-key table,
+key-repeat flag and 40-column swap in `c128_init`; quit restores the keys,
+banks BASIC ROM in and takes BASIC 7.0's cold start. Trampolines needed no
+work (script runner only). Verified in VICE 3.10: the C128 build boots from
+`petproject_c128.d64`, shows the editor, opens the module menu on F8, and F7
+returns to the BASIC 7.0 banner. Not yet run on hardware.
 
 **Phase 3 — build and packaging.** Partly done: `TARGET=c128` selects the
 `-D TARGET_C128` assemble, the `*_c128.cfg` set and `build/c128/` in both
@@ -603,16 +637,17 @@ allocation throughout: the CBM archive's C128 RAM map,
 1. ~~**C128 KERNAL zero-page reservation list.**~~ ✅ **Resolved** — see
    [C128 zero-page map](#c128-zero-page-map-resolved). One residual empirical
    check is noted there.
-2. **Trampoline placement — reopened, and harder than first thought.** An
-   earlier revision of this document suggested putting the relocated
-   trampolines somewhere in page 3, on the reasoning that the C128's default
-   bottom common RAM is `$0000–$03FF` so anything below `$0400` is visible
-   from every bank. The visibility argument holds, but **page 3 is far more
-   crowded on the C128 than on the C64** — `$0334-$0349` editor indirect
-   vectors, `$034A-$034D` IRQ keyboard buffer, `$0354-$035D` tab-stop
-   bitmaps, `$0362-$0376` file tables, `$0380-$03BF` CHRGET, `$03C0-$03FF`
-   bank-relative fetch/poke. Only small gaps remain, and the C64's `$033C`
-   cassette buffer does not exist there as free space.
+2. **Trampoline placement — deferred with the script runner.** Only
+   `modscr`/`modscrh` use trampolines and neither builds for the C128, so
+   nothing in the shipped C128 build needs one. If the script runner is ever
+   ported, the analysis stands: an earlier revision suggested page 3, on the
+   reasoning that the C128's default bottom common RAM is `$0000–$03FF` so
+   anything below `$0400` is visible from every bank. The visibility argument
+   holds, but **page 3 is far more crowded on the C128 than on the C64** —
+   `$0334-$0349` editor indirect vectors, `$034A-$034D` IRQ keyboard buffer,
+   `$0354-$035D` tab-stop bitmaps, `$0362-$0376` file tables, `$0380-$03BF`
+   CHRGET, `$03C0-$03FF` bank-relative fetch/poke. Only small gaps remain, and
+   the C64's `$033C` cassette buffer does not exist there as free space.
 
    The likelier answer is the C128 cassette buffer at **`$0B00-$0BFF`** (256
    bytes, free when tape is unused) — but that is outside the default 1 K
@@ -621,22 +656,19 @@ allocation throughout: the CBM archive's C128 RAM map,
    confirming: that `$0B00` is genuinely free in our configuration, and the
    RCR setting.
 
-3. **MMU configuration register details** — the CR bit assignments tabulated
-   under [Banking](#mmu-configuration-register), and that `$0E` is the right
-   whole-session config value (RAM `$0000-$BFFF`, I/O, KERNAL ROM). The
-   consequence that matters — bits 4-5 covering `$C000-$FFFF` as one unit, and
-   therefore the `$C000` collision — follows directly from these, so confirm
-   before committing to the rehoming layout.
-4. **Function keys.** On the C128 the screen editor ROM expands F1-F8 into
-   their programmable-key strings (`$1000-$10FF`) before `GETIN` sees them,
-   so the `$85-$8C` codes the editor expects may never arrive. Confirm, and if
-   so clear the key definitions at startup (or read the raw key). Also
-   confirms whether `$1000-$10FF` is genuinely off-limits for our use.
-5. **`RPTFLG` at `$028A`** (`editor.asm:33`) — confirm the address and that
+3. ~~**MMU configuration register details**~~ ✅ **Resolved in VICE** — `$0E`
+   runs the session (see [Banking](#mmu-configuration-register)); the bit
+   table is recorded in `c128.inc`.
+4. ~~**Function keys.**~~ ✅ **Resolved** — see [Function keys](#function-keys).
+5. ~~**`RPTFLG` at `$028A`**~~ ✅ **Resolved** — `$0A22` on the C128 (`c128.inc`), selected by target in `editor.asm`; the original note read: confirm the address and that
    `$80` still means "all keys repeat" on the C128.
-6. **The `$0200–$0222` boot / module parameter block** (`modules.asm:63`)
-   overlaps the C128 KERNAL input buffer. Interactive input uses `GETIN` so it
-   is likely safe, but `moddsk`'s drive-status reads go through `CHRIN`, which
-   does use that buffer.
-7. **C128 BASIC cold-start entry** to replace `jmp $E394`. `jmp ($FFFC)` is
-   the safe fallback.
+6. ~~**The `$0200–$0222` boot / module parameter block**~~ ✅ **Resolved in
+   VICE** — `$0200-$02A1` is BASIC 7.0's input buffer, not the KERNAL's; the
+   KERNAL's `CHRIN` from a serial channel does not touch it. `moddsk` lists
+   the directory and reads drive status correctly on the C128 build with the
+   block in place.
+7. ~~**C128 BASIC cold-start entry**~~ ✅ **Resolved** — the quit path restores
+   the F-key table, stores `$00` to `$FF00` and jumps to `$4000` (BASIC 7.0
+   cold start); VICE shows the BASIC 7.0 banner and `READY.` The reset vector
+   was rejected deliberately: a reset re-runs the disk boot sequence, which
+   would relaunch the editor once the disk carries a C128 boot sector.

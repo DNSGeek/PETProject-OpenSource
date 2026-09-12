@@ -17,6 +17,8 @@ explicitly under [Open items](#open-items).
 - [Component status](#component-status)
 - [Relocation strategy](#relocation-strategy)
 - [Phasing](#phasing)
+- [Script runner on the C128](#script-runner-on-the-c128)
+- [BASIC 7.0 keywords — investigation](#basic-70-keywords--investigation)
 - [Open items](#open-items)
 
 ---
@@ -90,12 +92,18 @@ entry in `petproject.cfg`.
 | `$19`     | 1   | `CLR_KWLEN`  |                                         |
 | `$1A-$1B` | 2   | `CLR_CTMP`   | colortab walker                         |
 
-**This block is already fully relocatable.** No code references these by
-literal address; everything resolves through the ca65 zeropage segment.
-Relocating it is a one-line change (`start = $02`) in a C128 linker config,
-provided a 26-byte contiguous hole exists. ca65 keeps the segment in
-declaration order, so all pointer pairs stay adjacent wherever the block
-lands.
+**This block is relocatable, with one dependent.** `editor.asm`, `colorize.asm`,
+`loadsave.asm` and `modules.asm` resolve every one of these through the ca65
+zeropage segment. `modsfr.asm` does not — it is a separately linked PRG that
+borrows six of them (`GAP_START`, `GAP_END`, `CURSOR_ROW`, `CURSOR_COL`,
+`TXT_PTR`, `LPTR`) by offset. Those offsets are now expressed as
+`ZP_EDITOR + n` from `zp.inc`, and `editor.asm` asserts at link time both that
+`petproject.cfg`'s `ZP:` line matches `ZP_EDITOR`/`ZP_EDITOR_LEN` and that the
+six symbols still sit at the offsets `modsfr` expects. So relocating the block
+means changing the target map in `zp.inc` and `petproject.cfg` together
+(provided a 26-byte contiguous hole exists); moving only one fails the build.
+ca65 keeps the segment in declaration order, so all pointer pairs stay adjacent
+wherever the block lands.
 
 ### Tier 2 — module scratch, `$3A–$3F` and `$F7–$FF` (15 bytes)
 
@@ -145,10 +153,12 @@ nothing that anything depends on:
 - **What they would nominally protect is moot.** `$3A-$3F` is BASIC's and
   `$F7-$FE` is RS-232's, but the editor quits through BASIC _cold start_
   (`editor.asm:542`), which reinitialises all of it.
-- **The one real in-flight hazard is not addressed by saving.** The C64 KERNAL
-  IRQ using `$FB`/`$FC` for cursor blink (`modasm.asm:260`) is a collision
-  _during_ execution; entry/exit save/restore does nothing for it. `sei` does,
-  which is why modasm holds one.
+- **There is no in-flight hazard on the C64.** An earlier revision claimed the
+  C64 KERNAL IRQ uses `$FB`/`$FC` for cursor blink (the rationale that used to
+  sit on modasm's `sei`). It does not: the IRQ path uses `$A0-$A2`, `$C5`/`$C6`/
+  `$CB`, `$CC-$CF`, `$D1-$D6` and `$F3-$F6`, and `$FB-$FE` are the documented
+  free user bytes — `moddet`, `modtok` and `moddsk` run on them with IRQs
+  enabled. modasm and moddis keep their `sei` as a precaution only.
 
 So the requirement on any relocation is **disjointness alone** — the two tiers
 must not overlap. Making saving universal is _not_ a substitute for that, and
@@ -157,13 +167,13 @@ through every exit path in five working modules (`modsfr` has 31 `rts`,
 `modsct` 30, `modscrh` 18), risking a regression on some error path in
 exchange for no identified benefit.
 
-**Enforce disjointness at build time instead.** `petproject.cfg` already sets
-`define = yes` on both the `ZP` memory area and the `ZEROPAGE` segment, so
-`editor.asm` can `.import __ZP_START__, __ZP_SIZE__` and assert non-overlap
-against `ZP_SCRATCH` / `ZP_PTRS`. It needs the `lderror` action rather than
-`error`, since those values resolve at link time. Zero runtime cost, zero
-regression risk, and it fails the build the moment a C128 map puts the tiers
-on top of each other — which is the only scenario that ever mattered.
+**Disjointness is enforced at build time.** Each target map declares the
+editor block as `ZP_EDITOR`/`ZP_EDITOR_LEN`, and `zp.inc` asserts that the
+three pool blocks are pairwise disjoint from each other and from that block.
+`petproject.cfg` sets `define = yes` on the `ZP` memory area, so `editor.asm`
+imports `__ZP_START__`/`__ZP_SIZE__` and asserts with `lderror` that the cfg
+agrees with the map. Zero runtime cost, and the build fails the moment a map
+puts the tiers on top of each other or the cfg drifts from the map.
 
 ### System ZP — read, not owned
 
@@ -181,12 +191,12 @@ blink. So the ZP set to avoid is defined by **what the KERNAL IRQ handler
 touches 60 times a second**, not merely by the routines PETProject calls.
 That is a strictly larger set.
 
-`modasm` is the exception: it holds `sei` across an _entire assembly_, on
-explicitly C64-specific reasoning (`modasm.asm:260` — the C64 KERNAL IRQ uses
-`$FB`/`$FC` as cursor-blink scratch, which would corrupt `SRC_PTR`). That
-premise must be **re-derived** for the C128, not inherited. A multi-second
-`sei` is riskier there, and the better answer may be to relocate `SRC_PTR`
-and drop the `sei` entirely.
+`modasm` (and `moddis`) hold `sei` across their entire run. The comment that
+used to justify it — that the C64 KERNAL IRQ uses `$FB`/`$FC` as cursor-blink
+scratch — was wrong (see above); the `sei` is a precaution, not a zero-page
+requirement, on either target. A multi-second `sei` is riskier on the C128
+(serial timing), so dropping it is an option for the port rather than a
+constraint on it.
 
 ### C128 zero-page map (resolved)
 
@@ -236,11 +246,13 @@ Two consequences:
   goal: non-overlap becomes obvious rather than incidental, and the
   `KW_TOKEN` alias can be retired by giving colorize a byte of its own.
 
-**Residual empirical check.** The above comes from a static allocation map,
-which documents who _owns_ each byte rather than what the ROM demonstrably
-writes. Before trusting it in anger, run a poisoned-pattern test on a real
-C128 or in VICE: fill `$02-$2A` with a known pattern, exercise the IDE
-including disk I/O, and confirm only PETProject's own writes appear.
+**Empirical check.** The above comes from a static allocation map, which
+documents who _owns_ each byte rather than what the ROM demonstrably writes.
+It has since been borne out in practice: the C128 build runs on a real C128
+(September 2026) with editing, module loads and disk I/O working, which is
+what a zero-page collision would have broken first. A poisoned-pattern test
+(fill `$02-$2A`, exercise the IDE, confirm only PETProject's writes) remains
+the way to re-check after any change to the map.
 
 ---
 
@@ -266,8 +278,12 @@ Sites:
 | `modules.asm:724`  | `#$36`  | module execution banking           |
 | `modules.asm:735`  | `#$37`  | restore                            |
 
-Use the MMU's `$FF01–$FF04` preconfiguration registers so each switch stays a
-single store, preserving the shape of the existing code.
+Done: each site is now `.ifdef TARGET_C128` — a single `sta $FF00` of the
+session config where the module wants to assert its map (modasm, moddsk),
+and nothing at all in the loader, whose `$36`/`$37` dance exists only to
+expose RAM at `$A000` that the session config already exposes. The
+preconfiguration registers turned out to be unnecessary: `$FF00` is visible
+from every bank, so one immediate store is already a single instruction.
 
 ### MMU configuration register
 
@@ -291,8 +307,9 @@ dance around the big modules does not get translated, it **disappears** —
 along with the "do not restore `$01` while executing here" hazard at
 `modasm.asm:449`.
 
-_(CR bit assignments and the `$0E` value want confirming against the C128
-Programmer's Reference — see [Open items](#open-items).)_
+_Confirmed in VICE: the editor sets `$0E` as its first instruction and runs the
+whole session under it; the monitor reads `$FF00 = $0E` at the idle loop, and
+the BSS at `$3F03-$8F70` (under BASIC ROM in BASIC's own map) is live._
 
 ### The `$C000` collision — the real work in this phase
 
@@ -317,22 +334,45 @@ is almost entirely KERNAL I/O.
 
 #### Resolution: rehome, don't trampoline
 
-Keep config `$0E` for the whole session and move everything off `$C000`. The
-budget works:
+Keep config `$0E` for the whole session and move everything off `$C000`.
+
+The budget is tighter than a first look suggests, because BASIC 7.0's program
+text starts at `$1C01`, not `$0801`: a `LOAD`/`RUN`-able editor sits 5 K
+higher on the C128 than on the C64.
 
 ```
-editor BSS ends           $8C1E
-free below module area    $8C1F-$9FFF   5,089 bytes
+editor at $0801 (C64)     ends $8C1E    free below $A000  5,089 bytes
+editor at $1C01 (C128)    ends $A01E    free below $A000       -31 bytes
 must be rehomed           $C000-$CFFF   4,096 bytes
-                                        ------------
-spare                                     993 bytes
 ```
+
+So the rehomed region cannot simply slot in under `$A000`; something has to
+give. The adopted layout (`layout.inc`, `petproject_c128.cfg`,
+`module_c128.cfg`, `modsfr_c128.cfg`) keeps `MOD_HI` at `$A000-$BFFF` so
+modasm, moddis and modsct share their C64 linker configs, keeps modasm's
+symbol table at 400 entries (its state block is exactly 4 K), puts the
+rehomed region at `$9000-$9FFF`, and pays for it with the buffer:
+
+```
+$1C01-$8F1E   editor, EDITOR_BUF_SIZE = $4F00 (19.75 K, was 24 K)
+$9000-$9FFF   MOD_LO  — moddet, modtok, moddsk, modren, modsfr; modasm state
+$A000-$BFFF   MOD_HI  — modasm, moddis, modsct
+```
+
+The buffer comes back — and then some — with a bank-1 buffer (Phase 4). The
+alternative of a boot-sector load at `$1300` would recover 2.25 K of it at the
+cost of losing the plain `RUN` launch; not taken.
 
 Two things to design around:
 
-- **That margin shrinks as the editor's BSS grows.** Wants a link-time
-  assertion — same technique as the ZP overlap check, fail the build rather
-  than discover it as corruption.
+- **The margin is 225 bytes and is enforced by the linker.** The editor's MAIN
+  area in `petproject_c128.cfg` ends at `$9000`; if BSS grows past it, ld65
+  reports a MAIN overflow. `editor.asm` also asserts (lderror) that the cfg's
+  load address and MAIN end match `EDITOR_LOAD` / `EDITOR_END` in
+  `layout.inc`, and every module asserts that its cfg's `__MAIN_START__`
+  matches `MOD_LO_BASE` / `MOD_HI_BASE` — the same constants the loader table
+  in `modules.asm` is built from. A cfg, `layout.inc` and the loader cannot
+  disagree without failing the link.
 - **The modscrh/modasm choreography survives unchanged in shape.** modscrh
   currently stashes itself out of `$C000-$CFFF` to REU `$013000` so modasm can
   use that space as scratch (`modscrh.asm:102`). Relocating both is
@@ -342,12 +382,12 @@ The alternative — all-RAM bank 0 with KERNAL calls trampolined through common
 RAM — preserves the memory map exactly but taxes every I/O call in the
 project. Rejected for that reason.
 
-**Sequencing note:** the rehoming is the substantive work, it is independent
-of the MMU stores, and it can be **done and tested entirely on the C64** —
-moving modules from `$C000` to `$8C20` is a valid C64 layout too. That turns
-the risky part into something verifiable on hardware you already have, before
-any C128-specific code exists. Do it first; the MMU stores are small once
-nothing depends on `$C000`.
+**Sequencing note:** the rehoming is independent of the MMU stores. At the
+source level it is done: modasm's 44 state equates are `ASM_STATE + $xx` with
+`ASM_STATE = MOD_LO_BASE`, the modules emit their PRG header from the
+linker's `__MAIN_START__`, and `modules.asm` builds its load table from
+`layout.inc`. The C64 build is byte-identical to before. What remains is
+run-time: the MMU stores, `SETBNK`, the trampolines and the quit path.
 
 ### Trampolines must move
 
@@ -357,14 +397,95 @@ is wrong regardless of banking — and page 3 is much more crowded on the C128
 than the C64, so there is no drop-in replacement. See
 [Open items](#open-items) #2.
 
-Rehoming `$C000` _reduces_ how much trampolining is needed, since one config
-then covers the session.
+Moot for the C128 build as shipped: those are the only two trampolines in the
+tree and both live in the script runner, which refuses `TARGET_C128`. Nothing
+else needs one — one config covers the session.
+
+### Bank-1 buffer
+
+The MMU selects the RAM bank for all non-common memory at once, so code and
+the data it addresses natively must share a bank, and a bank has only
+`$4000-$BFFF` (32 K) outside ROM and I/O. That is why the first C128 layout
+ended up with a 19.75 K buffer: the editor, its buffer and the modules were
+all squeezed into bank 0 under `$C000`. The bank-1 layout splits the machine
+three ways instead (`layout.inc`, "C128"):
+
+- **The editor lives in common RAM.** `c128_init` sets the MMU's RAM
+  configuration register to a 16 K bottom common area, so `$0000-$3FFF` is
+  the same physical memory in every bank: the screen, everything the KERNAL
+  touches, and the editor's own code and variables. The editor therefore
+  loads at `$1300` (2.3 K lower than BASIC's `$1C01`, which is what makes it
+  fit) and must end below `$4000` — `petproject_c128.cfg` makes that a link
+  error. Today it ends at `$3885`.
+- **The buffer is bank 1, `$4000-$BFFF`: 32 K.** The editor runs with bank 1
+  mapped (`C128_CFG_EDITOR`, `$4E`) and addresses the buffer natively, as on
+  the C64; `work_buf`/`work_buf_end` are constants on this target instead of
+  a `.res`. Load and save stream through `CHRIN`/`CHROUT`, which do not care
+  which bank the bytes land in.
+- **The modules stay in bank 0** at `$9000`/`$A000` and run with bank 0 mapped
+  (`C128_CFG_SESSION`, `$0E`); the module call switches banks each way. They
+  cannot see the buffer, so every buffer access in a module goes through a
+  far-access table the editor keeps in common RAM right after its entry point
+  (`FAR_*` in `layout.inc`, `far_api` in `editor.asm`): one `JSR` per byte
+  that flips to the bank-1 map, does the one `lda`/`sta (ptr),y`, and flips
+  back. The flips are single stores to the MMU's preconfiguration-load
+  registers (`$FF01`/`$FF02`), which ignore the value written and leave A and
+  the flags alone — so a helper behaves exactly like the instruction it
+  replaces, at about 25 cycles instead of 5. In the sources the sites read
+  `buf_lda ptr` / `buf_sta ptr`, macros that are the plain instruction on the
+  C64 and the call on the C128.
+
+Which sites are buffer accesses was decided per site, not per pointer: a
+module's own tables and RAM (modasm's symbol table, modren's mapping table,
+modtok's keyword table, modasm's include-file line buffer, all of moddsk)
+stay native, since they are in bank 0 with the module. The one pointer that
+does both — modasm's `SRC_PTR`, buffer for the main source and module RAM for
+include frames — is far only on the buffer path.
+
+Cost: modules that walk the whole buffer byte by byte (tokenize, detokenize,
+renumber, search/replace) run their inner loops several times slower on the
+C128 than on the C64 — on the order of a second per 32 K of text. The
+editor's own rendering and editing are unaffected.
+
+Verified in VICE 3.10 (true-drive 1571): at the idle loop the MMU reads
+`$4E`, the preconfiguration registers `$4E`/`$0E`, the RAM configuration
+register `$07`, and the gap runs `$4065-$C000` with the demo text at bank-1
+`$4000`; Renumber and Disk Utility produce the same screens as before; saving
+the demo as BASIC writes a correctly tokenized PRG (modtok, far access) and
+loading it back detokenizes it (moddet), with the C64 build producing the
+pixel-identical screen for the same key sequence; F7 quits to `READY.`
+
+### Boot sector
+
+`boot128.asm`, linked by `boot128.cfg` into a raw 256-byte image that
+`make_disk.py --boot-sector` writes to track 1 sector 0. The KERNAL's boot
+routine (BOOT_CALL, `$FF53`, called at the end of BASIC's cold start;
+disassembled from the 318020-05 image at `$F890`) reads the sector to `$0B00`,
+checks `CBM`, prints `BOOTING` plus the message string, optionally loads a
+named file, and then enters the code after the filename through `JSRFAR` in
+bank 15 — KERNAL and BASIC ROM in, so the jump table works and an `RTS`
+returns to `READY.`
+
+Our sector leaves the filename empty and loads `PETPROJECT128` itself (with
+`SETBNK 0,0` and secondary address 1, so the file's own `$1C01` header is
+honoured), then jumps to the editor's entry, which sets the session MMU config
+first thing. Loading ourselves matters for the other half of the design: since
+BASIC's cold start runs the boot sector, the editor's quit path — which ends in
+BASIC's cold start — would relaunch the editor. So quit leaves `$51` at `$1BFF`
+(`C128_BOOT_FLAG`, in the `$1300-$1BFF` application area nothing else
+touches), and the sector checks it _before_ loading: if set, clear it and
+`RTS` to `READY.`; otherwise boot. The flag is one-shot, so a reset after
+quitting boots normally, and a power cycle randomises it.
 
 ### `SETBNK`
 
-C128 KERNAL LOAD/SAVE take a bank argument via `SETBNK` (`$FF68`), which must
-be called before each. Few sites, since everything funnels through wrappers:
-`modules.asm:661` (module loader) and the `loadsave.asm` paths.
+C128 KERNAL LOAD/SAVE/OPEN take their data and filename banks from `$C6`/`$C7`,
+set via `SETBNK` (`$FF68`). BASIC sets them before each of its own DOS
+commands; nothing in the editor session writes them (grep: no `$C6`/`$C7`
+stores anywhere), so `c128_init` in `editor.asm` calls `SETBNK` once with both
+banks = 0, and the module loader repeats it before its `LOAD` as belt and
+braces. `loadsave.asm` and `moddsk` go through `OPEN`/`CHRIN`/`CHROUT`, which
+read the same two bytes.
 
 ---
 
@@ -382,8 +503,9 @@ Choosing 40 columns makes the largest category of work vanish:
   still correct.
 - **Instruction set.** The 8502 is instruction-compatible with the 6502,
   illegal opcodes included. `modasm` and `moddis` need no ISA work.
-- **Keyboard.** `GETIN` is compatible. The C128's TAB key already emits `$09`,
-  matching `KEY_CTRL_I`.
+- **Keyboard.** `GETIN` is compatible for ordinary keys, and the C128's TAB
+  key already emits `$09`, matching `KEY_CTRL_I`. F1-F8 are the exception —
+  see [Function keys](#function-keys) below.
 - **`$A000–$BFFF` modules get simpler.** That range is plain bank-0 RAM on the
   C128, so the "don't restore `$01` while executing here" hazard
   (`modasm.asm:449`) largely stops being a hazard.
@@ -393,24 +515,42 @@ Choosing 40 columns makes the largest category of work vanish:
 
 ---
 
+## Function keys
+
+On the C128 F1-F8 are programmable keys: the screen editor expands each into
+its string (`GRAPHIC`, `DLOAD"`, …) before `GETIN` sees anything, so the
+`$85-$8C` codes the editor's key dispatch expects never arrive. `c128_init`
+rewrites the KERNAL's table at `$1000` (`PKYLEN`, ten lengths) and `$100A`
+(`PKYDEF`, the strings) so that each of F1-F8 is a one-byte string holding
+the C64 code, and SHIFT-RUN and HELP are empty. The 18 bytes overwritten are
+saved and restored on quit, so the user's definitions survive the session.
+Verified in VICE: the monitor shows `$1000` = `01 ×8, 00, 00` and `$100A` =
+`85 89 86 8A 87 8B 88 8C` at the idle loop, and F8 opens the module menu.
+
+Two related KERNAL details handled at the same time: the key-repeat flag
+moved from `$028A` to `$0A22` (`RPTFLG` is target-selected; checked against
+the KERNAL image, which references `$0A22` from its repeat logic), and the
+program starts by swapping to the 40-column screen if the 80-column one is
+active (`MODE` at `$D7`, `SWAPPER` at `$FF5F`).
+
 ## Component status
 
-| Component      | C128 effort | Notes                                             |
-| -------------- | ----------- | ------------------------------------------------- |
-| `editor.asm`   | **Low**     | ZP relocation via cfg; one line for the quit path |
-| `colorize.asm` | **None**    | aliases editor ZP only; moves with it             |
-| `loadsave.asm` | **Low**     | add `SETBNK`                                      |
-| `modules.asm`  | **Low**     | MMU conversion + `SETBNK`                         |
-| `modsfr.asm`   | **None**    | no banking, no ROM calls                          |
-| `moddet.asm`   | **Low**     | ZP scratch equates only                           |
-| `modtok.asm`   | **Low**     | ZP scratch equates only                           |
-| `modren.asm`   | **Low**     | ZP scratch + save loop                            |
-| `moddis.asm`   | **Low**     | ZP scratch + save loop                            |
-| `modasm.asm`   | **Medium**  | MMU + ZP + re-derive the `sei` decision           |
-| `moddsk.asm`   | **Medium**  | MMU + ZP + `SETBNK`                               |
-| `modsct.asm`   | **High**    | REU staging at `$B000`; BASIC ABI                 |
-| `modscr.asm`   | **High**    | BASIC ROM entry points; `$B000` staging           |
-| `modscrh.asm`  | **Highest** | 12 BASIC ROM entry points; BASIC 2.0 ZP ABI       |
+| Component      | C128 effort | Notes                                         |
+| -------------- | ----------- | --------------------------------------------- |
+| `editor.asm`   | ✅ done     | MMU at entry, `c128_init`, quit via BASIC 7.0 |
+| `colorize.asm` | ✅ none     | aliases editor ZP only; moves with it         |
+| `loadsave.asm` | ✅ none     | `SETBNK` once at startup covers its `OPEN`s   |
+| `modules.asm`  | ✅ done     | banking removed, `SETBNK` before `LOAD`       |
+| `modsfr.asm`   | ✅ done     | editor ZP offsets via `layout.inc`            |
+| `moddet.asm`   | ✅ done     | ZP scratch equates, header from cfg           |
+| `modtok.asm`   | ✅ done     | ZP scratch equates, header from cfg           |
+| `modren.asm`   | ✅ done     | ZP scratch + save macro, header from cfg      |
+| `moddis.asm`   | ✅ done     | ZP scratch + save macro, header from cfg      |
+| `modasm.asm`   | ✅ done     | MMU store, state block rebased to `$9000`     |
+| `moddsk.asm`   | ✅ done     | MMU store; `SETBNK` inherited from startup    |
+| `modsct.asm`   | **High**    | REU staging at `$B000`; BASIC ABI             |
+| `modscr.asm`   | **High**    | BASIC ROM entry points; `$B000` staging       |
+| `modscrh.asm`  | **Highest** | 12 BASIC ROM entry points; BASIC 2.0 ZP ABI   |
 
 ### The script runner is a BASIC-ABI problem, not a ZP problem
 
@@ -473,9 +613,13 @@ Mechanically:
    pre-conversion output, and a `-D TARGET_C128` build relocates cleanly
    (every `lda (SRC_PTR),y` moved `$FB`→`$26`, same counts, no stale
    references, identical binary sizes).
-3. **Assert non-overlap at link time** via `__ZP_START__` / `__ZP_SIZE__` and
-   `lderror`, as described above. _(Not yet done. Small, safe, independent of
-   the C128 map — can land at any point.)_
+3. **Assert non-overlap at build time** — ✅ **done.** `zp.inc` asserts the
+   pool blocks are pairwise disjoint from each other and from
+   `ZP_EDITOR`/`ZP_EDITOR_LEN`; `editor.asm` asserts with `lderror` that
+   `petproject.cfg` matches those two constants and that the six editor ZP
+   symbols `modsfr.asm` borrows are still at their expected offsets. CI
+   assembles every C128-eligible module (and links the editor) with
+   `-D TARGET_C128` on every change, so the C128 map is exercised too.
 
    This replaces an earlier plan to make ZP saving universal across all
    modules. That plan was dropped: it guarded against nothing real and would
@@ -483,18 +627,28 @@ Mechanically:
 
 #### Files
 
-| File          | Role                                                                           |
-| ------------- | ------------------------------------------------------------------------------ |
-| `zp.inc`      | target dispatch, derived `ZP_PTR0..3`, contract + assertions                   |
-| `zp_c64.inc`  | the historical C64 map — `$3A`, `$F7`, `$FF`                                   |
-| `zp_c128.inc` | the C128 map — `$1C`, `$22`, `$2A`, with the derivation and the residual check |
+| File                  | Role                                                                           |
+| --------------------- | ------------------------------------------------------------------------------ |
+| `zp.inc`              | target dispatch, derived `ZP_PTR0..3`, contract + assertions, save macros      |
+| `zp_c64.inc`          | the historical C64 map — `$3A`, `$F7`, `$FF`                                   |
+| `zp_c128.inc`         | the C128 map — `$1C`, `$22`, `$2A`, with the derivation and the residual check |
+| `layout.inc`          | per-target load addresses, buffer size and module regions                      |
+| `c128.inc`            | MMU, KERNAL entries and variables, boot-flag handshake (C128 only)             |
+| `petproject_c128.cfg` | editor at `$1C01`, MAIN capped at `$9000`                                      |
+| `module_c128.cfg`     | low modules at `$9000` (was `$C000`)                                           |
+| `modsfr_c128.cfg`     | search/replace at `$9000` (was `$C000`)                                        |
+| `boot128.asm/.cfg`    | the C128 boot sector (track 1 sector 0 of `petproject.d64`)                    |
 
 Each module now aliases its own local names onto pool slots
 (`SRC_PTR = ZP_PTR2`, `TMP = ZP_SCRATCH+0`, …), so module code reads exactly
 as before and the diff stays small. Converted: `editor.asm` (the `KW_TOKEN`
-alias), `modasm`, `moddet`, `moddis`, `modren`, `moddsk`, `modscr`,
-`modscrh`, `modsct`, `modtok`. `modsfr` needed no change — it uses no pool
-scratch.
+alias), `modasm`, `moddet`, `moddis`, `modren`, `moddsk`, `modscrh`,
+`modsct`, `modtok`. `modscr` defined a scratch symbol it never used, now
+removed. `modsfr` uses no pool scratch, but does borrow editor ZP — see
+Tier 1 above. `modscr`, `modscrh` and `modsct` refuse to assemble under
+`TARGET_C128` (`.error`): the first two because the C128 map's premise that
+BASIC is never called does not hold for them, `modsct` because it exists only
+to feed them.
 
 BASIC/KERNAL ABI addresses (`TXTTAB`, `VARTAB`, `MEMSIZ`, `VARPNT`, `TXTPTR`,
 AYINT's `$14`/`$15`, `JIFFY_LO`, `FA`) were deliberately **left as literals**.
@@ -513,39 +667,173 @@ Single source tree throughout — `.if TARGET_C128` conditionals plus parallel
 resolved and adopted, Tier 1 confirmed to need no change. C64 build verified
 byte-identical throughout; `-D TARGET_C128` assembles and links.
 
-**Phase 1 — rehome `$C000`.** Move the six `$C000` modules and modasm's 4 K of
-working state below `$A000`, per
-[The `$C000` collision](#the-c000-collision--the-real-work-in-this-phase).
-Deliberately first, and deliberately **done on the C64**: the new layout is
-valid there, so it is testable on real hardware before any C128-specific code
-exists. Add the link-time assertion guarding the 993-byte margin.
+**Phase 1 — rehome `$C000`.** ✅ **Done at the link level.** `layout.inc`
+carries the per-target addresses; `TARGET=c128 bash make_petproject.sh`
+links the editor under `petproject_c128.cfg` (now at `$1300` in common RAM —
+see [Bank-1 buffer](#bank-1-buffer)) and the low modules at `$9000` under
+`module_c128.cfg` / `modsfr_c128.cfg`, with modasm's state block following
+`MOD_LO_BASE`. Overflowing the editor's area is a linker error. See
+[The `$C000` collision](#the-c000-collision--the-real-work-in-this-phase) for
+the original layout and the buffer trade-off it forced.
 
-**Phase 2 — banking.** MMU conversion (7 sites), trampoline relocation,
-`SETBNK`, quit path. Small once nothing depends on `$C000`. Ends with a native
-C128 build that boots.
+**Phase 2 — banking.** ✅ **Done.** MMU session config set as the editor's
+first instruction and asserted by modasm/moddsk; the loader's `$01` dance
+compiled out; `SETBNK` at startup and before module `LOAD`; F-key table,
+key-repeat flag and 40-column swap in `c128_init`; quit restores the keys,
+banks BASIC ROM in and takes BASIC 7.0's cold start. Trampolines needed no
+work (script runner only). Verified in VICE 3.10: the C128 build boots from
+`petproject_c128.d64`, shows the editor, opens the module menu on F8, and F7
+returns to the BASIC 7.0 banner.
 
-**Phase 3 — build and packaging.** `TARGET_C128` conditionals, parallel
-`.cfg` set, C128 autoboot sector in `make_disk.py`. One disk can carry both
-builds — the C64 BASIC stub and the C128 boot sector select between them, so
-no runtime machine detection is needed.
+**Phase 3 — build and packaging.** ✅ **Done.** `make_petproject.sh` builds
+both sets by default (`TARGET=all`) and writes one `petproject.d64` carrying
+both: the C64 files first, so `LOAD"*",8` on a C64 still gets `PETPROJECT`,
+then the C128 set as `PETPROJECT128`, `MODASM128`, … (the suffix is added by
+`modules.asm` under `TARGET_C128`, so the C128 editor asks for the right
+files). Track 1 sector 0 holds the boot sector from `boot128.asm`, so a C128
+autoboots straight into the editor; no runtime machine detection anywhere.
+`TARGET=c64` / `TARGET=c128` build one set alone. See
+[Boot sector](#boot-sector) for how the sector works and why it has to
+cooperate with the quit path. Verified in VICE with a true-drive 1571: reset
+boots into the editor, both machines list both sets, F7 returns to `READY.`
+without relaunching.
+
+**Hardware.** ✅ The combined `petproject.d64` — boot sector, bank-1 buffer,
+modules — runs on a real C128 (September 2026). Everything above that was
+marked "verified in VICE" is now also confirmed on the machine.
 
 **Phase 4 — the payoff.** In value-per-effort order:
 
 1. **REU-free scripting.** `modscr.asm` stashes `$0801–$9FFF` to REU `$009000`
    purely to make room. Bank 1 does that job, which would remove the one
-   hardware requirement in the README. (Gated on the script runner rework.)
-2. **Burst mode** with a 1571/1581 — retires the "use a fastloader cartridge"
-   advice.
-3. **2 MHz bursts** around the assembler's passes, screen blanked, disk I/O
-   excluded.
-4. **Bigger buffer** via bank 1. Real, but the most invasive: the gap buffer
-   needs a windowing scheme rather than per-byte far access through
-   `INDFET`/`INDSTA` (`$FF74`/`$FF77`), which are correct but slow.
+   hardware requirement in the README. **Not done** — it is gated on porting
+   the script runner itself, which is the one large job left; see
+   [Script runner on the C128](#script-runner-on-the-c128) for the plan and
+   the two design problems it has to solve first.
+2. **Burst mode** — ✅ **already in effect, nothing to write.** Module loads
+   go through KERNAL `LOAD`, which the C128 KERNAL runs in burst mode on a
+   1571/1581 without being asked. The editor's own file reads stream through
+   `CHRIN`, which cannot burst, but on a C128 that traffic already uses the
+   fast serial protocol (about 10× the C64's rate) — and switching those
+   reads to `LOAD` is not an option: `LOAD` consumes the file's first two
+   bytes as a load address, which PETProject's header-less text files do not
+   have (the comment at the top of `loadsave.asm` explains why they are
+   read byte by byte). A custom block-level burst reader would need a file
+   format change to buy back the last factor; not worth it. The README's
+   fastloader-cartridge advice is now C64-only.
+3. **2 MHz bursts** — ✅ **done.** The module call wrapper in `modules.asm`
+   runs the compute-only modules — detokenize, tokenize, renumber,
+   disassemble (`c128_fast_ok`) — at 2 MHz with the display blanked, and
+   restores 1 MHz and the display on return (`c128_fast`/`c128_slow` in
+   `editor.asm`). Excluded: modasm (writes its output file and reads
+   includes mid-run; CIA-driven serial timing would break), moddsk (all
+   disk I/O) and modsfr (a form the user drives). Verified in VICE: the VIC
+   clock register reads 2 MHz at modtok's and moddet's entry and 1 MHz with
+   the display re-enabled at the idle loop afterwards, and the save/reload
+   round trip is pixel-identical to the 1 MHz run.
+4. **Bigger buffer** via bank 1 — ✅ **done**, 32 K (up from 19.75 K on the
+   first C128 layout and 24 K on the C64). See
+   [Bank-1 buffer](#bank-1-buffer). The windowing scheme once feared turned
+   out to be unnecessary: with the editor in common RAM it addresses bank 1
+   natively, and only the modules pay for far access, through a table of
+   helpers far cheaper than `INDFET`/`INDSTA`.
 
 BASIC 7.0 token support — extending `modtok`, `moddet`, `colorize` and
-`modren` to the two-byte `$CE xx` / `$FE xx` tokens, including which new
-keywords take line-number arguments (`TRAP`, `RESUME`, the `GO` forms) — is a
-separate content project, not part of the port.
+`modren` — is a separate content project, not part of the port. It has been
+scoped: see [BASIC 7.0 keywords](#basic-70-keywords--investigation).
+
+## Script runner on the C128
+
+What the port would have to do to bring `modsct`/`modscrh`/`modscr` over,
+beyond the ROM entry points already listed under
+[The script runner is a BASIC-ABI problem](#the-script-runner-is-a-basic-abi-problem-not-a-zp-problem):
+
+- **Where the script's BASIC program lives.** BASIC 7.0 keeps program text
+  in bank 0 from `$1C01` — on top of the editor image (`$1300-$38B9`). The
+  C64 version stashes the whole IDE to the REU to make room. On the C128 the
+  editor image (~10 K) can be stashed into bank 0 `$4000-$8FFF`, which the
+  bank-1 layout leaves entirely free, so no REU is needed for that half.
+- **Where BASIC's variables live.** BASIC 7.0 puts variables in bank 1 from
+  `$0400` upward and strings from the top of bank 1 downward — straight
+  through the 32 K buffer at `$4000-$BFFF`, which holds the user's text
+  while the script runs. The runner would have to lower BASIC's bank-1 top
+  of memory to `$4000` (its `MEMSIZ`/`FRETOP` in bank 1), giving scripts
+  15 K of variable and string space, before handing control to BASIC. That
+  is the design decision that does not exist on the C64.
+- **The ROM ABI.** `CHRGET` is in common RAM on the C128 (`$0380`) rather
+  than zero page, and every BASIC 2.0 entry the handler calls (`PTRGET`,
+  `GETBYT`, `FRMNUM`, `AYINT`, `RELINK`, `CLR`, `NEWSTT`) has a BASIC 7.0
+  counterpart to be located in the 318018/318019 images — the same way the
+  boot routine was located for Phase 3. The `IGONE`/`IERROR`/`IMAIN`
+  vectors keep their `$0300-$030B` addresses.
+- **Trampolines** move from `$033C` to the cassette buffer at `$0B00`, and
+  with 16 K common RAM already in place they no longer need the RCR change
+  the open item worried about.
+
+Estimate: the largest remaining piece of the port by some margin, mostly
+ROM archaeology plus the memory-map design above. Everything else in this
+document is done without it.
+
+## BASIC 7.0 keywords — investigation
+
+**Token table, from the ROM (318018-04/318019-04).** BASIC 7.0 keeps BASIC
+2.0's 76 one-byte tokens `$80-$CB` unchanged and continues the same list to
+`$FD`: 126 one-byte tokens in all, `$CC RGR` … `$FD WHILE`, with `$CE` and
+`$FE` reserved as escape prefixes. Two second-level lists follow: `$FE xx`
+statements, 37 entries `$02 BANK` … `$26 SLOW` (with `$20` and `$22`
+unused), and `$CE xx` functions, 9 entries `$02 POT` … `$0A POINTER`. So the
+job is 50 new one-byte keywords and 46 two-byte ones, 96 strings, about
+650 bytes of text.
+
+**The collision.** PETProject's script language already uses `$CC-$D8` for
+its own pseudo-keywords (`ASSEMBLE` `$CC`, `INCLUDE` `$CD`, `RUNPROG` `$CE`,
+`SCRATCH` `$CF`, `DELETE` `$D0`, `EXISTS` `$D1`, `RENAME` `$D2`, …), and all
+four components know about them: `modtok` and `modsct` tokenize them,
+`moddet` and `colorize` carry tables to `$D8`. Those values are `RGR`,
+`RCLR`, the `$CE` escape, `JOY`, `RDOT`, `DEC`, `HEX$` … in BASIC 7.0. On the
+C128 build the script runner is absent, so the C128 tables can simply be the
+BASIC 7.0 ones; if the runner is ever ported, the script pseudo-tokens should
+move into the unused `$FE` codes (`$20`, `$22`, `$27` and up) rather than
+overload real keywords.
+
+**Per component.**
+
+- `modtok` (tokenize on save): table is `[token][chars, last|$80]…`,
+  longest-first, one token byte per entry. Needs a two-byte entry form (a
+  prefix byte before the escape code) and the 96 new strings, ordered so
+  that longer keywords still win (`RESTORE` before `RESUME`? no — but
+  `GO` vs `GOTO`, `TRAP` vs `TRON`, `SCNCLR`, `COLLISION` vs `COLOR`,
+  `PAINT` vs `POINTER` all need the existing longest-first discipline). It
+  also writes the program header as `$0801`; a native C128 file should carry
+  `$1C01` and link pointers based on it (`BASIC_START` in `modtok.asm`
+  becomes a per-target constant). BASIC 7.0 relinks on `LOAD`, so this is
+  hygiene rather than a correctness bug.
+- `moddet` (detokenize on load): indexes `kwtab` by `token - $80` up to
+  `$D8`. Needs the list extended to `$FD`, and a branch for `$CE`/`$FE`
+  that reads the second byte and indexes the two escape lists. Bytes it
+  does not know are currently emitted raw, which is what happens to a real
+  BASIC 7.0 program today.
+- `colorize`: matches the editor's text against `kw_strtab`/`kw_len_tab` in
+  token order. Two-byte tokens never appear in text, so it just needs the
+  longer string list and a wider `$D9` limit. About 650 bytes more in the
+  editor image; the C128 image has 1.9 K left under `$4000`, so it fits,
+  but this is the component that will feel the common-RAM ceiling first.
+- `modren`: works on text, scanning for `GOTO`, `GOSUB` and `THEN`
+  (`try_goto_gosub`, `try_then`). BASIC 7.0 adds line-number arguments to
+  `TRAP n`, `RESUME n`, `ELSE n`, `GO TO n` (with the space), `RUN n`,
+  `RESTORE n`, and the second argument of `COLLISION type, n`. Each is one
+  more scanner in the same style.
+- Dialect switch: the module parameter block already carries `MOD_DIALECT`
+  (`$021D`), written as 0 by the editor and declared but unused by moddet.
+  That is the natural place to select BASIC 2.0 or 7.0 tables at run time,
+  or the tables can simply follow `TARGET_C128` at assembly time (fewer
+  bytes in each module, no runtime choice). Assembly-time selection is the
+  recommendation: a C128 build edits BASIC 7.0, a C64 build BASIC 2.0.
+
+**Effort.** Table work in four files plus the two-byte token path in modtok
+and moddet and seven small scanners in modren; testable end to end in VICE
+with the save/reload round trip already scripted. Days, not weeks, and
+independent of the script runner.
 
 ---
 
@@ -558,16 +846,17 @@ allocation throughout: the CBM archive's C128 RAM map,
 1. ~~**C128 KERNAL zero-page reservation list.**~~ ✅ **Resolved** — see
    [C128 zero-page map](#c128-zero-page-map-resolved). One residual empirical
    check is noted there.
-2. **Trampoline placement — reopened, and harder than first thought.** An
-   earlier revision of this document suggested putting the relocated
-   trampolines somewhere in page 3, on the reasoning that the C128's default
-   bottom common RAM is `$0000–$03FF` so anything below `$0400` is visible
-   from every bank. The visibility argument holds, but **page 3 is far more
-   crowded on the C128 than on the C64** — `$0334-$0349` editor indirect
-   vectors, `$034A-$034D` IRQ keyboard buffer, `$0354-$035D` tab-stop
-   bitmaps, `$0362-$0376` file tables, `$0380-$03BF` CHRGET, `$03C0-$03FF`
-   bank-relative fetch/poke. Only small gaps remain, and the C64's `$033C`
-   cassette buffer does not exist there as free space.
+2. **Trampoline placement — deferred with the script runner.** Only
+   `modscr`/`modscrh` use trampolines and neither builds for the C128, so
+   nothing in the shipped C128 build needs one. If the script runner is ever
+   ported, the analysis stands: an earlier revision suggested page 3, on the
+   reasoning that the C128's default bottom common RAM is `$0000–$03FF` so
+   anything below `$0400` is visible from every bank. The visibility argument
+   holds, but **page 3 is far more crowded on the C128 than on the C64** —
+   `$0334-$0349` editor indirect vectors, `$034A-$034D` IRQ keyboard buffer,
+   `$0354-$035D` tab-stop bitmaps, `$0362-$0376` file tables, `$0380-$03BF`
+   CHRGET, `$03C0-$03FF` bank-relative fetch/poke. Only small gaps remain, and
+   the C64's `$033C` cassette buffer does not exist there as free space.
 
    The likelier answer is the C128 cassette buffer at **`$0B00-$0BFF`** (256
    bytes, free when tape is unused) — but that is outside the default 1 K
@@ -576,17 +865,19 @@ allocation throughout: the CBM archive's C128 RAM map,
    confirming: that `$0B00` is genuinely free in our configuration, and the
    RCR setting.
 
-3. **MMU configuration register details** — the CR bit assignments tabulated
-   under [Banking](#mmu-configuration-register), and that `$0E` is the right
-   whole-session config value (RAM `$0000-$BFFF`, I/O, KERNAL ROM). The
-   consequence that matters — bits 4-5 covering `$C000-$FFFF` as one unit, and
-   therefore the `$C000` collision — follows directly from these, so confirm
-   before committing to the rehoming layout.
-4. **`RPTFLG` at `$028A`** (`editor.asm:33`) — confirm the address and that
+3. ~~**MMU configuration register details**~~ ✅ **Resolved in VICE** — `$0E`
+   runs the session (see [Banking](#mmu-configuration-register)); the bit
+   table is recorded in `c128.inc`.
+4. ~~**Function keys.**~~ ✅ **Resolved** — see [Function keys](#function-keys).
+5. ~~**`RPTFLG` at `$028A`**~~ ✅ **Resolved** — `$0A22` on the C128 (`c128.inc`), selected by target in `editor.asm`; the original note read: confirm the address and that
    `$80` still means "all keys repeat" on the C128.
-5. **The `$0200–$0222` boot / module parameter block** (`modules.asm:63`)
-   overlaps the C128 KERNAL input buffer. Interactive input uses `GETIN` so it
-   is likely safe, but `moddsk`'s drive-status reads go through `CHRIN`, which
-   does use that buffer.
-6. **C128 BASIC cold-start entry** to replace `jmp $E394`. `jmp ($FFFC)` is
-   the safe fallback.
+6. ~~**The `$0200–$0222` boot / module parameter block**~~ ✅ **Resolved in
+   VICE** — `$0200-$02A1` is BASIC 7.0's input buffer, not the KERNAL's; the
+   KERNAL's `CHRIN` from a serial channel does not touch it. `moddsk` lists
+   the directory and reads drive status correctly on the C128 build with the
+   block in place.
+7. ~~**C128 BASIC cold-start entry**~~ ✅ **Resolved** — the quit path restores
+   the F-key table, stores `$00` to `$FF00` and jumps to `$4000` (BASIC 7.0
+   cold start); VICE shows the BASIC 7.0 banner and `READY.` The reset vector
+   was rejected deliberately: a reset re-runs the disk boot sequence, which
+   would relaunch the editor once the disk carries a C128 boot sector.

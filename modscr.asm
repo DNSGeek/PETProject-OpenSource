@@ -89,21 +89,30 @@ IDE_START  = $0801
 IDE_LEN_LO = <($9FFF - $0801 + 1)
 IDE_LEN_HI = >($9FFF - $0801 + 1)
 
-; ---- Scratch ----
-; Address comes from zp.inc (see docs/c128-port-notes.md). The BASIC ABI
-; locations above (TXTTAB, VARTAB, MEMSIZ) are fixed by the ROM and are
-; deliberately NOT part of the relocatable pool.
-.include "zp.inc"
-
-TMP16      = ZP_SCRATCH+2  ; lo (hi=+3)
+; ---- Zero page ----
+; This module uses no pool scratch of its own. The BASIC ABI locations above
+; (TXTTAB, VARTAB, MEMSIZ) are fixed by the ROM and are deliberately NOT part
+; of the relocatable pool (see docs/c128-port-notes.md).
+;
+; It hands control to BASIC, which the C128 zero-page map (zp_c128.inc)
+; assumes never happens — refuse that build rather than assemble something
+; that collides at run time.
+.ifdef TARGET_C128
+    .error "modscr: the script runner is not part of the C128 port (see docs/c128-port-notes.md)"
+.endif
 
 ; Metadata fetch buffer (module RAM, reused after verify)
 META_BUF   = $B000
 
 ; ============================================================================
 
+; PRG load address comes from the linker config (MAIN start) and must
+; agree with layout.inc, which the module loader in modules.asm uses.
+.import __MAIN_START__
+.include "layout.inc"
+.assert __MAIN_START__ = MOD_HI_BASE, lderror, "modscr: linker config load address disagrees with layout.inc MOD_HI_BASE"
 .segment "LOADADDR"
-    .word $A000
+    .word __MAIN_START__
 
 .segment "CODE"
 

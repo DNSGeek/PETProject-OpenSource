@@ -13,13 +13,19 @@ MOD_BUF_HI       = $0215
 MOD_BUF_END_LO   = $021A
 MOD_BUF_END_HI   = $021B
 
-; Editor ZP — borrowed for pointer dereferences while module runs
-WORK_PTR         = $0013
-LPTR             = $0015
-ZP_GAP_START     = $0002
-ZP_GAP_END       = $0004
-ZP_CURSOR_ROW    = $0010
-ZP_CURSOR_COL    = $0011
+; Editor ZP — borrowed for pointer dereferences while module runs.
+; These are offsets into the editor's .zeropage block (editor.asm), whose
+; base comes from zp.inc so a relocation of that block moves them too.
+; editor.asm asserts at link time that its declaration order still puts
+; each symbol at exactly this offset.
+.include "zp.inc"
+
+WORK_PTR         = ZP_EDITOR + $11     ; = editor TXT_PTR
+LPTR             = ZP_EDITOR + $13     ; = editor LPTR
+ZP_GAP_START     = ZP_EDITOR + $00     ; = editor GAP_START
+ZP_GAP_END       = ZP_EDITOR + $02     ; = editor GAP_END
+ZP_CURSOR_ROW    = ZP_EDITOR + $0E     ; = editor CURSOR_ROW
+ZP_CURSOR_COL    = ZP_EDITOR + $0F     ; = editor CURSOR_COL
 
 ; Editor callbacks intentionally removed — hardcoded addresses shift on every
 ; recompile. Rendering is handled by do_search_replace after the module exits.
@@ -76,8 +82,13 @@ MSTAT_REPOSITION = $04
 JIFFY_LO         = $00A2
 
 ; =============================================================================
+; PRG load address comes from the linker config (MAIN start) and must
+; agree with layout.inc, which the module loader in modules.asm uses.
+.import __MAIN_START__
+.include "layout.inc"
+.assert __MAIN_START__ = MOD_LO_BASE, lderror, "modsfr: linker config load address disagrees with layout.inc MOD_LO_BASE"
 .segment "LOADADDR"
-    .word $C000
+    .word __MAIN_START__
 
 .segment "CODE"
 
@@ -588,7 +599,7 @@ sfr_replace_at_match:
     cpy sfr_repl_len
     beq @done
     lda sfr_repl_buf,y
-    sta (LPTR),y
+    buf_sta LPTR
     iny
     bne @wr
 @done:
@@ -661,8 +672,8 @@ sfr_fwd_copy:
     lda sfr_mv_cnt_hi
     beq @tail
 @full:
-    lda (WORK_PTR),y
-    sta (LPTR),y
+    buf_lda WORK_PTR
+    buf_sta LPTR
     iny
     bne @full
     inc WORK_PTR+1
@@ -674,8 +685,8 @@ sfr_fwd_copy:
     ldx sfr_mv_cnt_lo
     beq @done
 @tl:
-    lda (WORK_PTR),y
-    sta (LPTR),y
+    buf_lda WORK_PTR
+    buf_sta LPTR
     iny
     dex
     bne @tl
@@ -718,8 +729,8 @@ sfr_bwd_copy:
     dec LPTR+1
 :   dec LPTR
     ldy #0
-    lda (WORK_PTR),y
-    sta (LPTR),y
+    buf_lda WORK_PTR
+    buf_sta LPTR
     lda sfr_mv_cnt_lo
     bne :+
     dec sfr_mv_cnt_hi
@@ -767,7 +778,7 @@ sfr_vbyte:
     sta LPTR+1
 @load:
     ldy #0
-    lda (LPTR),y
+    buf_lda LPTR
     rts
 
 ; =============================================================================

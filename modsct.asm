@@ -110,6 +110,9 @@ META_VERSION    = 5   ; $01
 META_SIZE       = 6
 
 ; ---- ZP — same layout as modtok (no conflict between phases) ----
+.ifdef TARGET_C128
+    .error "modsct: the script tokenizer exists only for the script runner, which is not part of the C128 port"
+.endif
 ; Addresses come from zp.inc (see docs/c128-port-notes.md).
 .include "zp.inc"
 
@@ -162,8 +165,13 @@ BASIC_START   = $0801
 
 ; ============================================================================
 
+; PRG load address comes from the linker config (MAIN start) and must
+; agree with layout.inc, which the module loader in modules.asm uses.
+.import __MAIN_START__
+.include "layout.inc"
+.assert __MAIN_START__ = MOD_HI_BASE, lderror, "modsct: linker config load address disagrees with layout.inc MOD_HI_BASE"
 .segment "LOADADDR"
-    .word $A000
+    .word __MAIN_START__
 
 .segment "CODE"
 
@@ -1012,7 +1020,7 @@ load_and_tok_include:
     ; TMP16 = count; compute count * 14
     asl TMP16            ; ×2
     rol TMP16+1
-    ; save ×2 in $3C (reuse KW_TOKEN area momentarily — done with tokenize phase)
+    ; save ×2 in TMP16 (reuse scratch momentarily — done with tokenize phase)
     lda TMP16
     pha
     lda TMP16+1

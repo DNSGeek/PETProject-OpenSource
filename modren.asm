@@ -63,8 +63,13 @@ TMP2             = ZP_SCRATCH+2 ; number lo               (TMP2+1 = hi)
 TMP3             = ZP_SCRATCH+4 ; table ptr lo            (TMP3+1 = hi)
 
 ; ============================================================================
+; PRG load address comes from the linker config (MAIN start) and must
+; agree with layout.inc, which the module loader in modules.asm uses.
+.import __MAIN_START__
+.include "layout.inc"
+.assert __MAIN_START__ = MOD_LO_BASE, lderror, "modren: linker config load address disagrees with layout.inc MOD_LO_BASE"
 .segment "LOADADDR"
-    .word $C000
+    .word __MAIN_START__
 
 .segment "CODE"
 
@@ -81,23 +86,8 @@ modren_entry:
     cli
     rts
 :
-    ; Save the ZP_SCRATCH block
-    ldx #0
-@zpsave:
-    lda ZP_SCRATCH,x
-    sta ZP_SAVE,x
-    inx
-    cpx #ZP_SCRATCH_LEN
-    bne @zpsave
-    ; Save ZP_PTR2 / ZP_PTR3
-    lda ZP_PTR2
-    sta ZP_SAVE+6
-    lda ZP_PTR2+1
-    sta ZP_SAVE+7
-    lda ZP_PTR3
-    sta ZP_SAVE+8
-    lda ZP_PTR3+1
-    sta ZP_SAVE+9
+    ; Save the ZP_SCRATCH block and ZP_PTR2 / ZP_PTR3
+    zp_save ZP_SAVE
 
     ; Copy MOD parameters into local state
     lda MOD_BUF_LO
@@ -164,21 +154,7 @@ modren_entry:
     lda #SPIN_COLOR_A
     sta SPIN_CELL
 
-    ldx #0
-@zprestore:
-    lda ZP_SAVE,x
-    sta ZP_SCRATCH,x
-    inx
-    cpx #ZP_SCRATCH_LEN
-    bne @zprestore
-    lda ZP_SAVE+6
-    sta ZP_PTR2
-    lda ZP_SAVE+7
-    sta ZP_PTR2+1
-    lda ZP_SAVE+8
-    sta ZP_PTR3
-    lda ZP_SAVE+9
-    sta ZP_PTR3+1
+    zp_restore ZP_SAVE
 
     cli
     rts
@@ -206,7 +182,7 @@ pass1:
     bcs @skip
 
     ldy #0                      ; line number must be followed by a space
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #PET_SPACE
     bne @skip
 
@@ -396,8 +372,8 @@ setup_staging:
     dec TMP3+1
 :   dec TMP3
     ldy #0
-    lda (SRC_PTR),y
-    sta (TMP3),y
+    buf_lda SRC_PTR
+    buf_sta TMP3                ; staging lives in the buffer (BUF_END - content)
     lda TMP2
     bne :+
     dec TMP2+1
@@ -423,7 +399,7 @@ setup_staging:
 process_line:
     ; If line starts with a digit: parse, look up, write new number
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #PET_0
     bcc @body
     cmp #PET_9+1
@@ -452,7 +428,7 @@ process_body:
     bcs @eof
 @read:
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
 
     cmp #PET_CR
     bne @not_cr
@@ -471,7 +447,7 @@ process_body:
     lda REN_IN_STR
     beq @normal
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #PET_QUOTE
     bne @verbatim
     jsr emit_src_char
@@ -481,7 +457,7 @@ process_body:
 
 @normal:
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
 
     cmp #PET_QUOTE              ; opening quote
     bne @not_quote
@@ -519,12 +495,12 @@ process_body:
 ; ============================================================================
 try_goto_gosub:
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #$4F                    ; 'O'
     bne @no
 
     iny                         ; y=2
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #$54                    ; 'T' → GOTO?
     beq @try_goto
     cmp #$53                    ; 'S' → GOSUB?
@@ -532,15 +508,15 @@ try_goto_gosub:
 
     ; GOSUB: need U, B
     iny                         ; y=3
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #$55                    ; 'U'
     bne @no
     iny                         ; y=4
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #$42                    ; 'B'
     bne @no
     iny                         ; y=5 — must not be alpha (avoid GOSUBROUTINE)
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr is_alpha
     bcs @no
     lda #5
@@ -548,11 +524,11 @@ try_goto_gosub:
 
 @try_goto:
     iny                         ; y=3
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #$4F                    ; 'O'
     bne @no
     iny                         ; y=4 — must not be alpha
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr is_alpha
     bcs @no
     lda #4
@@ -570,19 +546,19 @@ try_goto_gosub:
 ; ============================================================================
 try_then:
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #$48                    ; 'H'
     bne @no
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #$45                    ; 'E'
     bne @no
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #$4E                    ; 'N'
     bne @no
     iny                         ; y=4 — must not be alpha
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr is_alpha
     bcs @no
     lda #4
@@ -599,11 +575,11 @@ try_then:
 ; ============================================================================
 try_rem:
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #$45                    ; 'E'
     bne @no
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #$4D                    ; 'M'
     bne @no
     lda #3
@@ -636,7 +612,7 @@ renumber_ref:
     bcs @done
 @peek:
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #PET_SPACE
     bne @not_sp
     jsr emit_src_char
@@ -659,8 +635,8 @@ copy_kw_only:
     tax
 @lp:
     ldy #0
-    lda (SRC_PTR),y
-    sta (DST_PTR),y
+    buf_lda SRC_PTR
+    buf_sta DST_PTR
     inc SRC_PTR
     bne :+
     inc SRC_PTR+1
@@ -676,8 +652,8 @@ copy_kw_only:
 ; ============================================================================
 emit_src_char:
     ldy #0
-    lda (SRC_PTR),y
-    sta (DST_PTR),y
+    buf_lda SRC_PTR
+    buf_sta DST_PTR
     inc SRC_PTR
     bne :+
     inc SRC_PTR+1
@@ -789,7 +765,7 @@ write_number:
     ora #$30
 @wr:
     ldy #0
-    sta (DST_PTR),y
+    buf_sta DST_PTR
     inc DST_PTR
     bne :+
     inc DST_PTR+1
@@ -803,7 +779,7 @@ write_number:
     lda TMP2
     ora #$30
     ldy #0
-    sta (DST_PTR),y
+    buf_sta DST_PTR
     inc DST_PTR
     bne :+
     inc DST_PTR+1
@@ -964,7 +940,7 @@ check_lineno_directive:
 
 cld_peek:
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     rts
 
 cld_adv:
@@ -1045,7 +1021,7 @@ skip_to_next_cr:
     jsr at_content_end
     bcs @d
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #PET_CR
     bne @nc
     jsr advance_src
@@ -1057,7 +1033,7 @@ skip_to_next_cr:
 
 parse_line_number:
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #PET_0
     bcc @nd
     cmp #PET_9+1
@@ -1069,7 +1045,7 @@ parse_line_number:
     jsr at_content_end
     bcs @ok
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #PET_0
     bcc @ok
     cmp #PET_9+1
@@ -1174,7 +1150,7 @@ store_entry:
 ; ============================================================================
 .segment "BSS"
 
-ZP_SAVE:         .res 10
+ZP_SAVE:         .res ZP_SAVE_LEN
 REN_BUF_LO:      .res 1
 REN_BUF_HI:      .res 1
 REN_GAP_LO:      .res 1

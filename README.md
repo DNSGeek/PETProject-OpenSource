@@ -63,7 +63,9 @@ no modern PC, no special hardware required.
 That's it — you're in the editor. Press `F8` to open the module picker, or start
 typing to write some BASIC.
 
-> 💡 **Tip:** Your experience will be much smoother with a fastloader cartridge.
+> 💡 **Tip:** On a C64, your experience will be much smoother with a fastloader
+> cartridge. A C128 with a 1571 or 1581 needs none: module loads use the
+> KERNAL's burst mode and everything else runs over the fast serial bus.
 
 ---
 
@@ -116,15 +118,32 @@ Search & replace (MODSFR) is available directly via `CTRL+F`.
 v2.19 or newer) and Python 3.
 
 ```bash
-# Build the editor, all modules, and the .d64 disk image
+# Build the editor, all modules, and the .d64 disk image (C64 + C128)
 bash make_petproject.sh
 ```
+
+The resulting `petproject.d64` works on both machines: a C64 (or a C128 in
+C64 mode) does `LOAD"*",8` and gets the C64 build; a C128 in native mode
+autoboots the C128 build from the disk's boot sector (or `RUN"PETPROJECT128"`).
 
 To build only the modules:
 
 ```bash
 bash build_modules.sh
 ```
+
+To build one machine's set alone (`TARGET=c64` writes a C64-only
+`petproject.d64`; `TARGET=c128` writes a bootable C128-only
+`build/c128/petproject_c128.d64`):
+
+```bash
+TARGET=c128 bash make_petproject.sh
+```
+
+The C128 build is native mode, 40 columns, with a 32 K editing buffer in RAM
+bank 1 (the C64 build has 24 K); the script runner is not part of it,
+everything else is. See `docs/c128-port-notes.md` for the memory map and
+status.
 
 To (re)create the disk image manually:
 
@@ -167,7 +186,11 @@ python3 make_disk.py --build-dir build --name petproject --id pp petproject.d64
 | `modscrh.asm` | `$C000`  | Script handler (stays resident during scripts) |
 
 **Linker configs:** `module.cfg` (default `$C000`), `modasm.cfg` (`$A000`),
-`moddis.cfg`, `modsfr.cfg`, `modscr.cfg`, `modsct.cfg`.
+`moddis.cfg`, `modsfr.cfg`, `modscr.cfg`, `modsct.cfg`. C128 target:
+`petproject_c128.cfg`, `module_c128.cfg`, `modsfr_c128.cfg`, `boot128.cfg`,
+with the per-target addresses in `layout.inc`, C128 hardware constants in
+`c128.inc`, zero-page maps in `zp.inc` / `zp_c64.inc` / `zp_c128.inc`, and the
+boot sector in `boot128.asm` (see `docs/c128-port-notes.md`).
 
 **Build tooling:** `make_petproject.sh` (full build), `build_modules.sh`
 (modules only), `make_disk.py` (creates the `.d64` image).
@@ -192,7 +215,9 @@ Security policy: [`SECURITY.md`](SECURITY.md).
 
 ## Tips
 
-- Use a **fastloader cartridge** for a much snappier experience.
+- On a C64, use a **fastloader cartridge** for a much snappier experience
+  (a C128 with a 1571/1581 is already fast: burst-mode module loads, fast
+  serial for file I/O, and the compute-only modules run at 2 MHz).
 - Keep the **program disk in drive 8**; point Settings (`F1`) at a separate data
   drive if you have one.
 - The scripting engine needs an **REU** for script tokenization and IDE snapshots.

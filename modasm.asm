@@ -19,16 +19,16 @@
 ;         Filename: editor prompts for output name via status bar before assembly.
 ;         PRG header: $01,$08 (or .org address if specified before any code).
 ;
-; Symbol table: $C000-$CFFF, 10 bytes/entry (8-char name + 2-byte value).
+; Symbol table: ASM_STATE+$60 .. ASM_STATE+$FFF, 10 bytes/entry (8-char name + 2-byte value).
 ;               Up to 409 symbols. Linear scan  -  fast enough for casual use.
 ;
 ; Error reporting: first error message written to ASM_ERR_MSG area,
 ;                  line number in ASM_ERR_LINE_LO/HI. MOD_STATUS=$01.
 ;
-; Zero page (saved/restored):
-;   $FB/$FC = SRC_PTR   walks source (gap-aware)
-;   $FD/$FE = unused (available)
-;   $3A-$3F = scratch
+; Zero page (saved/restored; addresses come from zp.inc):
+;   ZP_PTR2    = SRC_PTR   walks source (gap-aware)
+;   ZP_PTR3    = not used by modasm, but saved/restored with the pool
+;   ZP_SCRATCH = TMP/TMP2/TMP3
 ;
 ; State variables at $0200-$0257 (page 2, Kernal-safe zones):
 ;   $0200-$0211: before MOD_* param block  -  ZP_SAVE + core state
@@ -89,6 +89,10 @@ DEFAULT_COLOR = 14          ; light blue
 ; ---- ZP ----
 ; Addresses come from zp.inc (see docs/c128-port-notes.md).
 .include "zp.inc"
+.include "layout.inc"   ; MOD_LO_BASE / MOD_LO_SIZE for the ASM_STATE block
+.ifdef TARGET_C128
+.include "c128.inc"     ; MMU session config
+.endif
 
 SRC_PTR  = ZP_PTR2       ; lo (hi=+1)  -  source walker, gap-aware
 TMP      = ZP_SCRATCH+0  ; general scratch (hi=+1)
@@ -112,81 +116,87 @@ MODE_REL = 12
 
 ; ---- Assembler state (page 2, always RAM regardless of banking) ----
 
-ASM_PC_LO       = $C000   ; current program counter lo
-ASM_PC_HI       = $C001   ; current program counter hi
-ASM_PASS        = $C002   ; 0=pass1, 1=pass2
-ASM_SYM_LO      = $C003   ; symbol count lo
-ASM_SYM_HI      = $C004   ; symbol count hi
-ASM_LINE_LO     = $C005   ; current line number lo
-ASM_LINE_HI     = $C006   ; current line number hi
-ASM_ERR         = $C007   ; $FF = error encountered
-ASM_ERR_LINE_LO = $C008   ; line number of first error lo
-ASM_ERR_LINE_HI = $C009   ; line number of first error hi
-ASM_ERR_MSG     = $C00A   ; 20-byte error message (screen codes, zero-terminated)
-ASM_OUT_LA      = $C01E   ; logical file number for output
-ASM_OUT_OPEN    = $C01F   ; $FF = output file is open
-ASM_ORG_SET     = $C020   ; $FF = .org has been seen (affects PRG header)
-ASM_FNAME_LEN   = $C021   ; output filename length
-ASM_FNAME       = $C022   ; output filename (16 bytes)
+; All working state lives in a 4 K block at ASM_STATE (= MOD_LO_BASE from
+; layout.inc: $C000 on the C64, $9000 on the C128). The symbol table at
+; ASM_STATE+$60 with SYM_MAX entries of 10 bytes fills the block exactly.
+ASM_STATE       = MOD_LO_BASE
+ASM_PC_LO       = ASM_STATE + $00   ; current program counter lo
+ASM_PC_HI       = ASM_STATE + $01   ; current program counter hi
+ASM_PASS        = ASM_STATE + $02   ; 0=pass1, 1=pass2
+ASM_SYM_LO      = ASM_STATE + $03   ; symbol count lo
+ASM_SYM_HI      = ASM_STATE + $04   ; symbol count hi
+ASM_LINE_LO     = ASM_STATE + $05   ; current line number lo
+ASM_LINE_HI     = ASM_STATE + $06   ; current line number hi
+ASM_ERR         = ASM_STATE + $07   ; $FF = error encountered
+ASM_ERR_LINE_LO = ASM_STATE + $08   ; line number of first error lo
+ASM_ERR_LINE_HI = ASM_STATE + $09   ; line number of first error hi
+ASM_ERR_MSG     = ASM_STATE + $0A   ; 20-byte error message (screen codes, zero-terminated)
+ASM_OUT_LA      = ASM_STATE + $1E   ; logical file number for output
+ASM_OUT_OPEN    = ASM_STATE + $1F   ; $FF = output file is open
+ASM_ORG_SET     = ASM_STATE + $20   ; $FF = .org has been seen (affects PRG header)
+ASM_FNAME_LEN   = ASM_STATE + $21   ; output filename length
+ASM_FNAME       = ASM_STATE + $22   ; output filename (16 bytes)
 
 ; ---- ZP save area ----
-; 10 bytes: saves the 6-byte ZP_SCRATCH block plus ZP_PTR2/ZP_PTR3.
+; ZP_SAVE_LEN (10) bytes: the ZP_SCRATCH block plus ZP_PTR2/ZP_PTR3.
 ; (Not zero page itself — module scratch RAM above the $A000 image.)
-ZP_SAVE         = $C03A
+ZP_SAVE         = ASM_STATE + $3A
+.assert ZP_SAVE + ZP_SAVE_LEN <= ASM_MNEM, error, "modasm: ZP_SAVE overruns into ASM_MNEM"
 
 ; ---- Gap pointers (copied from params) ----
-ASM_GAP_S_LO    = $C032
-ASM_GAP_S_HI    = $C033
-ASM_GAP_E_LO    = $C034
-ASM_GAP_E_HI    = $C035
-ASM_BUF_LO      = $C036
-ASM_BUF_HI      = $C037
-ASM_END_LO      = $C038
-ASM_END_HI      = $C039
+ASM_GAP_S_LO    = ASM_STATE + $32
+ASM_GAP_S_HI    = ASM_STATE + $33
+ASM_GAP_E_LO    = ASM_STATE + $34
+ASM_GAP_E_HI    = ASM_STATE + $35
+ASM_BUF_LO      = ASM_STATE + $36
+ASM_BUF_HI      = ASM_STATE + $37
+ASM_END_LO      = ASM_STATE + $38
+ASM_END_HI      = ASM_STATE + $39
 
 ; ---- Scratch for mnemonic/operand parsing ----
-ASM_MNEM        = $C044   ; 4 bytes: current mnemonic/directive name
-ASM_MODE        = $C048   ; resolved addressing mode
-ASM_OPCODE      = $C049   ; resolved opcode byte
-ASM_VAL_LO      = $C04A   ; operand value lo
-ASM_VAL_HI      = $C04B   ; operand value hi
-ASM_INSTR_SIZE  = $C04C   ; total instruction size (1+operand bytes)
-ASM_LABEL       = $C04D   ; 8 bytes: current label (space-padded)
-ASM_YPEEK       = $C055   ; scratch: src_peek Y save (1 byte, at end of state block)
-ASM_OPC_PTR_LO  = $C056   ; saved opcode table pointer lo (preserved across parse_operand)
-ASM_OPC_PTR_HI  = $C057   ; saved opcode table pointer hi
+ASM_MNEM        = ASM_STATE + $44   ; 4 bytes: current mnemonic/directive name
+ASM_MODE        = ASM_STATE + $48   ; resolved addressing mode
+ASM_OPCODE      = ASM_STATE + $49   ; resolved opcode byte
+ASM_VAL_LO      = ASM_STATE + $4A   ; operand value lo
+ASM_VAL_HI      = ASM_STATE + $4B   ; operand value hi
+ASM_INSTR_SIZE  = ASM_STATE + $4C   ; total instruction size (1+operand bytes)
+ASM_LABEL       = ASM_STATE + $4D   ; 8 bytes: current label (space-padded)
+ASM_YPEEK       = ASM_STATE + $55   ; scratch: src_peek Y save (1 byte, at end of state block)
+ASM_OPC_PTR_LO  = ASM_STATE + $56   ; saved opcode table pointer lo (preserved across parse_operand)
+ASM_OPC_PTR_HI  = ASM_STATE + $57   ; saved opcode table pointer hi
 
 ; FIX (load address): PRG load address = address of first .org/.* seen, or $0801.
 ; Stored here during pass 1; used by open_output for the PRG header.
-; Lives in the gap between ASM_OPC_PTR_HI ($C057) and SYM_TABLE ($C060).
-ASM_LOAD_LO     = $C058   ; PRG load address lo
-ASM_LOAD_HI     = $C059   ; PRG load address hi
+; Lives in the gap between ASM_OPC_PTR_HI (+$57) and SYM_TABLE (+$60).
+ASM_LOAD_LO     = ASM_STATE + $58   ; PRG load address lo
+ASM_LOAD_HI     = ASM_STATE + $59   ; PRG load address hi
 
 ; Activity spinner — same corner cell and toggle mechanic as MODDIS.
-ASM_SPINNER     = $C05A   ; 8-bit line counter; every 16 lines → color flip
-ASM_SPIN_IDX    = $C05B   ; current color value written to SPIN_CELL
+ASM_SPINNER     = ASM_STATE + $5A   ; 8-bit line counter; every 16 lines → color flip
+ASM_SPIN_IDX    = ASM_STATE + $5B   ; current color value written to SPIN_CELL
 
 ; parse_decimal ×10 scratch.  Deliberately NOT TMP2: parse_expr saves the
 ; base of a "label+N" / "label-N" expression in TMP2 across parse_number,
 ; so parse_decimal must not touch it.
-ASM_MUL_LO      = $C05C   ; ×10 partial (value*2) lo
-ASM_MUL_HI      = $C05D   ; ×10 partial (value*2) hi
+ASM_MUL_LO      = ASM_STATE + $5C   ; ×10 partial (value*2) lo
+ASM_MUL_HI      = ASM_STATE + $5D   ; ×10 partial (value*2) hi
 
 ; End-of-pass-1 PC, for the pass-2 phase check.  If the two passes end at
 ; different PCs (e.g. a forward reference sized as 16-bit in pass 1 that
 ; resolved to zero page in pass 2), the emitted PRG is silently misaligned
 ; from the point of divergence on — report PHASE ERROR instead.
-ASM_P1END_LO    = $C05E
-ASM_P1END_HI    = $C05F
+ASM_P1END_LO    = ASM_STATE + $5E
+ASM_P1END_HI    = ASM_STATE + $5F
 
 SPIN_CELL       = $D800   ; color RAM col 0, row 0 (top-left corner)
 SPIN_COLOR_A    = $01     ; white
 SPIN_COLOR_B    = $00     ; black
 
 ; ---- Symbol table ----
-SYM_TABLE       = $C060   ; 10 bytes/entry: 8-char name + 2-byte value
+SYM_TABLE       = ASM_STATE + $60   ; 10 bytes/entry: 8-char name + 2-byte value
 SYM_ENTRY_SIZE  = 10
 SYM_MAX         = 400
+.assert SYM_TABLE + SYM_MAX * 10 <= MOD_LO_BASE + MOD_LO_SIZE, error, "modasm: symbol table overruns the MOD_LO region"
 
 ; ---- Output file ----
 ASM_OUT_LA_VAL  = 4       ; logical file 4 for output
@@ -249,8 +259,13 @@ INC_LFN_BASE    = 5       ; LFN for depth-1 include; depth-N uses LFN (INC_LFN_B
 ; Module entry point
 ; ============================================================================
 
+; PRG load address comes from the linker config (MAIN start) and must
+; agree with layout.inc, which the module loader in modules.asm uses.
+.import __MAIN_START__
+.include "layout.inc"
+.assert __MAIN_START__ = MOD_HI_BASE, lderror, "modasm: linker config load address disagrees with layout.inc MOD_HI_BASE"
 .segment "LOADADDR"
-    .word $A000
+    .word __MAIN_START__
 
 .segment "CODE"
 
@@ -261,39 +276,32 @@ INC_LFN_BASE    = 5       ; LFN for depth-1 include; depth-N uses LFN (INC_LFN_B
 ; ============================================================================
 
 assemble:
-    ; Disable IRQ for the duration of assembly.
-    ; The C64 Kernal IRQ handler uses $FB/$FC as a scratch pointer for
-    ; cursor blink, which would corrupt SRC_PTR mid-assembly.
+    ; Disable IRQ for the duration of assembly. This is a precaution, not a
+    ; zero-page requirement: the C64 Kernal IRQ handler does not touch the
+    ; module pool (see zp_c64.inc) — moddet/modtok run on the same pointer
+    ; bytes with IRQs enabled.
     sei
 
-    ; Ensure $01=$36 (BASIC ROM out, Kernal+I/O in, RAM at $A000-$BFFF visible).
+    ; Ensure the memory map we need: Kernal+I/O in, RAM at $A000-$BFFF visible
+    ; (C64: $01=$36, BASIC ROM out; C128: the session config in the MMU).
     ; Do this FIRST before touching any state  -  if caller failed to set banking,
     ; our code here would be unreadable (BASIC ROM at $A000). But since we're
     ; already executing (caller's JMP got us here), banking must be at least
     ; partially working. Belt-and-suspenders: force it explicitly.
+.ifdef TARGET_C128
+    lda #C128_CFG_SESSION
+    sta C128_MMU_CR
+.else
     ; Must set $00 first to make bits 0-2 outputs, then write $01.
     lda $00
     ora #$07
     sta $00
     lda #$36
     sta $01
+.endif
 
     ; Save ZP
-    ldx #0
-@zpsave:
-    lda ZP_SCRATCH,x
-    sta ZP_SAVE,x
-    inx
-    cpx #ZP_SCRATCH_LEN
-    bne @zpsave
-    lda ZP_PTR2
-    sta ZP_SAVE+6
-    lda ZP_PTR2+1
-    sta ZP_SAVE+7
-    lda ZP_PTR3
-    sta ZP_SAVE+8
-    lda ZP_PTR3+1
-    sta ZP_SAVE+9
+    zp_save ZP_SAVE
 
     ; Copy gap/buffer params
     lda MOD_GAP_START_LO
@@ -455,21 +463,7 @@ assemble:
     ; Restoring BASIC ROM ($01=$37) while executing here would immediately
     ; put BASIC ROM under the CPU, causing a JAM on the very next fetch.
     ; modules.asm restores $01=$37 after our RTS returns to it.
-    ldx #0
-@zprest:
-    lda ZP_SAVE,x
-    sta ZP_SCRATCH,x
-    inx
-    cpx #ZP_SCRATCH_LEN
-    bne @zprest
-    lda ZP_SAVE+6
-    sta ZP_PTR2
-    lda ZP_SAVE+7
-    sta ZP_PTR2+1
-    lda ZP_SAVE+8
-    sta ZP_PTR3
-    lda ZP_SAVE+9
-    sta ZP_PTR3+1
+    zp_restore ZP_SAVE
     cli                         ; re-enable IRQ before returning
     rts
 
@@ -1877,7 +1871,7 @@ parse_directive:
     ; OPEN failed (device not present, too many files, ...).  Release the
     ; LFN in case OPEN half-registered it, restore the output channel,
     ; and report.
-    lda TMP3                    ; LFN (still intact — Kernal leaves $3E alone)
+    lda TMP3                    ; LFN (still intact — Kernal leaves ZP_SCRATCH alone)
     jsr CLOSE
     jsr resume_output
     jsr set_err_io
@@ -2183,7 +2177,7 @@ src_peek:
     bcs @at_end
     sty ASM_YPEEK               ; save Y (dedicated scratch, never shared)
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     ldy ASM_YPEEK               ; restore Y — NOTE: this clobbers Z flag!
     ora #0                      ; re-assert Z based on A (Z=1 iff A=0)
     rts
@@ -2194,7 +2188,7 @@ src_peek:
 @file_peek:
     sty ASM_YPEEK               ; same Y-preservation contract as above
     ldy #0
-    lda (SRC_PTR),y
+    lda (SRC_PTR),y             ; LINE_BUF is module RAM, not the buffer: native on every target
     ldy ASM_YPEEK
     ora #0                      ; re-assert Z based on A
     rts

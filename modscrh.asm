@@ -141,9 +141,19 @@ VEC_IGONE   = $0308
 ; NOTE: the BASIC ABI locations this module also uses (TXTTAB, VARTAB,
 ; VARPNT, BASIC_TXTPTR, and AYINT's $14/$15 output) are fixed by the ROM and
 ; are deliberately NOT part of the relocatable pool.
+;
+; This module runs INSIDE the BASIC interpreter loop, so it is only valid on
+; a target where the pool lies outside BASIC's own zero page. The C128 map
+; (zp_c128.inc) claims BASIC's region on the premise that BASIC is never
+; called, which this module violates — refuse that build rather than
+; assemble something that collides at run time.
+.ifdef TARGET_C128
+    .error "modscrh: the script runner is not part of the C128 port (see docs/c128-port-notes.md)"
+.endif
 .include "zp.inc"
 
-HND_TMP     = ZP_SCRATCH+2  ; lo (hi=+3) — scratch pointer (no conflict during script)
+HND_TMP     = ZP_SCRATCH+2  ; lo (hi=+3) — scratch pointer; BASIC 2.0 does not
+                            ; touch $3C/$3D while a program runs (C64 map)
 
 ; Module status
 MOD_STATUS  = $021E
@@ -165,8 +175,13 @@ MOD_DRIVE        = $021C
 
 ; ============================================================================
 
+; PRG load address comes from the linker config (MAIN start) and must
+; agree with layout.inc, which the module loader in modules.asm uses.
+.import __MAIN_START__
+.include "layout.inc"
+.assert __MAIN_START__ = MOD_LO_BASE, lderror, "modscrh: linker config load address disagrees with layout.inc MOD_LO_BASE"
 .segment "LOADADDR"
-    .word $C000
+    .word __MAIN_START__
 
 .segment "CODE"
 
@@ -366,7 +381,7 @@ hnd_error:
     txs
 
     ; Walk the BASIC program looking for the target line number.
-    ; Use HND_TMP as the scan pointer (ZP $3C/$3D).
+    ; Use HND_TMP as the scan pointer (ZP_SCRATCH+2/+3).
     lda TXTTAB
     sta HND_TMP
     lda TXTTAB+1

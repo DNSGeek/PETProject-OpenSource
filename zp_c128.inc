@@ -19,9 +19,14 @@
 ;   $FF      BASIC scratch
 ;
 ; Five free bytes is nowhere near the 41 PETProject needs, so the port takes
-; the other route: BASIC is banked out for the whole session and never called,
-; which makes the entire $02-$8F region available. 142 bytes for a 41-byte
-; requirement — 101 bytes of headroom.
+; the other route: BASIC is banked out for the whole session and never
+; called, which makes the entire $02-$8F region available. 142 bytes for a
+; 41-byte requirement — 101 bytes of headroom.
+;
+; That premise EXCLUDES the script runner (modscr / modscrh), which jumps
+; into BASIC and runs handlers inside the interpreter loop — BASIC 7.0 would
+; own $02-$8F while they run. Both modules refuse to assemble under
+; TARGET_C128 for that reason; see docs/c128-port-notes.md ("Script runner").
 ;
 ; The reason this is safe rather than merely convenient: the editor issues no
 ; sei/cli of its own and depends on the default KERNAL IRQ throughout (all 20
@@ -54,31 +59,25 @@
 ;   * The two tiers are now CONTIGUOUS as well as disjoint. That was the goal
 ;     stated in docs/c128-port-notes.md: it makes non-overlap obvious rather
 ;     than incidental, and it clears the way to retire the KW_TOKEN alias in
-;     editor.asm by giving colorize a byte of its own.
+;     editor.asm by giving colorize a byte of its own. Doing so means growing
+;     ZP_EDITOR_LEN (and petproject.cfg) AND shifting the pool up; zp.inc's
+;     disjointness asserts and editor.asm's link-time check fail the build
+;     if only one of those moves.
 ;
 ; ---------------------------------------------------------------------------
-; STILL TO CONFIRM ON HARDWARE / IN VICE
+; CONFIRMED ON HARDWARE
 ; ---------------------------------------------------------------------------
 ; The reasoning above comes from a static allocation map, which documents who
-; OWNS each byte, not empirically what the ROM writes. Before trusting this in
-; anger, verify on a running C128 that nothing disturbs $02-$2A across a long
-; editing session with disk I/O — the cheap check is a poisoned-pattern test:
-; fill $02-$2A with a known pattern, run the IDE, and confirm only PETProject's
-; own writes appear.
+; OWNS each byte, not empirically what the ROM writes. It has held up: the
+; C128 build runs on a real C128 with editing, module loads and disk I/O
+; (September 2026). If this map ever changes, re-check with a poisoned-pattern
+; test: fill $02-$2A with a known pattern, run the IDE, and confirm only
+; PETProject's own writes appear.
 ; ============================================================================
 
-ZP_SCRATCH      = $1C
-ZP_SCRATCH_LEN  = 6
+ZP_EDITOR       = $02   ; must match petproject.cfg  ZP: start
+ZP_EDITOR_LEN   = $1A   ; must match petproject.cfg  ZP: size
 
-ZP_PTRS         = $22
-ZP_PTRS_LEN     = 8
-
-ZP_OVFLAG       = $2A
-
-; Guard against Tier 2 colliding with the editor's Tier 1 block. Tier 1 is
-; placed by the linker, so this is the assembly-time half of that check: it
-; pins the assumption that Tier 1 ends at $1B. The link-time half (importing
-; __ZP_START__ / __ZP_SIZE__ and asserting with lderror) is described in
-; docs/c128-port-notes.md and is still to be added.
-C128_TIER1_END  = $1B
-.assert ZP_SCRATCH > C128_TIER1_END, error, "zp_c128.inc: ZP_SCRATCH overlaps the editor's zeropage block"
+ZP_SCRATCH      = ZP_EDITOR + ZP_EDITOR_LEN     ; $1C
+ZP_PTRS         = ZP_SCRATCH + 6                ; $22
+ZP_OVFLAG       = ZP_PTRS + 8                   ; $2A

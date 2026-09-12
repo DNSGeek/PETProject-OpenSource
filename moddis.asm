@@ -31,7 +31,8 @@
 ; work_buf+0 directly, the same base SRC_PTR reads from - since output runs
 ; ~15-30x longer than the source bytes it's decoded from, that overwrote
 ; unread input within the first instruction, every run, on every program.)
-; ZP usage: $FB/$FC = SRC_PTR, $3A-$3F = scratch (saved/restored).
+; ZP usage: ZP_PTR2 = SRC_PTR, ZP_PTR3 = DST_PTR, ZP_SCRATCH = scratch
+; (saved/restored; addresses come from zp.inc).
 ;
 ; Disassembler state (ZP_SAVE, DIS_PC_LO, etc.) is declared via .res at the
 ; very end of this file, AFTER all code and tables, so its address is always
@@ -105,8 +106,13 @@ MODE_IZY         = 11
 MODE_REL         = 12
 
 ; ============================================================================
+; PRG load address comes from the linker config (MAIN start) and must
+; agree with layout.inc, which the module loader in modules.asm uses.
+.import __MAIN_START__
+.include "layout.inc"
+.assert __MAIN_START__ = MOD_HI_BASE, lderror, "moddis: linker config load address disagrees with layout.inc MOD_HI_BASE"
 .segment "LOADADDR"
-    .word $A000
+    .word __MAIN_START__
 
 .segment "CODE"
 
@@ -117,8 +123,8 @@ MODE_REL         = 12
 ; ============================================================================
 
 disassemble:
-    ; Disable IRQ immediately. The Kernal IRQ handler uses $FB/$FC as a scratch
-    ; pointer for cursor blink — it would corrupt SRC_PTR mid-disassembly.
+    ; Disable IRQ immediately. A precaution, not a zero-page requirement: the
+    ; C64 Kernal IRQ handler does not touch the module pool (see zp_c64.inc).
     sei
 
     ; Verify magic
@@ -129,21 +135,7 @@ disassemble:
     rts                         ; no magic - silent return
 :
     ; Save ZP
-    ldx #0
-@zpsave:
-    lda ZP_SCRATCH,x
-    sta ZP_SAVE,x
-    inx
-    cpx #ZP_SCRATCH_LEN
-    bne @zpsave
-    lda ZP_PTR2
-    sta ZP_SAVE+6
-    lda ZP_PTR2+1
-    sta ZP_SAVE+7
-    lda ZP_PTR3
-    sta ZP_SAVE+8
-    lda ZP_PTR3+1
-    sta ZP_SAVE+9
+    zp_save ZP_SAVE
 
     ; Copy params
     lda MOD_BUF_LO
@@ -169,10 +161,10 @@ disassemble:
 
     ; Read 2-byte PRG load address from first two bytes
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta DIS_PC_LO
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta DIS_PC_HI
 
     ; Advance SRC_PTR past the 2-byte header
@@ -254,7 +246,7 @@ disassemble:
 
     ; Fetch opcode
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta TMP                     ; TMP = opcode
 
     ; Look up mnemonic index and mode
@@ -321,21 +313,7 @@ disassemble:
     jsr set_new_end
 
     ; Restore ZP
-    ldx #0
-@zprestore:
-    lda ZP_SAVE,x
-    sta ZP_SCRATCH,x
-    inx
-    cpx #ZP_SCRATCH_LEN
-    bne @zprestore
-    lda ZP_SAVE+6
-    sta ZP_PTR2
-    lda ZP_SAVE+7
-    sta ZP_PTR2+1
-    lda ZP_SAVE+8
-    sta ZP_PTR3
-    lda ZP_SAVE+9
-    sta ZP_PTR3+1
+    zp_restore ZP_SAVE
 
     ; Report success
     lda #$02
@@ -450,7 +428,7 @@ emit_line:
 @op_imm:
     ; immediate: "#$XX   " (7 chars)
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$23                    ; '#'
     jsr emit_dst
@@ -467,7 +445,7 @@ emit_line:
 @op_zp:
     ; zero page: "$XX    " (7 chars)
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$24                    ; '$'
     jsr emit_dst
@@ -483,7 +461,7 @@ emit_line:
 @op_zpx:
     ; zero page,X: "$XX,X  " (7 chars)
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$24
     jsr emit_dst
@@ -501,7 +479,7 @@ emit_line:
 @op_zpy:
     ; zero page,Y: "$XX,Y  " (7 chars)
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$24
     jsr emit_dst
@@ -519,10 +497,10 @@ emit_line:
 @op_abs:
     ; absolute: "$XXXX  " (7 chars)
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta TMP+1                   ; save lo (reuse, mnem_idx no longer needed)
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax                         ; hi
     lda #$24
     jsr emit_dst
@@ -538,10 +516,10 @@ emit_line:
 @op_abx:
     ; absolute,X: "$XXXX,X"
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta TMP+1
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$24
     jsr emit_dst
@@ -558,10 +536,10 @@ emit_line:
 @op_aby:
     ; absolute,Y: "$XXXX,Y"
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta TMP+1
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$24
     jsr emit_dst
@@ -578,10 +556,10 @@ emit_line:
 @op_ind:
     ; indirect: "($XXXX)"
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta TMP+1
     iny
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$28                    ; '('
     jsr emit_dst
@@ -598,7 +576,7 @@ emit_line:
 @op_izx:
     ; (indirect,X): "($XX,X)"
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$28
     jsr emit_dst
@@ -617,7 +595,7 @@ emit_line:
 @op_izy:
     ; (indirect),Y: "($XX),Y"
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     tax
     lda #$28
     jsr emit_dst
@@ -635,7 +613,7 @@ emit_line:
 
 @op_rel:
     ldy #1
-    lda (SRC_PTR),y             ; signed offset
+    buf_lda SRC_PTR             ; signed offset
     sta TMP+1                   ; save offset
     ; target = PC + 2 + signed_offset
     lda DIS_PC_LO
@@ -693,7 +671,7 @@ emit_line:
     ; so the PETSCII hint column lands in the same place on every line,
     ; no matter how many bytes this instruction actually has.
     ldy #0
-    lda (SRC_PTR),y             ; opcode
+    buf_lda SRC_PTR             ; opcode
     jsr emit_hex_byte
     lda TMP3+1                  ; size
     cmp #1
@@ -701,7 +679,7 @@ emit_line:
     lda #$20
     jsr emit_dst
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr emit_hex_byte
     lda TMP3+1
     cmp #2
@@ -709,7 +687,7 @@ emit_line:
     lda #$20
     jsr emit_dst
     ldy #2
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr emit_hex_byte
     jmp @emit_cr
 @pad_size1:
@@ -747,7 +725,7 @@ emit_illegal:
     sta TMP3+1
 
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta TMP                     ; opcode byte
 
     ; "    .BYTE $XX   ;XXXX:XX\r" — semicolon at column 16
@@ -879,8 +857,8 @@ relocate_output:
     bcs @copy_done
 @copy_one:
     ldy #0
-    lda (SRC_PTR),y
-    sta (DST_PTR),y
+    buf_lda SRC_PTR
+    buf_sta DST_PTR
     inc SRC_PTR
     bne :+
     inc SRC_PTR+1
@@ -943,7 +921,7 @@ emit_dst:
     bcs @emit_discard           ; TMP3 >= work_buf_end hi → past end
     pha
     ldy #0
-    sta (DST_PTR),y
+    buf_sta DST_PTR
     inc DST_PTR
     bne :+
     inc DST_PTR+1
@@ -967,7 +945,7 @@ emit_petscii_hint:
     lda #$7C                    ; '|'
     jsr emit_dst
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr emit_petscii_char
     lda TMP3+1
     cmp #1
@@ -978,7 +956,7 @@ emit_petscii_hint:
     jmp @hint_close
 @hint_byte2:
     ldy #1
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr emit_petscii_char
     lda TMP3+1
     cmp #2
@@ -988,7 +966,7 @@ emit_petscii_hint:
     jmp @hint_close
 @hint_byte3:
     ldy #2
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr emit_petscii_char
 @hint_close:
     lda #$7C                    ; '|'
@@ -1125,7 +1103,7 @@ mnem_strs:
 ; TXS/TYA corruption bug this file used to have.
 ; ============================================================================
 
-ZP_SAVE:          .res 10         ; saves ZP_SCRATCH (6) + ZP_PTR2/ZP_PTR3 (4)
+ZP_SAVE:          .res ZP_SAVE_LEN ; saves ZP_SCRATCH + ZP_PTR2/ZP_PTR3
 DIS_PC_LO:        .res 1          ; current PC lo
 DIS_PC_HI:        .res 1          ; current PC hi
 DIS_SRC_END_LO:   .res 1          ; end of source binary lo (= GAP_START)

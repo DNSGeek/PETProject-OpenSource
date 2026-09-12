@@ -10,6 +10,13 @@ Usage:
 All PRG files found in --build-dir (editor.prg and all mod*.prg files) are
 added automatically.  Pass --mega65 to build a MEGA65 image (editor_m65.prg
 replaces editor.prg; modules are omitted).
+
+C128: --c128-build-dir adds the C128 build (PETPROJECT128, MODASM128, ...)
+alongside, or instead of, the C64 one, and --boot-sector writes a 256-byte
+C128 boot sector (boot128.bin, assembled from boot128.asm) to track 1 sector 0
+so a C128 autoboots into it.  One disk carries both builds: a C64 does
+LOAD"*",8 and gets PETPROJECT; a C128 boots the sector, which loads
+PETPROJECT128.
 """
 
 import argparse
@@ -107,6 +114,26 @@ class D64:
 
         self._init_bam()
         self._init_dir()
+
+    # ── C128 boot sector ────────────────────────────────────────────────────
+
+    def set_boot_sector(self, sector):
+        """Write a C128 boot sector to track 1 sector 0.
+
+        Must be called before any file is added: the allocator starts at
+        track 1 sector 0, so the sector is claimed in the BAM here and the
+        cursor moved past it.  ``sector`` is the raw 256-byte image the
+        C128 KERNAL reads on reset (it must start with "CBM").
+        """
+        if len(sector) != 256:
+            raise ValueError(f"boot sector must be 256 bytes, got {len(sector)}")
+        if sector[:3] != b"CBM":
+            raise ValueError('boot sector must start with "CBM"')
+        if (self._alloc_track, self._alloc_sector) != (1, 0):
+            raise RuntimeError("set_boot_sector must be called before adding files")
+        self._bam_alloc(1, 0)
+        self._alloc_sector = 1
+        self._wr(1, 0, 0, sector)
 
     # ── internal helpers ────────────────────────────────────────────────────
 
@@ -315,6 +342,15 @@ MODULES = [
     ("modscrh.prg", "MODSCRH"),
 ]
 
+# The C128 build's names carry a "128" suffix (modules.asm adds it under
+# TARGET_C128) so both sets can share one disk.  No script runner on the C128.
+C128_EDITOR_NAME = "PETPROJECT128"
+MODULES_C128 = [
+    (fname, diskname + "128")
+    for fname, diskname in MODULES
+    if fname not in ("modsct.prg", "modscr.prg", "modscrh.prg")
+]
+
 
 def main():
     ap = argparse.ArgumentParser(
@@ -338,9 +374,26 @@ def main():
         "--name", default="petproject", help="Disk name (default: petproject)"
     )
     ap.add_argument("--id", default="pp", help="Disk ID   (default: pp)")
+    ap.add_argument(
+        "--c128-build-dir",
+        default=None,
+        help="Directory holding the C128 build (TARGET=c128); its editor and "
+        "modules are added as PETPROJECT128, MODASM128, ...",
+    )
+    ap.add_argument(
+        "--boot-sector",
+        default=None,
+        help="256-byte C128 boot sector image (build/c128/boot128.bin) to "
+        "write at track 1 sector 0 so a C128 autoboots the disk.",
+    )
     args = ap.parse_args()
 
     disk = D64(name=args.name, disk_id=args.id)
+
+    if args.boot_sector:
+        with open(args.boot_sector, "rb") as f:
+            disk.set_boot_sector(f.read())
+        print(f"Boot sector: {args.boot_sector} → track 1 sector 0")
 
     def add(label, path, diskname):
         if not os.path.exists(path):
@@ -363,6 +416,17 @@ def main():
         print()
         for fname, diskname in MODULES:
             add(fname, os.path.join(args.build_dir, fname), diskname)
+
+    # ── C128 build, after the C64 files so LOAD"*" on a C64 still boots ─────
+    if args.c128_build_dir:
+        print()
+        add(
+            "editor.prg (C128)",
+            os.path.join(args.c128_build_dir, "editor.prg"),
+            C128_EDITOR_NAME,
+        )
+        for fname, diskname in MODULES_C128:
+            add(fname, os.path.join(args.c128_build_dir, fname), diskname)
 
     disk.write(args.output)
     print(f"\nWrote {args.output}")

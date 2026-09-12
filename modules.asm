@@ -80,7 +80,8 @@ MOD_LOAD_HI      = $0222             ; load address for this module (hi)
 MOD_SAVED_SP     = $0227             ; SP saved across module call (avoids stack overflow)
 
 MOD_MAGIC_VAL    = $4D
-MOD_LOAD_ADDR    = $C000
+.include "layout.inc"
+MOD_LOAD_ADDR    = MOD_LO_BASE       ; default module load address (layout.inc)
 MOD_LA           = 3                 ; logical file number for module load
 
 ; Popup geometry
@@ -108,6 +109,20 @@ MOD_IDX_MODASM   = 0
 
 ; 6-byte PETSCII filenames (exact, no padding needed for SETNAM).
 ; MODSCRH is the only 7-byte name; mod_fname_lens carries the per-entry length.
+; On the C128 every name carries a "128" suffix (MODASM128, ...): the C128
+; modules load at different addresses, and one disk carries both sets (see
+; make_disk.py and docs/c128-port-notes.md, Phase 3).
+.ifdef TARGET_C128
+MOD_SUFFIX_LEN = 3
+.else
+MOD_SUFFIX_LEN = 0
+.endif
+.macro mod_name bytes
+    .byte bytes
+.ifdef TARGET_C128
+    .byte $31,$32,$38               ; "128"
+.endif
+.endmacro
 ;
 ; Index   Name      Visibility / invoker
 ;   0     MODASM    visible (F8 popup row 0) — assemble
@@ -123,25 +138,35 @@ MOD_IDX_MODASM   = 0
 ;
 ; F8 popup row 4 is "RUN SCRIPT" which routes to do_run_script, not a single
 ; module load — so it doesn't appear in this table.
-mod_fname_lens: .byte 6, 6, 6, 6, 6, 6, 6, 6, 7, 6
+mod_fname_lens: .byte 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN, 7+MOD_SUFFIX_LEN, 6+MOD_SUFFIX_LEN
 
-mod_fname_0: .byte $4D,$4F,$44,$41,$53,$4D  ; MODASM
-mod_fname_1: .byte $4D,$4F,$44,$44,$49,$53  ; MODDIS
-mod_fname_2: .byte $4D,$4F,$44,$52,$45,$4E  ; MODREN
-mod_fname_3: .byte $4D,$4F,$44,$44,$53,$4B  ; MODDSK
-mod_fname_4: .byte $4D,$4F,$44,$44,$45,$54  ; MODDET
-mod_fname_5: .byte $4D,$4F,$44,$54,$4F,$4B  ; MODTOK
-mod_fname_6: .byte $4D,$4F,$44,$53,$46,$52  ; MODSFR
-mod_fname_7: .byte $4D,$4F,$44,$53,$43,$54  ; MODSCT
-mod_fname_8: .byte $4D,$4F,$44,$53,$43,$52,$48  ; MODSCRH (7 chars)
-mod_fname_9: .byte $4D,$4F,$44,$53,$43,$52  ; MODSCR
+mod_fname_0: mod_name {$4D,$4F,$44,$41,$53,$4D}  ; MODASM
+mod_fname_1: mod_name {$4D,$4F,$44,$44,$49,$53}  ; MODDIS
+mod_fname_2: mod_name {$4D,$4F,$44,$52,$45,$4E}  ; MODREN
+mod_fname_3: mod_name {$4D,$4F,$44,$44,$53,$4B}  ; MODDSK
+mod_fname_4: mod_name {$4D,$4F,$44,$44,$45,$54}  ; MODDET
+mod_fname_5: mod_name {$4D,$4F,$44,$54,$4F,$4B}  ; MODTOK
+mod_fname_6: mod_name {$4D,$4F,$44,$53,$46,$52}  ; MODSFR
+mod_fname_7: mod_name {$4D,$4F,$44,$53,$43,$54}  ; MODSCT
+mod_fname_8: mod_name {$4D,$4F,$44,$53,$43,$52,$48}  ; MODSCRH (7 chars)
+mod_fname_9: mod_name {$4D,$4F,$44,$53,$43,$52}  ; MODSCR
+
+.ifdef TARGET_C128
+; Which modules may run at 2 MHz with the screen blanked (index order as
+; above): only those that do no KERNAL I/O and have no interactive UI.
+; modasm writes its output file and reads includes mid-run, moddsk is all
+; disk I/O, modsfr is a form the user drives; the script runner is absent.
+c128_fast_ok: .byte 0, 1, 1, 0, 1, 1, 0, 0, 0, 0
+.endif
 
 mod_fname_lo: .byte <mod_fname_0, <mod_fname_1, <mod_fname_2, <mod_fname_3, <mod_fname_4, <mod_fname_5, <mod_fname_6, <mod_fname_7, <mod_fname_8, <mod_fname_9
 mod_fname_hi: .byte >mod_fname_0, >mod_fname_1, >mod_fname_2, >mod_fname_3, >mod_fname_4, >mod_fname_5, >mod_fname_6, >mod_fname_7, >mod_fname_8, >mod_fname_9
 
-; Load addresses: MODASM, MODDIS, MODSCT, MODSCR at $A000; MODSCRH and all others at $C000.
-mod_load_lo: .byte <$A000, <$A000, <$C000, <$C000, <$C000, <$C000, <$C000, <$A000, <$C000, <$A000
-mod_load_hi: .byte >$A000, >$A000, >$C000, >$C000, >$C000, >$C000, >$C000, >$A000, >$C000, >$A000
+; Load addresses (layout.inc): MODASM, MODDIS, MODSCT, MODSCR at MOD_HI_BASE;
+; MODSCRH and all others at MOD_LO_BASE. Each module's linker config is
+; asserted against the same constants, so this table cannot drift from them.
+mod_load_lo: .byte <MOD_HI_BASE, <MOD_HI_BASE, <MOD_LO_BASE, <MOD_LO_BASE, <MOD_LO_BASE, <MOD_LO_BASE, <MOD_LO_BASE, <MOD_HI_BASE, <MOD_LO_BASE, <MOD_HI_BASE
+mod_load_hi: .byte >MOD_HI_BASE, >MOD_HI_BASE, >MOD_LO_BASE, >MOD_LO_BASE, >MOD_LO_BASE, >MOD_LO_BASE, >MOD_LO_BASE, >MOD_HI_BASE, >MOD_LO_BASE, >MOD_HI_BASE
 
 ; Description strings — C64 screen codes, zero-terminated
 ; Letters: A=$01 B=$02 C=$03 D=$04 E=$05 F=$06 G=$07 H=$08 I=$09
@@ -657,6 +682,11 @@ run_module_by_index:
     jsr SETNAM
 
     ; ---- LOAD: A=0 → load (not verify); SA=1 from SETLFS uses PRG header ----
+.ifdef TARGET_C128
+    lda #0                          ; data bank 0
+    tax                             ; filename bank 0
+    jsr C128_SETBNK
+.endif
     lda #0
     jsr LOAD
     bcc :+
@@ -715,6 +745,10 @@ run_sel_loaded:
     ; ---- Bank-switch for execution only ----
     ; $A000 modules need BASIC ROM out so their code is visible.
     ; Reads from $A000-$BFFF go to RAM when $01 = $36 (BASIC out, kernal in).
+    ; On the C128 there is nothing to switch: the session map set at start
+    ; (C128_CFG_SESSION) already has RAM at $A000-$BFFF, and $01 is the
+    ; 8502's tape/caps-lock port, not a banking register.
+.ifndef TARGET_C128
     lda LPTR+1
     cmp #$A0
     bne @no_page_out
@@ -724,7 +758,28 @@ run_sel_loaded:
     lda #$36                ; BASIC RAM, Kernal ROM, I/O
     sta $01
 @no_page_out:
+.endif
+.ifdef TARGET_C128
+    ; Compute-only modules (no KERNAL I/O, nothing to watch) run at 2 MHz
+    ; with the display blanked — see c128_fast / c128_slow in editor.asm and
+    ; the table below. c128_slow is unconditional: harmless when not fast.
+    ldx MOD_LAST_IDX
+    lda c128_fast_ok,x
+    beq :+
+    jsr c128_fast
+:
+    ; The module lives in bank 0 and the editor runs in bank 1: switch for
+    ; the call and back afterwards. Everything the module needs from us —
+    ; zero page, the parameter block, this code — is in common RAM; the
+    ; buffer it reaches through the far-access table.
+    sta C128_MMU_LOAD_B
+.endif
     jsr mod_call_trampoline
+.ifdef TARGET_C128
+    sta C128_MMU_LOAD_A
+    jsr c128_slow
+.endif
+.ifndef TARGET_C128
     ; Decide the bank restore from OUR stash ($0229), not LPTR: LPTR is
     ; editor zero page that the module just had full control over, and a
     ; clobbered $16 here would silently skip the restore and leave BASIC
@@ -735,6 +790,7 @@ run_sel_loaded:
     lda #$37                ; normal: BASIC ROM, Kernal ROM, I/O
     sta $01
 @no_page_in:
+.endif
     ; Handle return status
     lda MOD_STATUS
     cmp #$02

@@ -12,17 +12,18 @@
 ;   Longest keyword match wins. No tokenization inside "" strings.
 ;   After REM: rest of line is literal. Operators tokenized outside strings.
 ;
-; ZP dual-use (no overlap — LINENO only used before try_keyword is called):
-;   $3A/$3B = LINENO lo/hi  (digit parse phase)
-;          = KW_TOKEN/$3B KW_XSAVE  (try_keyword phase)
-;   $3C/$3D = TMP16 lo/hi   (multiply scratch / kwtab pointer)
-;   $3E     = IN_STRING      ($FF = inside string, $00 = not)
-;   $3F     = AFTER_REM      ($FF = past REM, $00 = not)
-;   $F7/$F8 = LINK_PTR       (back-patch pointer for link words)
-;   $F9/$FA = BASIC_ADDR     (running $0801-based C64 address)
-;   $FB/$FC = SRC_PTR        (input pointer)
-;   $FD/$FE = DST_PTR        (staging output pointer)
-;   $FF     = OVFLAG         ($FF = staging overflowed, output truncated)
+; ZP dual-use (no overlap — LINENO only used before try_keyword is called).
+; Addresses come from zp.inc:
+;   ZP_SCRATCH+0/+1 = LINENO lo/hi  (digit parse phase)
+;                   = KW_TOKEN / KW_XSAVE  (try_keyword phase)
+;   ZP_SCRATCH+2/+3 = TMP16 lo/hi   (multiply scratch / kwtab pointer)
+;   ZP_SCRATCH+4    = IN_STRING      ($FF = inside string, $00 = not)
+;   ZP_SCRATCH+5    = AFTER_REM      ($FF = past REM, $00 = not)
+;   ZP_PTR0         = LINK_PTR       (back-patch pointer for link words)
+;   ZP_PTR1         = BASIC_ADDR     (running $0801-based C64 address)
+;   ZP_PTR2         = SRC_PTR        (input pointer)
+;   ZP_PTR3         = DST_PTR        (staging output pointer)
+;   ZP_OVFLAG       = OVFLAG         ($FF = staging overflowed, output truncated)
 ;
 ; Lessons from moddet: PHA/PLA around JSR before branches. INC corrupts flags.
 ; Advance SRC_PTR past CR before re-entering @line_loop.
@@ -67,8 +68,13 @@ BASIC_START     = $0801
 ; its copy-back — capacity is now "text + tokenized output <= 24 KB"
 ; (roughly a 13 KB source) instead of ~2.9 KB of output.
 
+; PRG load address comes from the linker config (MAIN start) and must
+; agree with layout.inc, which the module loader in modules.asm uses.
+.import __MAIN_START__
+.include "layout.inc"
+.assert __MAIN_START__ = MOD_LO_BASE, lderror, "modtok: linker config load address disagrees with layout.inc MOD_LO_BASE"
 .segment "LOADADDR"
-    .word $C000
+    .word __MAIN_START__
 
 .segment "CODE"
 
@@ -127,8 +133,8 @@ tokenize:
     dec DST_PTR+1
 :   dec DST_PTR
     ldy #0
-    lda (SRC_PTR),y
-    sta (DST_PTR),y
+    buf_lda SRC_PTR
+    buf_sta DST_PTR
     lda TMP16
     bne :+
     dec TMP16+1
@@ -173,7 +179,7 @@ tokenize:
 :
 
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     bne :+
     jmp @all_done
 :   cmp #$0D
@@ -188,7 +194,7 @@ tokenize:
 
 @digit_loop:
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #'0'
     bcc @digits_done
     cmp #'9'+1
@@ -230,7 +236,7 @@ tokenize:
 @digits_done:
 @skip_spaces:
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #$20
     bne @begin_line
     jsr inc_src_ptr
@@ -269,17 +275,23 @@ tokenize:
 
 @token_loop:
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     bne :+
     jmp @eof_line               ; source ended mid-line — close the line first
 :   cmp #$0D
+.ifdef TARGET_C128
+    bne :+                      ; far-access JSRs push @end_line out of branch range
+    jmp @end_line
+:
+.else
     beq @end_line
+.endif
 
     lda AFTER_REM
     bne @literal
 
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #$22
     bne @no_quote
     lda IN_STRING
@@ -301,7 +313,7 @@ tokenize:
     lda after_data
     beq @not_data
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #':'
     bne @literal                ; still inside the DATA item list
     lda #0
@@ -312,7 +324,7 @@ tokenize:
     ; '?' is BASIC shorthand for PRINT — CRUNCH tokenizes it to $99.
     ; Left literal it would be a runtime SYNTAX ERROR.
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     cmp #'?'
     bne @not_qmark
     jsr inc_src_ptr
@@ -340,7 +352,7 @@ tokenize:
 
 @literal:
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     jsr inc_src_ptr
     jsr emit_byte
     jsr inc_basic_addr
@@ -355,10 +367,10 @@ tokenize:
     ; back-patch link word
     ldy #0
     lda BASIC_ADDR
-    sta (LINK_PTR),y
+    buf_sta LINK_PTR
     iny
     lda BASIC_ADDR+1
-    sta (LINK_PTR),y
+    buf_sta LINK_PTR
 
     jmp @line_loop
 
@@ -372,10 +384,10 @@ tokenize:
     jsr inc_basic_addr
     ldy #0
     lda BASIC_ADDR
-    sta (LINK_PTR),y
+    buf_sta LINK_PTR
     iny
     lda BASIC_ADDR+1
-    sta (LINK_PTR),y
+    buf_sta LINK_PTR
     jmp @all_done
 
 ; ============================================================================
@@ -414,8 +426,8 @@ tokenize:
     beq @rst_done
 @rst_byte:
     ldy #0
-    lda (LINK_PTR),y
-    sta (BASIC_ADDR),y
+    buf_lda LINK_PTR
+    buf_sta BASIC_ADDR
     inc LINK_PTR
     bne :+
     inc LINK_PTR+1
@@ -446,9 +458,9 @@ tokenize:
 ; Table: [token][chars, last|$80] ... $FF sentinel
 ;
 ; Register protocol:
-;   TMP16 ($3C/$3D): kwtab pointer. Advanced by INC one char at a time.
-;   KW_TOKEN ($3A): token byte for current entry (saved at @kw_next).
-;   KW_XSAVE ($3B): source index X, saved here before forcing Y=0 for kwtab read.
+;   TMP16 (ZP_SCRATCH+2/+3): kwtab pointer. Advanced by INC one char at a time.
+;   KW_TOKEN (ZP_SCRATCH+0): token byte for current entry (saved at @kw_next).
+;   KW_XSAVE (ZP_SCRATCH+1): source index X, saved before forcing Y=0 for kwtab read.
 ;   X: source char index (0=first char). Incremented per match step.
 ;   Stack: 2 pushes per loop (source index, keyword char with bit7). Both pulled per loop.
 ;
@@ -466,7 +478,7 @@ try_keyword:
     ;   3. entries reject on their first char, and the walk is Y-indexed
     ;      from a pointer that only advances once per entry.
     ldy #0
-    lda (SRC_PTR),y
+    buf_lda SRC_PTR
     sta KW_XSAVE                ; cache first source char for entry rejects
     ldx #7
 @op_chk:
@@ -504,7 +516,7 @@ try_keyword:
     ; the matching source index is always Y-1.
 @kw_match:
     dey
-    lda (SRC_PTR),y             ; source char at (kw index - 1)
+    buf_lda SRC_PTR             ; source char at (kw index - 1)
     iny
     eor (TMP16),y               ; $00 = match; $80 = match on final char
     asl                         ; C = final-char flag, A = difference << 1
@@ -588,7 +600,7 @@ emit_byte:
     bcs @overflow
 @ok:
     ldy #0
-    sta (DST_PTR),y
+    buf_sta DST_PTR
     inc DST_PTR
     bne :+
     inc DST_PTR+1

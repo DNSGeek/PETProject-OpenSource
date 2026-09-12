@@ -12,17 +12,18 @@
 ;   Longest keyword match wins. No tokenization inside "" strings.
 ;   After REM: rest of line is literal. Operators tokenized outside strings.
 ;
-; ZP dual-use (no overlap — LINENO only used before try_keyword is called):
-;   $3A/$3B = LINENO lo/hi  (digit parse phase)
-;          = KW_TOKEN/$3B KW_XSAVE  (try_keyword phase)
-;   $3C/$3D = TMP16 lo/hi   (multiply scratch / kwtab pointer)
-;   $3E     = IN_STRING      ($FF = inside string, $00 = not)
-;   $3F     = AFTER_REM      ($FF = past REM, $00 = not)
-;   $F7/$F8 = LINK_PTR       (back-patch pointer for link words)
-;   $F9/$FA = BASIC_ADDR     (running $0801-based C64 address)
-;   $FB/$FC = SRC_PTR        (input pointer)
-;   $FD/$FE = DST_PTR        (staging output pointer)
-;   $FF     = OVFLAG         ($FF = staging overflowed, output truncated)
+; ZP dual-use (no overlap — LINENO only used before try_keyword is called).
+; Addresses come from zp.inc:
+;   ZP_SCRATCH+0/+1 = LINENO lo/hi  (digit parse phase)
+;                   = KW_TOKEN / KW_XSAVE  (try_keyword phase)
+;   ZP_SCRATCH+2/+3 = TMP16 lo/hi   (multiply scratch / kwtab pointer)
+;   ZP_SCRATCH+4    = IN_STRING      ($FF = inside string, $00 = not)
+;   ZP_SCRATCH+5    = AFTER_REM      ($FF = past REM, $00 = not)
+;   ZP_PTR0         = LINK_PTR       (back-patch pointer for link words)
+;   ZP_PTR1         = BASIC_ADDR     (running $0801-based C64 address)
+;   ZP_PTR2         = SRC_PTR        (input pointer)
+;   ZP_PTR3         = DST_PTR        (staging output pointer)
+;   ZP_OVFLAG       = OVFLAG         ($FF = staging overflowed, output truncated)
 ;
 ; Lessons from moddet: PHA/PLA around JSR before branches. INC corrupts flags.
 ; Advance SRC_PTR past CR before re-entering @line_loop.
@@ -67,8 +68,13 @@ BASIC_START     = $0801
 ; its copy-back — capacity is now "text + tokenized output <= 24 KB"
 ; (roughly a 13 KB source) instead of ~2.9 KB of output.
 
+; PRG load address comes from the linker config (MAIN start) and must
+; agree with layout.inc, which the module loader in modules.asm uses.
+.import __MAIN_START__
+.include "layout.inc"
+.assert __MAIN_START__ = MOD_LO_BASE, lderror, "modtok: linker config load address disagrees with layout.inc MOD_LO_BASE"
 .segment "LOADADDR"
-    .word $C000
+    .word __MAIN_START__
 
 .segment "CODE"
 
@@ -446,9 +452,9 @@ tokenize:
 ; Table: [token][chars, last|$80] ... $FF sentinel
 ;
 ; Register protocol:
-;   TMP16 ($3C/$3D): kwtab pointer. Advanced by INC one char at a time.
-;   KW_TOKEN ($3A): token byte for current entry (saved at @kw_next).
-;   KW_XSAVE ($3B): source index X, saved here before forcing Y=0 for kwtab read.
+;   TMP16 (ZP_SCRATCH+2/+3): kwtab pointer. Advanced by INC one char at a time.
+;   KW_TOKEN (ZP_SCRATCH+0): token byte for current entry (saved at @kw_next).
+;   KW_XSAVE (ZP_SCRATCH+1): source index X, saved before forcing Y=0 for kwtab read.
 ;   X: source char index (0=first char). Incremented per match step.
 ;   Stack: 2 pushes per loop (source index, keyword char with bit7). Both pulled per loop.
 ;

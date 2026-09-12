@@ -31,7 +31,8 @@
 ; work_buf+0 directly, the same base SRC_PTR reads from - since output runs
 ; ~15-30x longer than the source bytes it's decoded from, that overwrote
 ; unread input within the first instruction, every run, on every program.)
-; ZP usage: $FB/$FC = SRC_PTR, $3A-$3F = scratch (saved/restored).
+; ZP usage: ZP_PTR2 = SRC_PTR, ZP_PTR3 = DST_PTR, ZP_SCRATCH = scratch
+; (saved/restored; addresses come from zp.inc).
 ;
 ; Disassembler state (ZP_SAVE, DIS_PC_LO, etc.) is declared via .res at the
 ; very end of this file, AFTER all code and tables, so its address is always
@@ -105,8 +106,13 @@ MODE_IZY         = 11
 MODE_REL         = 12
 
 ; ============================================================================
+; PRG load address comes from the linker config (MAIN start) and must
+; agree with layout.inc, which the module loader in modules.asm uses.
+.import __MAIN_START__
+.include "layout.inc"
+.assert __MAIN_START__ = MOD_HI_BASE, lderror, "moddis: linker config load address disagrees with layout.inc MOD_HI_BASE"
 .segment "LOADADDR"
-    .word $A000
+    .word __MAIN_START__
 
 .segment "CODE"
 
@@ -117,8 +123,8 @@ MODE_REL         = 12
 ; ============================================================================
 
 disassemble:
-    ; Disable IRQ immediately. The Kernal IRQ handler uses $FB/$FC as a scratch
-    ; pointer for cursor blink — it would corrupt SRC_PTR mid-disassembly.
+    ; Disable IRQ immediately. A precaution, not a zero-page requirement: the
+    ; C64 Kernal IRQ handler does not touch the module pool (see zp_c64.inc).
     sei
 
     ; Verify magic
@@ -129,21 +135,7 @@ disassemble:
     rts                         ; no magic - silent return
 :
     ; Save ZP
-    ldx #0
-@zpsave:
-    lda ZP_SCRATCH,x
-    sta ZP_SAVE,x
-    inx
-    cpx #ZP_SCRATCH_LEN
-    bne @zpsave
-    lda ZP_PTR2
-    sta ZP_SAVE+6
-    lda ZP_PTR2+1
-    sta ZP_SAVE+7
-    lda ZP_PTR3
-    sta ZP_SAVE+8
-    lda ZP_PTR3+1
-    sta ZP_SAVE+9
+    zp_save ZP_SAVE
 
     ; Copy params
     lda MOD_BUF_LO
@@ -321,21 +313,7 @@ disassemble:
     jsr set_new_end
 
     ; Restore ZP
-    ldx #0
-@zprestore:
-    lda ZP_SAVE,x
-    sta ZP_SCRATCH,x
-    inx
-    cpx #ZP_SCRATCH_LEN
-    bne @zprestore
-    lda ZP_SAVE+6
-    sta ZP_PTR2
-    lda ZP_SAVE+7
-    sta ZP_PTR2+1
-    lda ZP_SAVE+8
-    sta ZP_PTR3
-    lda ZP_SAVE+9
-    sta ZP_PTR3+1
+    zp_restore ZP_SAVE
 
     ; Report success
     lda #$02
@@ -1125,7 +1103,7 @@ mnem_strs:
 ; TXS/TYA corruption bug this file used to have.
 ; ============================================================================
 
-ZP_SAVE:          .res 10         ; saves ZP_SCRATCH (6) + ZP_PTR2/ZP_PTR3 (4)
+ZP_SAVE:          .res ZP_SAVE_LEN ; saves ZP_SCRATCH + ZP_PTR2/ZP_PTR3
 DIS_PC_LO:        .res 1          ; current PC lo
 DIS_PC_HI:        .res 1          ; current PC hi
 DIS_SRC_END_LO:   .res 1          ; end of source binary lo (= GAP_START)

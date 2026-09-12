@@ -63,8 +63,13 @@ TMP2             = ZP_SCRATCH+2 ; number lo               (TMP2+1 = hi)
 TMP3             = ZP_SCRATCH+4 ; table ptr lo            (TMP3+1 = hi)
 
 ; ============================================================================
+; PRG load address comes from the linker config (MAIN start) and must
+; agree with layout.inc, which the module loader in modules.asm uses.
+.import __MAIN_START__
+.include "layout.inc"
+.assert __MAIN_START__ = MOD_LO_BASE, lderror, "modren: linker config load address disagrees with layout.inc MOD_LO_BASE"
 .segment "LOADADDR"
-    .word $C000
+    .word __MAIN_START__
 
 .segment "CODE"
 
@@ -81,23 +86,8 @@ modren_entry:
     cli
     rts
 :
-    ; Save the ZP_SCRATCH block
-    ldx #0
-@zpsave:
-    lda ZP_SCRATCH,x
-    sta ZP_SAVE,x
-    inx
-    cpx #ZP_SCRATCH_LEN
-    bne @zpsave
-    ; Save ZP_PTR2 / ZP_PTR3
-    lda ZP_PTR2
-    sta ZP_SAVE+6
-    lda ZP_PTR2+1
-    sta ZP_SAVE+7
-    lda ZP_PTR3
-    sta ZP_SAVE+8
-    lda ZP_PTR3+1
-    sta ZP_SAVE+9
+    ; Save the ZP_SCRATCH block and ZP_PTR2 / ZP_PTR3
+    zp_save ZP_SAVE
 
     ; Copy MOD parameters into local state
     lda MOD_BUF_LO
@@ -164,21 +154,7 @@ modren_entry:
     lda #SPIN_COLOR_A
     sta SPIN_CELL
 
-    ldx #0
-@zprestore:
-    lda ZP_SAVE,x
-    sta ZP_SCRATCH,x
-    inx
-    cpx #ZP_SCRATCH_LEN
-    bne @zprestore
-    lda ZP_SAVE+6
-    sta ZP_PTR2
-    lda ZP_SAVE+7
-    sta ZP_PTR2+1
-    lda ZP_SAVE+8
-    sta ZP_PTR3
-    lda ZP_SAVE+9
-    sta ZP_PTR3+1
+    zp_restore ZP_SAVE
 
     cli
     rts
@@ -1174,7 +1150,7 @@ store_entry:
 ; ============================================================================
 .segment "BSS"
 
-ZP_SAVE:         .res 10
+ZP_SAVE:         .res ZP_SAVE_LEN
 REN_BUF_LO:      .res 1
 REN_BUF_HI:      .res 1
 REN_GAP_LO:      .res 1

@@ -15,24 +15,53 @@ set -euo pipefail
 # ── Toolchain (override with environment variables if needed) ─────────────────
 CA65=${CA65:-ca65}
 LD65=${LD65:-ld65}
+# TARGET selects the memory map for BOTH the editor and the modules (they
+# share zp.inc and layout.inc, so they must agree): c64 (default) or c128.
+#   TARGET=c128 bash make_petproject.sh
+# builds into build/c128 with petproject_c128.cfg and the *_c128.cfg module
+# configs, and stops before the disk image (the C128 boot sector is not
+# written yet — see docs/c128-port-notes.md, Phase 3).
+TARGET=${TARGET:-c64}
+# Extra ca65 flags on top of what TARGET implies. Exported as-is so that
+# build_modules.sh adds the target define itself, exactly once.
+CA65FLAGS=${CA65FLAGS:-}
+export TARGET CA65FLAGS
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SRC="$(cd "$(dirname "$0")" && pwd)" # directory containing this script
-BUILD="${SRC}/build"
+case "${TARGET}" in
+  c64)
+    BUILD="${SRC}/build"
+    EDITOR_CFG="${SRC}/petproject.cfg"
+    EDITOR_ASFLAGS="${CA65FLAGS}"
+    ;;
+  c128)
+    BUILD="${SRC}/build/c128"
+    EDITOR_CFG="${SRC}/petproject_c128.cfg"
+    EDITOR_ASFLAGS="-D TARGET_C128 ${CA65FLAGS}"
+    ;;
+  *)
+    echo "Unknown TARGET '${TARGET}' (expected c64 or c128)" >&2
+    exit 1
+    ;;
+esac
 
 mkdir -p "${BUILD}"
 
 # ── Clean previous build artifacts ───────────────────────────────────────────
-rm -f "${SRC}/petproject.d64" "${SRC}"/*.vsf "${SRC}"/*.reu
+if [[ "${TARGET}" == c64 ]]; then
+  rm -f "${SRC}/petproject.d64" "${SRC}"/*.vsf "${SRC}"/*.reu
+fi
 rm -f "${BUILD}"/*.o "${BUILD}"/*.prg "${BUILD}"/*.dbg "${BUILD}"/*.map
 
 # ── Build editor ──────────────────────────────────────────────────────────────
 echo "Building editor..."
-${CA65} -v -t c64 \
+# shellcheck disable=SC2086  # EDITOR_ASFLAGS is intentionally word-split
+${CA65} ${EDITOR_ASFLAGS} -v -t c64 \
   -o "${BUILD}/editor.o" \
   -g "${SRC}/editor.asm" || exit 1
 
-${LD65} -v -C "${SRC}/petproject.cfg" \
+${LD65} -v -C "${EDITOR_CFG}" \
   -o "${BUILD}/editor.prg" \
   --mapfile "${BUILD}/editor.map" \
   --dbgfile "${BUILD}/editor.dbg" \
@@ -44,6 +73,12 @@ echo "✓ ${BUILD}/editor.prg"
 bash "${SRC}/build_modules.sh" || exit 1
 
 # ── Create disk image ─────────────────────────────────────────────────────────
+if [[ "${TARGET}" != c64 ]]; then
+  rm -f "${BUILD}"/*.o
+  echo ""
+  echo "Build complete (${TARGET}): PRGs in ${BUILD}. No disk image for this target yet."
+  exit 0
+fi
 python3 "${SRC}/make_disk.py" \
   --build-dir "${BUILD}" \
   --name petproject \

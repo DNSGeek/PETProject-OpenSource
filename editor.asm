@@ -117,11 +117,17 @@ DEFAULT_BG_COLOR     = $00        ; black
 MODAL_BAR_COLOR      = $07        ; yellow — the alert bar color
 SCR_REVERSE          = $80        ; OR into a screen code for reverse video
 
-BUF_SIZE     = $6000              ; 24 K working buffer
+BUF_SIZE     = EDITOR_BUF_SIZE    ; working buffer (24 K on C64, 19.75 K on C128 — layout.inc)
 
 ; ============================================================================
 ; Zero-page allocations
 ; ============================================================================
+
+; Module zero-page map (ZP_EDITOR / ZP_SCRATCH / ...) and the per-target
+; memory layout (load addresses, buffer size). Included here, outside any
+; segment, so nothing they define can land in the .zeropage block below.
+.include "zp.inc"
+.include "layout.inc"
 
 .zeropage
 
@@ -145,38 +151,57 @@ CLR_CTMP:     .res 2        ; colortab walk pointer (col_try_keyword internal)
 ; col_try_keyword needs one byte of scratch for the matched token byte.
 ; It borrows the first byte of the *module* scratch pool rather than
 ; spending one of the editor's own reserved bytes — safe only because the
-; editor never calls tokenizer code directly.
-;
-; This is the one place the editor reaches across into module zero page, so
-; it must track any relocation of that pool: hence zp.inc rather than a
-; literal. See docs/c128-port-notes.md ("Cross-tier alias") — the intent is
-; to retire this alias once the C128 map puts both tiers in one region.
-.include "zp.inc"
-
+; editor never calls tokenizer code directly. This is the one place the
+; editor reaches across into module zero page, so it must track any
+; relocation of that pool: hence zp.inc rather than a literal. See
+; docs/c128-port-notes.md ("Cross-tier alias").
 KW_TOKEN      = ZP_SCRATCH+0 ; token byte from col_try_keyword (colorize scratch)
 
+; ---- Link-time checks against the real placement of the block above ----
+; petproject.cfg defines __ZP_START__/__ZP_SIZE__ (define = yes). The block
+; must sit exactly where zp.inc says it does (modsfr.asm derives its editor
+; ZP offsets from ZP_EDITOR, and zp.inc's disjointness asserts use it), and
+; the six symbols modsfr borrows must keep their declaration-order offsets.
+.import __ZP_START__: absolute, __ZP_SIZE__: absolute
+.assert __ZP_START__ = ZP_EDITOR, lderror, "petproject.cfg ZP start does not match ZP_EDITOR in zp.inc"
+.assert __ZP_SIZE__ = ZP_EDITOR_LEN, lderror, "petproject.cfg ZP size does not match ZP_EDITOR_LEN in zp.inc"
+.assert GAP_START  = ZP_EDITOR + $00, lderror, "GAP_START moved; update modsfr.asm ZP_GAP_START"
+.assert GAP_END    = ZP_EDITOR + $02, lderror, "GAP_END moved; update modsfr.asm ZP_GAP_END"
+.assert CURSOR_ROW = ZP_EDITOR + $0E, lderror, "CURSOR_ROW moved; update modsfr.asm ZP_CURSOR_ROW"
+.assert CURSOR_COL = ZP_EDITOR + $0F, lderror, "CURSOR_COL moved; update modsfr.asm ZP_CURSOR_COL"
+.assert TXT_PTR    = ZP_EDITOR + $11, lderror, "TXT_PTR moved; update modsfr.asm WORK_PTR"
+.assert LPTR       = ZP_EDITOR + $13, lderror, "LPTR moved; update modsfr.asm LPTR"
+
+
+; The load address and the SYS target come from layout.inc (EDITOR_LOAD:
+; $0801 on the C64, $1C01 on the C128). The linker config must place STARTUP
+; at the same address — asserted at link time so petproject*.cfg and
+; layout.inc cannot disagree.
+.import __STARTUP_LOAD__: absolute, __MAIN_START__: absolute, __MAIN_SIZE__: absolute
+.assert __STARTUP_LOAD__ = EDITOR_LOAD, lderror, "linker config places STARTUP somewhere other than layout.inc EDITOR_LOAD"
+.assert __MAIN_START__ + __MAIN_SIZE__ = EDITOR_END, lderror, "linker config MAIN end disagrees with layout.inc EDITOR_END"
 
 .segment "LOADADDR"
 .export __LOADADDR__
 __LOADADDR__:
-    .word $0801
+    .word EDITOR_LOAD
 
 ; ============================================================================
-; BASIC stub: 10 SYS 2061  (jumps to $080D)
+; BASIC stub: 10 SYS <EDITOR_LOAD+12>  (2061 on the C64, 7181 on the C128)
 ; ============================================================================
 
 .segment "STARTUP"
 
-; BASIC stub: 10 SYS 2061  (12 bytes at $0801, jumps to $080D = 2061)
+; BASIC stub: 10 SYS n  (12 bytes at EDITOR_LOAD, jumps to EDITOR_LOAD+12)
 ; NOTE: uses non-local label _basic_end instead of @next.
 ; ca65 local labels (@foo) are scoped between non-local labels; with no
 ; non-local label preceding this segment, @next silently resolved to $0000,
 ; corrupting the next-line link and shifting start: 2 bytes forward so
 ; SYS 2061 landed on a BRK instead of the entry point.
-    .word _basic_end                ; pointer to next BASIC line (= $080B)
+    .word _basic_end                ; pointer to next BASIC line (= EDITOR_LOAD+10)
     .word 10                        ; line number
     .byte $9E                       ; SYS token
-    .byte "2061"                    ; argument: start: is at $080D = 2061 decimal
+    .byte .sprintf("%d", EDITOR_LOAD + 12)  ; argument: start: is at EDITOR_LOAD+12
     .byte 0                         ; end-of-line
 _basic_end:
     .word 0                         ; end-of-program
@@ -190,7 +215,7 @@ _basic_end:
 start:
     ; Verify the BASIC stub above is exactly 12 bytes so SYS 2061 lands here.
     ; If this assertion fires, the stub changed size — update "2061" to match.
-    .assert * = $080D, error, "BASIC SYS address mismatch: start: must be at $080D"
+    .assert * = EDITOR_LOAD + 12, error, "BASIC SYS address mismatch: start: must be at EDITOR_LOAD+12 (the SYS target in the BASIC stub)"
     ; The editor never returns to BASIC's SYS handler.  Reset the stack now
     ; to discard BASIC's call frames so OPEN/CHKIN frames have room to run.
     ldx #$FF
@@ -536,7 +561,7 @@ main_loop:
     ; Hand back to BASIC via its COLD-start entry ($E394), NOT warm start.
     ;
     ; At boot we did `ldx #$FF / txs`, discarding BASIC's call stack, and the
-    ; editor has overwritten zero page (gap pointers, $3A, etc.) and page 2
+    ; editor has overwritten zero page (gap pointers, module scratch, etc.) and page 2
     ; throughout the session. BASIC's warm start ($E37B) assumes its stack and
     ; ZP pointers are still valid, so resuming through it left BASIC with a
     ; corrupted expression stack — the next evaluation (e.g. LOAD"$",8) failed
@@ -2959,7 +2984,7 @@ do_backspace:
 ;
 ; ZP used:  TXT_PTR (backward scan + kw_strtab walk),
 ;           TMP      (pointer to prefix chars in gap, for comparison),
-;           KW_TOKEN ($3A, current token during scan; safe to alias here
+;           KW_TOKEN (ZP_SCRATCH+0, current token during scan; safe to alias here
 ;                     because tab completion never overlaps colorization)
 ; Clobbers: A, X, Y
 ; ============================================================================
@@ -3059,7 +3084,7 @@ do_tab_complete:
     lda GAP_START+1
     sta TMP+1
 
-    ; TXT_PTR = kw_strtab base; KW_TOKEN ($3A) walks token bytes $80..$D8.
+    ; TXT_PTR = kw_strtab base; KW_TOKEN (ZP_SCRATCH+0) walks token bytes $80..$D8.
     lda #<kw_strtab
     sta TXT_PTR
     lda #>kw_strtab
@@ -3498,7 +3523,7 @@ tokenize_line:
 ; On entry:  TXT_PTR points to candidate keyword start in buffer.
 ; On exit:   C=1 → KW_TOKEN = token byte ($80-$CB), CLR_KWLEN = char count
 ;            C=0 → no match
-; Clobbers:  A, X, Y, CLR_CTMP ($1A/$1B), KW_TOKEN ($3A), CLR_KWLEN ($19)
+; Clobbers:  A, X, Y, CLR_CTMP, KW_TOKEN (ZP_SCRATCH+0), CLR_KWLEN
 ; ============================================================================
 tl_match_kw:
     lda #<kw_strtab

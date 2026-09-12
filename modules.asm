@@ -80,7 +80,8 @@ MOD_LOAD_HI      = $0222             ; load address for this module (hi)
 MOD_SAVED_SP     = $0227             ; SP saved across module call (avoids stack overflow)
 
 MOD_MAGIC_VAL    = $4D
-MOD_LOAD_ADDR    = $C000
+.include "layout.inc"
+MOD_LOAD_ADDR    = MOD_LO_BASE       ; default module load address (layout.inc)
 MOD_LA           = 3                 ; logical file number for module load
 
 ; Popup geometry
@@ -139,9 +140,11 @@ mod_fname_9: .byte $4D,$4F,$44,$53,$43,$52  ; MODSCR
 mod_fname_lo: .byte <mod_fname_0, <mod_fname_1, <mod_fname_2, <mod_fname_3, <mod_fname_4, <mod_fname_5, <mod_fname_6, <mod_fname_7, <mod_fname_8, <mod_fname_9
 mod_fname_hi: .byte >mod_fname_0, >mod_fname_1, >mod_fname_2, >mod_fname_3, >mod_fname_4, >mod_fname_5, >mod_fname_6, >mod_fname_7, >mod_fname_8, >mod_fname_9
 
-; Load addresses: MODASM, MODDIS, MODSCT, MODSCR at $A000; MODSCRH and all others at $C000.
-mod_load_lo: .byte <$A000, <$A000, <$C000, <$C000, <$C000, <$C000, <$C000, <$A000, <$C000, <$A000
-mod_load_hi: .byte >$A000, >$A000, >$C000, >$C000, >$C000, >$C000, >$C000, >$A000, >$C000, >$A000
+; Load addresses (layout.inc): MODASM, MODDIS, MODSCT, MODSCR at MOD_HI_BASE;
+; MODSCRH and all others at MOD_LO_BASE. Each module's linker config is
+; asserted against the same constants, so this table cannot drift from them.
+mod_load_lo: .byte <MOD_HI_BASE, <MOD_HI_BASE, <MOD_LO_BASE, <MOD_LO_BASE, <MOD_LO_BASE, <MOD_LO_BASE, <MOD_LO_BASE, <MOD_HI_BASE, <MOD_LO_BASE, <MOD_HI_BASE
+mod_load_hi: .byte >MOD_HI_BASE, >MOD_HI_BASE, >MOD_LO_BASE, >MOD_LO_BASE, >MOD_LO_BASE, >MOD_LO_BASE, >MOD_LO_BASE, >MOD_HI_BASE, >MOD_LO_BASE, >MOD_HI_BASE
 
 ; Description strings — C64 screen codes, zero-terminated
 ; Letters: A=$01 B=$02 C=$03 D=$04 E=$05 F=$06 G=$07 H=$08 I=$09

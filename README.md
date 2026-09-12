@@ -167,7 +167,11 @@ python3 make_disk.py --build-dir build --name petproject --id pp petproject.d64
 | `modscrh.asm` | `$C000`  | Script handler (stays resident during scripts) |
 
 **Linker configs:** `module.cfg` (default `$C000`), `modasm.cfg` (`$A000`),
-`moddis.cfg`, `modsfr.cfg`, `modscr.cfg`, `modsct.cfg`.
+`moddis.cfg`, `modsfr.cfg`, `modscr.cfg`, `modsct.cfg`. C128 target:
+`petproject_c128.cfg`, `module_c128.cfg`, `modsfr_c128.cfg`, with the
+per-target addresses in `layout.inc` and zero-page maps in `zp.inc` /
+`zp_c64.inc` / `zp_c128.inc` (`TARGET=c128 bash make_petproject.sh`; see
+`docs/c128-port-notes.md`).
 
 **Build tooling:** `make_petproject.sh` (full build), `build_modules.sh`
 (modules only), `make_disk.py` (creates the `.d64` image).

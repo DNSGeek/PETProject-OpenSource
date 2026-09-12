@@ -90,12 +90,18 @@ entry in `petproject.cfg`.
 | `$19`     | 1   | `CLR_KWLEN`  |                                         |
 | `$1A-$1B` | 2   | `CLR_CTMP`   | colortab walker                         |
 
-**This block is already fully relocatable.** No code references these by
-literal address; everything resolves through the ca65 zeropage segment.
-Relocating it is a one-line change (`start = $02`) in a C128 linker config,
-provided a 26-byte contiguous hole exists. ca65 keeps the segment in
-declaration order, so all pointer pairs stay adjacent wherever the block
-lands.
+**This block is relocatable, with one dependent.** `editor.asm`, `colorize.asm`,
+`loadsave.asm` and `modules.asm` resolve every one of these through the ca65
+zeropage segment. `modsfr.asm` does not — it is a separately linked PRG that
+borrows six of them (`GAP_START`, `GAP_END`, `CURSOR_ROW`, `CURSOR_COL`,
+`TXT_PTR`, `LPTR`) by offset. Those offsets are now expressed as
+`ZP_EDITOR + n` from `zp.inc`, and `editor.asm` asserts at link time both that
+`petproject.cfg`'s `ZP:` line matches `ZP_EDITOR`/`ZP_EDITOR_LEN` and that the
+six symbols still sit at the offsets `modsfr` expects. So relocating the block
+means changing the target map in `zp.inc` and `petproject.cfg` together
+(provided a 26-byte contiguous hole exists); moving only one fails the build.
+ca65 keeps the segment in declaration order, so all pointer pairs stay adjacent
+wherever the block lands.
 
 ### Tier 2 — module scratch, `$3A–$3F` and `$F7–$FF` (15 bytes)
 
@@ -145,10 +151,12 @@ nothing that anything depends on:
 - **What they would nominally protect is moot.** `$3A-$3F` is BASIC's and
   `$F7-$FE` is RS-232's, but the editor quits through BASIC _cold start_
   (`editor.asm:542`), which reinitialises all of it.
-- **The one real in-flight hazard is not addressed by saving.** The C64 KERNAL
-  IRQ using `$FB`/`$FC` for cursor blink (`modasm.asm:260`) is a collision
-  _during_ execution; entry/exit save/restore does nothing for it. `sei` does,
-  which is why modasm holds one.
+- **There is no in-flight hazard on the C64.** An earlier revision claimed the
+  C64 KERNAL IRQ uses `$FB`/`$FC` for cursor blink (the rationale that used to
+  sit on modasm's `sei`). It does not: the IRQ path uses `$A0-$A2`, `$C5`/`$C6`/
+  `$CB`, `$CC-$CF`, `$D1-$D6` and `$F3-$F6`, and `$FB-$FE` are the documented
+  free user bytes — `moddet`, `modtok` and `moddsk` run on them with IRQs
+  enabled. modasm and moddis keep their `sei` as a precaution only.
 
 So the requirement on any relocation is **disjointness alone** — the two tiers
 must not overlap. Making saving universal is _not_ a substitute for that, and
@@ -157,13 +165,13 @@ through every exit path in five working modules (`modsfr` has 31 `rts`,
 `modsct` 30, `modscrh` 18), risking a regression on some error path in
 exchange for no identified benefit.
 
-**Enforce disjointness at build time instead.** `petproject.cfg` already sets
-`define = yes` on both the `ZP` memory area and the `ZEROPAGE` segment, so
-`editor.asm` can `.import __ZP_START__, __ZP_SIZE__` and assert non-overlap
-against `ZP_SCRATCH` / `ZP_PTRS`. It needs the `lderror` action rather than
-`error`, since those values resolve at link time. Zero runtime cost, zero
-regression risk, and it fails the build the moment a C128 map puts the tiers
-on top of each other — which is the only scenario that ever mattered.
+**Disjointness is enforced at build time.** Each target map declares the
+editor block as `ZP_EDITOR`/`ZP_EDITOR_LEN`, and `zp.inc` asserts that the
+three pool blocks are pairwise disjoint from each other and from that block.
+`petproject.cfg` sets `define = yes` on the `ZP` memory area, so `editor.asm`
+imports `__ZP_START__`/`__ZP_SIZE__` and asserts with `lderror` that the cfg
+agrees with the map. Zero runtime cost, and the build fails the moment a map
+puts the tiers on top of each other or the cfg drifts from the map.
 
 ### System ZP — read, not owned
 
@@ -181,12 +189,12 @@ blink. So the ZP set to avoid is defined by **what the KERNAL IRQ handler
 touches 60 times a second**, not merely by the routines PETProject calls.
 That is a strictly larger set.
 
-`modasm` is the exception: it holds `sei` across an _entire assembly_, on
-explicitly C64-specific reasoning (`modasm.asm:260` — the C64 KERNAL IRQ uses
-`$FB`/`$FC` as cursor-blink scratch, which would corrupt `SRC_PTR`). That
-premise must be **re-derived** for the C128, not inherited. A multi-second
-`sei` is riskier there, and the better answer may be to relocate `SRC_PTR`
-and drop the `sei` entirely.
+`modasm` (and `moddis`) hold `sei` across their entire run. The comment that
+used to justify it — that the C64 KERNAL IRQ uses `$FB`/`$FC` as cursor-blink
+scratch — was wrong (see above); the `sei` is a precaution, not a zero-page
+requirement, on either target. A multi-second `sei` is riskier on the C128
+(serial timing), so dropping it is an option for the port rather than a
+constraint on it.
 
 ### C128 zero-page map (resolved)
 
@@ -317,22 +325,45 @@ is almost entirely KERNAL I/O.
 
 #### Resolution: rehome, don't trampoline
 
-Keep config `$0E` for the whole session and move everything off `$C000`. The
-budget works:
+Keep config `$0E` for the whole session and move everything off `$C000`.
+
+The budget is tighter than a first look suggests, because BASIC 7.0's program
+text starts at `$1C01`, not `$0801`: a `LOAD`/`RUN`-able editor sits 5 K
+higher on the C128 than on the C64.
 
 ```
-editor BSS ends           $8C1E
-free below module area    $8C1F-$9FFF   5,089 bytes
+editor at $0801 (C64)     ends $8C1E    free below $A000  5,089 bytes
+editor at $1C01 (C128)    ends $A01E    free below $A000       -31 bytes
 must be rehomed           $C000-$CFFF   4,096 bytes
-                                        ------------
-spare                                     993 bytes
 ```
+
+So the rehomed region cannot simply slot in under `$A000`; something has to
+give. The adopted layout (`layout.inc`, `petproject_c128.cfg`,
+`module_c128.cfg`, `modsfr_c128.cfg`) keeps `MOD_HI` at `$A000-$BFFF` so
+modasm, moddis and modsct share their C64 linker configs, keeps modasm's
+symbol table at 400 entries (its state block is exactly 4 K), puts the
+rehomed region at `$9000-$9FFF`, and pays for it with the buffer:
+
+```
+$1C01-$8F1E   editor, EDITOR_BUF_SIZE = $4F00 (19.75 K, was 24 K)
+$9000-$9FFF   MOD_LO  — moddet, modtok, moddsk, modren, modsfr; modasm state
+$A000-$BFFF   MOD_HI  — modasm, moddis, modsct
+```
+
+The buffer comes back — and then some — with a bank-1 buffer (Phase 4). The
+alternative of a boot-sector load at `$1300` would recover 2.25 K of it at the
+cost of losing the plain `RUN` launch; not taken.
 
 Two things to design around:
 
-- **That margin shrinks as the editor's BSS grows.** Wants a link-time
-  assertion — same technique as the ZP overlap check, fail the build rather
-  than discover it as corruption.
+- **The margin is 225 bytes and is enforced by the linker.** The editor's MAIN
+  area in `petproject_c128.cfg` ends at `$9000`; if BSS grows past it, ld65
+  reports a MAIN overflow. `editor.asm` also asserts (lderror) that the cfg's
+  load address and MAIN end match `EDITOR_LOAD` / `EDITOR_END` in
+  `layout.inc`, and every module asserts that its cfg's `__MAIN_START__`
+  matches `MOD_LO_BASE` / `MOD_HI_BASE` — the same constants the loader table
+  in `modules.asm` is built from. A cfg, `layout.inc` and the loader cannot
+  disagree without failing the link.
 - **The modscrh/modasm choreography survives unchanged in shape.** modscrh
   currently stashes itself out of `$C000-$CFFF` to REU `$013000` so modasm can
   use that space as scratch (`modscrh.asm:102`). Relocating both is
@@ -342,12 +373,12 @@ The alternative — all-RAM bank 0 with KERNAL calls trampolined through common
 RAM — preserves the memory map exactly but taxes every I/O call in the
 project. Rejected for that reason.
 
-**Sequencing note:** the rehoming is the substantive work, it is independent
-of the MMU stores, and it can be **done and tested entirely on the C64** —
-moving modules from `$C000` to `$8C20` is a valid C64 layout too. That turns
-the risky part into something verifiable on hardware you already have, before
-any C128-specific code exists. Do it first; the MMU stores are small once
-nothing depends on `$C000`.
+**Sequencing note:** the rehoming is independent of the MMU stores. At the
+source level it is done: modasm's 44 state equates are `ASM_STATE + $xx` with
+`ASM_STATE = MOD_LO_BASE`, the modules emit their PRG header from the
+linker's `__MAIN_START__`, and `modules.asm` builds its load table from
+`layout.inc`. The C64 build is byte-identical to before. What remains is
+run-time: the MMU stores, `SETBNK`, the trampolines and the quit path.
 
 ### Trampolines must move
 
@@ -473,9 +504,13 @@ Mechanically:
    pre-conversion output, and a `-D TARGET_C128` build relocates cleanly
    (every `lda (SRC_PTR),y` moved `$FB`→`$26`, same counts, no stale
    references, identical binary sizes).
-3. **Assert non-overlap at link time** via `__ZP_START__` / `__ZP_SIZE__` and
-   `lderror`, as described above. _(Not yet done. Small, safe, independent of
-   the C128 map — can land at any point.)_
+3. **Assert non-overlap at build time** — ✅ **done.** `zp.inc` asserts the
+   pool blocks are pairwise disjoint from each other and from
+   `ZP_EDITOR`/`ZP_EDITOR_LEN`; `editor.asm` asserts with `lderror` that
+   `petproject.cfg` matches those two constants and that the six editor ZP
+   symbols `modsfr.asm` borrows are still at their expected offsets. CI
+   assembles every C128-eligible module (and links the editor) with
+   `-D TARGET_C128` on every change, so the C128 map is exercised too.
 
    This replaces an earlier plan to make ZP saving universal across all
    modules. That plan was dropped: it guarded against nothing real and would
@@ -483,18 +518,25 @@ Mechanically:
 
 #### Files
 
-| File          | Role                                                                           |
-| ------------- | ------------------------------------------------------------------------------ |
-| `zp.inc`      | target dispatch, derived `ZP_PTR0..3`, contract + assertions                   |
-| `zp_c64.inc`  | the historical C64 map — `$3A`, `$F7`, `$FF`                                   |
-| `zp_c128.inc` | the C128 map — `$1C`, `$22`, `$2A`, with the derivation and the residual check |
+| File                  | Role                                                                           |
+| --------------------- | ------------------------------------------------------------------------------ |
+| `zp.inc`              | target dispatch, derived `ZP_PTR0..3`, contract + assertions, save macros      |
+| `zp_c64.inc`          | the historical C64 map — `$3A`, `$F7`, `$FF`                                   |
+| `zp_c128.inc`         | the C128 map — `$1C`, `$22`, `$2A`, with the derivation and the residual check |
+| `layout.inc`          | per-target load addresses, buffer size and module regions                      |
+| `petproject_c128.cfg` | editor at `$1C01`, MAIN capped at `$9000`                                      |
+| `module_c128.cfg`     | low modules at `$9000` (was `$C000`)                                           |
+| `modsfr_c128.cfg`     | search/replace at `$9000` (was `$C000`)                                        |
 
 Each module now aliases its own local names onto pool slots
 (`SRC_PTR = ZP_PTR2`, `TMP = ZP_SCRATCH+0`, …), so module code reads exactly
 as before and the diff stays small. Converted: `editor.asm` (the `KW_TOKEN`
-alias), `modasm`, `moddet`, `moddis`, `modren`, `moddsk`, `modscr`,
-`modscrh`, `modsct`, `modtok`. `modsfr` needed no change — it uses no pool
-scratch.
+alias), `modasm`, `moddet`, `moddis`, `modren`, `moddsk`, `modscrh`,
+`modsct`, `modtok`. `modscr` defined a scratch symbol it never used, now
+removed. `modsfr` uses no pool scratch, but does borrow editor ZP — see
+Tier 1 above. `modscr` and `modscrh` refuse to assemble under
+`TARGET_C128` (`.error`), since the C128 map's premise that BASIC is never
+called does not hold for them.
 
 BASIC/KERNAL ABI addresses (`TXTTAB`, `VARTAB`, `MEMSIZ`, `VARPNT`, `TXTPTR`,
 AYINT's `$14`/`$15`, `JIFFY_LO`, `FA`) were deliberately **left as literals**.
@@ -513,21 +555,24 @@ Single source tree throughout — `.if TARGET_C128` conditionals plus parallel
 resolved and adopted, Tier 1 confirmed to need no change. C64 build verified
 byte-identical throughout; `-D TARGET_C128` assembles and links.
 
-**Phase 1 — rehome `$C000`.** Move the six `$C000` modules and modasm's 4 K of
-working state below `$A000`, per
-[The `$C000` collision](#the-c000-collision--the-real-work-in-this-phase).
-Deliberately first, and deliberately **done on the C64**: the new layout is
-valid there, so it is testable on real hardware before any C128-specific code
-exists. Add the link-time assertion guarding the 993-byte margin.
+**Phase 1 — rehome `$C000`.** ✅ **Done at the link level.** `layout.inc`
+carries the per-target addresses; `TARGET=c128 bash make_petproject.sh`
+links the editor at `$1C01` under `petproject_c128.cfg` and the low modules at
+`$9000` under `module_c128.cfg` / `modsfr_c128.cfg`, with modasm's state block
+following `MOD_LO_BASE`. The 225-byte margin is a linker overflow error. See
+[The `$C000` collision](#the-c000-collision--the-real-work-in-this-phase) for
+the layout and the buffer trade-off. Not yet exercised on hardware.
 
 **Phase 2 — banking.** MMU conversion (7 sites), trampoline relocation,
 `SETBNK`, quit path. Small once nothing depends on `$C000`. Ends with a native
 C128 build that boots.
 
-**Phase 3 — build and packaging.** `TARGET_C128` conditionals, parallel
-`.cfg` set, C128 autoboot sector in `make_disk.py`. One disk can carry both
-builds — the C64 BASIC stub and the C128 boot sector select between them, so
-no runtime machine detection is needed.
+**Phase 3 — build and packaging.** Partly done: `TARGET=c128` selects the
+`-D TARGET_C128` assemble, the `*_c128.cfg` set and `build/c128/` in both
+build scripts, and CI builds it on every change. Still to do: the C128
+autoboot sector in `make_disk.py`. One disk can carry both builds — the C64
+BASIC stub and the C128 boot sector select between them, so no runtime
+machine detection is needed.
 
 **Phase 4 — the payoff.** In value-per-effort order:
 
@@ -582,11 +627,16 @@ allocation throughout: the CBM archive's C128 RAM map,
    consequence that matters — bits 4-5 covering `$C000-$FFFF` as one unit, and
    therefore the `$C000` collision — follows directly from these, so confirm
    before committing to the rehoming layout.
-4. **`RPTFLG` at `$028A`** (`editor.asm:33`) — confirm the address and that
+4. **Function keys.** On the C128 the screen editor ROM expands F1-F8 into
+   their programmable-key strings (`$1000-$10FF`) before `GETIN` sees them,
+   so the `$85-$8C` codes the editor expects may never arrive. Confirm, and if
+   so clear the key definitions at startup (or read the raw key). Also
+   confirms whether `$1000-$10FF` is genuinely off-limits for our use.
+5. **`RPTFLG` at `$028A`** (`editor.asm:33`) — confirm the address and that
    `$80` still means "all keys repeat" on the C128.
-5. **The `$0200–$0222` boot / module parameter block** (`modules.asm:63`)
+6. **The `$0200–$0222` boot / module parameter block** (`modules.asm:63`)
    overlaps the C128 KERNAL input buffer. Interactive input uses `GETIN` so it
    is likely safe, but `moddsk`'s drive-status reads go through `CHRIN`, which
    does use that buffer.
-6. **C128 BASIC cold-start entry** to replace `jmp $E394`. `jmp ($FFFC)` is
+7. **C128 BASIC cold-start entry** to replace `jmp $E394`. `jmp ($FFFC)` is
    the safe fallback.

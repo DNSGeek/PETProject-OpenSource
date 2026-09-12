@@ -41,7 +41,8 @@
 ; Disk command channel: LA=15, SA=15 (standard CBM command channel)
 ; Directory read:       LA=2,  SA=0  (sequential read)
 ;
-; Zero page: uses $FB/$FC (DSK_PTR) and $FD/$FE (DSK_PTR2) — saved/restored.
+; Zero page: uses ZP_PTR2 (DSK_PTR) and ZP_PTR3 (DSK_PTR2) — saved/restored;
+; addresses come from zp.inc.
 ; ============================================================================
 
 .setcpu "6502"
@@ -196,8 +197,13 @@ DSK_PTR2        = ZP_PTR3   ; lo (hi = +1)
 ; Module entry point
 ; ============================================================================
 
+; PRG load address comes from the linker config (MAIN start) and must
+; agree with layout.inc, which the module loader in modules.asm uses.
+.import __MAIN_START__
+.include "layout.inc"
+.assert __MAIN_START__ = MOD_LO_BASE, lderror, "moddsk: linker config load address disagrees with layout.inc MOD_LO_BASE"
 .segment "LOADADDR"
-    .word $C000
+    .word __MAIN_START__
 
 .segment "CODE"
 
@@ -218,14 +224,7 @@ disk_main:
     sta $01
 
     ; Save ZP
-    lda ZP_PTR2
-    sta DSK_ZP_SAVE+0
-    lda ZP_PTR2+1
-    sta DSK_ZP_SAVE+1
-    lda ZP_PTR3
-    sta DSK_ZP_SAVE+2
-    lda ZP_PTR3+1
-    sta DSK_ZP_SAVE+3
+    zp_save_ptrs DSK_ZP_SAVE
 
     ; Copy drive from parameter block
     lda MOD_DRIVE
@@ -330,14 +329,7 @@ disk_main:
 
 dsk_exit:
     ; Restore ZP
-    lda DSK_ZP_SAVE+0
-    sta ZP_PTR2
-    lda DSK_ZP_SAVE+1
-    sta ZP_PTR2+1
-    lda DSK_ZP_SAVE+2
-    sta ZP_PTR3
-    lda DSK_ZP_SAVE+3
-    sta ZP_PTR3+1
+    zp_restore_ptrs DSK_ZP_SAVE
     rts
 
 ; ============================================================================

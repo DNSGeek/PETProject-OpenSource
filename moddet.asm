@@ -24,14 +24,15 @@
 ;   Walk: skip (token - $80) null-terminated-by-high-bit entries, then copy
 ;   chars with bit 7 cleared until we see a char with bit 7 set (inclusive).
 ;
-; Zero page used (free during our execution):
-;   $FB/$FC — SRC_PTR:  walks tokenized source
-;   $FD/$FE — DST_PTR:  output write pointer (streams into MOD_BUF)
-;   $F7/$F8 — COPY_SRC: copy-back loop source pointer
-;   $F9/$FA — COPY_DST: copy-back loop dest pointer
-;   $3A/$3B — LINENO:   16-bit line number value (modified by decimal output)
-;   $3C     — NZFLAG:   non-zero digit seen flag (decimal output)
-;   $3D/$3E — KWTAB:    keyword table walker pointer
+; Zero page used (free during our execution; addresses come from zp.inc):
+;   ZP_PTR2      — SRC_PTR:  walks tokenized source
+;   ZP_PTR3      — DST_PTR:  output write pointer (streams into MOD_BUF)
+;   ZP_PTR0      — COPY_SRC: copy-back loop source pointer
+;   ZP_PTR1      — COPY_DST: copy-back loop dest pointer
+;   ZP_SCRATCH+0 — LINENO:   16-bit line number value (modified by decimal output)
+;   ZP_SCRATCH+2 — NZFLAG:   non-zero digit seen flag (decimal output)
+;   ZP_SCRATCH+3 — KWTAB:    keyword table walker pointer
+;   ZP_SCRATCH+5 — OVFLAG:   output-overflow flag
 ;
 ; Streaming: input relocated to the top of work_buf, output written in
 ; place from MOD_BUF up (see the STREAMING MODEL note below).  A listing
@@ -84,8 +85,13 @@ OVFLAG           = ZP_SCRATCH+5     ; output-overflow flag ($FF = won't fit)
 
 ; ============================================================================
 
+; PRG load address comes from the linker config (MAIN start) and must
+; agree with layout.inc, which the module loader in modules.asm uses.
+.import __MAIN_START__
+.include "layout.inc"
+.assert __MAIN_START__ = MOD_LO_BASE, lderror, "moddet: linker config load address disagrees with layout.inc MOD_LO_BASE"
 .segment "LOADADDR"
-    .word $C000
+    .word __MAIN_START__
 
 .segment "CODE"
 

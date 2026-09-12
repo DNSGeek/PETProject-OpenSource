@@ -50,3 +50,41 @@ jobs:
           name: petproject-d64
           path: petproject.d64
           if-no-files-found: error
+
+  # Build against the C128 memory map (zp_c128.inc, layout.inc and the
+  # *_c128.cfg linker configs) so the map, its contract asserts and the
+  # link-time layout checks are exercised on every change rather than only
+  # when someone builds for the C128 by hand.
+  c128-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install cc65 toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cc65
+
+      - name: Build editor and modules for the C128 memory map
+        run: TARGET=c128 bash make_petproject.sh
+
+      - name: Verify C128 build outputs
+        run: |
+          set -e
+          test -s build/c128/editor.prg
+          for m in modasm moddet moddis moddsk modren modtok modsfr modsct; do
+            test -s "build/c128/${m}.prg"
+          done
+          echo "All C128 PRGs are present."
+
+      - name: Confirm the script runner refuses the C128 map
+        run: |
+          for m in modscr modscrh; do
+            if ca65 -t none -D TARGET_C128 -o "build/c128/${m}.o" "${m}.asm" 2>/dev/null; then
+              echo "${m}.asm assembled under TARGET_C128 but is documented as excluded from the C128 port"
+              exit 1
+            fi
+          done
+          echo "modscr/modscrh correctly refuse TARGET_C128."

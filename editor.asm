@@ -679,7 +679,9 @@ do_new_file:
     beq @clear
     jmp @wait
 @save:
-    jsr do_save_file            ; if save is cancelled, still proceed to clear
+    jsr do_save_file            ; clears IS_DIRTY only on a successful write
+    lda IS_DIRTY
+    bne @cancel                 ; save cancelled or failed: keep the buffer
 @clear:
     ; Reset gap buffer to empty
     lda #<work_buf
@@ -722,7 +724,8 @@ new_dirty_text:
 ; ============================================================================
 ; quit_dirty_prompt — "SAVE BEFORE QUIT (Y/N)?" on status bar.
 ;
-; If Y: calls do_save_file, then returns C=0 (proceed to quit).
+; If Y: calls do_save_file; returns C=0 (proceed to quit) if the save went
+;       through, C=1 if it was cancelled or failed (buffer still dirty).
 ; If N: returns C=0 (quit without saving).
 ; If STOP: returns C=1 (cancel quit, back to editor).
 ; Clobbers: A, X, Y.
@@ -748,6 +751,8 @@ quit_dirty_prompt:
     jmp @wait
 @save:
     jsr do_save_file                ; save — clears IS_DIRTY on success
+    lda IS_DIRTY
+    bne @cancel                     ; save cancelled or failed: don't quit
     clc
     rts
 @nosave:

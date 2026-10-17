@@ -99,7 +99,7 @@ MPOP_ITEM_ROW0   = (MPOP_TOP + 3)   ; screen row of first item (title at TOP+1, 
 MOD_LOAD_SAVE_LO = $0228
 MOD_LOAD_SAVE_HI = $0229
 ; Index of the most recently run module — lets mpop_show_error honor
-; MODASM's rich-error flag ($C007) only when MODASM actually ran.
+; MODASM's rich-error flag (ASM_ERR) only when MODASM actually ran.
 MOD_LAST_IDX     = $022A
 MOD_IDX_MODASM   = 0
 
@@ -888,15 +888,15 @@ run_sel_load_err:
 ; ============================================================================
 
 mpop_show_error:
-    ; If MODASM set ASM_ERR ($C007=$FF), show rich "ERR NNNN: MSGTEXT" display.
+    ; If MODASM set ASM_ERR (=$FF), show rich "ERR NNNN: MSGTEXT" display.
     ; Gate on "MODASM was the module that just ran": five other modules
-    ; LOAD at $C000, so $C007 is one of THEIR code bytes — a coincidental
-    ; $FF there (or a stale flag from an earlier MODASM failure) used to
-    ; display garbage as a rich assembler error for unrelated failures.
+    ; LOAD at MOD_LO_BASE, so ASM_ERR is one of THEIR code bytes — a
+    ; coincidental $FF there (or a stale flag from an earlier MODASM failure)
+    ; used to display garbage as a rich assembler error for unrelated failures.
     lda MOD_LAST_IDX
     cmp #MOD_IDX_MODASM
     bne @generic
-    lda $C007                       ; ASM_ERR flag written by MODASM's set_err_common
+    lda ASM_ERR                     ; flag written by MODASM's set_err_common
     cmp #$FF
     beq asm_show_err                ; MODASM error → rich display, includes wait
 @generic:
@@ -924,8 +924,8 @@ mpop_show_error:
 ; ============================================================================
 ; asm_show_err — rich MODASM error display.
 ;
-; Reads ASM_ERR_LINE_LO/HI ($C008/$C009) and ASM_ERR_MSG ($C00A, screen codes,
-; zero-terminated) written by MODASM's set_err_common, and formats:
+; Reads ASM_ERR_LINE_LO/HI and ASM_ERR_MSG (screen codes, zero-terminated)
+; written by MODASM's set_err_common, and formats:
 ;
 ;   ERR NNNN: MSGTEXT
 ;
@@ -940,9 +940,13 @@ mpop_show_error:
 asm_err_prefix_txt:
     .byte $05,$12,$12,$20           ; "ERR "
 
-ASM_ERR_LINE_LO = $C008
-ASM_ERR_LINE_HI = $C009
-ASM_ERR_MSG     = $C00A
+; MODASM's error block sits at the start of its ASM_STATE block, which is
+; MOD_LO_BASE (layout.inc): $C000 on the C64, $9000 on the C128.  Offsets
+; must match ASM_ERR / ASM_ERR_LINE_* / ASM_ERR_MSG in modasm.asm.
+ASM_ERR         = MOD_LO_BASE + $07
+ASM_ERR_LINE_LO = MOD_LO_BASE + $08
+ASM_ERR_LINE_HI = MOD_LO_BASE + $09
+ASM_ERR_MSG     = MOD_LO_BASE + $0A
 
 asm_show_err:
     ; --- 1. Write "ERR " prefix ---
@@ -961,9 +965,9 @@ asm_show_err:
     ; Load 16-bit line number into AN_CUR (reuse existing BSS scratch).
     ; an_emit_number writes via do_insert; we can't use it here.
     ; Instead: same repeated-subtraction algorithm, writing to STATUS_ROW,Y.
-    lda $C008                       ; ASM_ERR_LINE_LO
+    lda ASM_ERR_LINE_LO
     sta AN_CUR
-    lda $C009                       ; ASM_ERR_LINE_HI
+    lda ASM_ERR_LINE_HI
     sta AN_CUR+1
 
     ; Reuse an_div_lo/an_div_hi table from editor.asm (same link unit).

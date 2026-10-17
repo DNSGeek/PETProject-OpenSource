@@ -166,9 +166,12 @@ load_body:
 @name_done:
 
     ; ---- OPEN ----
+    ; The Kernal registers the logical file before the serial OPEN can fail
+    ; (DEVICE NOT PRESENT etc.), so a failed OPEN must still CLOSE IO_LA or
+    ; every later load/save fails with FILE OPEN for the rest of the session.
     jsr OPEN
     bcc :+
-    jmp @io_err
+    jmp @close_err
 :
     ; Check drive status after OPEN
     jsr READST
@@ -459,7 +462,7 @@ do_save_file:
     ; ---- OPEN ----
     jsr OPEN
     bcc :+
-    jmp @io_err
+    jmp @close_err                  ; LFN is registered even when OPEN fails
 :
     jsr READST
     beq :+

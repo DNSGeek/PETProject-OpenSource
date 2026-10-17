@@ -480,6 +480,26 @@ def main():
     equivalence("mixed directives across files", src, files)
     print("ok: data + code directives across multiple files")
 
+    # 14. Relative branch range. A branch whose offset is +128..+255 or
+    #     -129..-256 has a hi byte of $00/$FF like an in-range one, so the
+    #     check must also look at the sign of the lo byte.
+    def nops(n):
+        return "        NOP\n" * n
+
+    # forward: BEQ over 120 NOPs = +120, fine; over 130 = +130, out of range
+    src = "        *= $C000\n        BEQ FAR\n" + nops(120) + "FAR:    RTS\n"
+    m = assemble(src)
+    expect_output(m, bytes.fromhex("00c0f078") + b"\xea" * 120 + b"\x60", "BEQ +120")
+    m = assemble("        *= $C000\n        BEQ FAR\n" + nops(130) + "FAR:    RTS\n")
+    expect_error(m, "BRANCH RANGE", "BEQ +130", line=2)
+    # backward: RTS; 125 NOPs; BNE BACK = -128, fine; 130 NOPs = -133, out of range
+    src = "        *= $C000\nBACK:   RTS\n" + nops(125) + "        BNE BACK\n"
+    m = assemble(src)
+    expect_output(m, bytes.fromhex("00c060") + b"\xea" * 125 + b"\xd0\x80", "BNE -128")
+    m = assemble("        *= $C000\nBACK:   RTS\n" + nops(130) + "        BNE BACK\n")
+    expect_error(m, "BRANCH RANGE", "BNE -133", line=133)
+    print("ok: relative branch range (lo-byte sign checked)")
+
     print("\nall include tests passed")
 
 

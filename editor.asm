@@ -555,10 +555,15 @@ main_loop:
     jsr do_settings_popover
     jmp main_loop
 @do_load:
+    jsr load_dirty_check            ; unsaved changes? C=1 → cancelled
+    bcs @load_cancelled
     jsr do_load_file
     jmp main_loop
 @do_load_source:
+    jsr load_dirty_check
+    bcs @load_cancelled
     jsr do_load_source_file
+@load_cancelled:
     jmp main_loop
 @do_save:
     jsr do_save_file
@@ -660,26 +665,10 @@ move_begin:
 do_new_file:
     lda IS_DIRTY
     beq @clear
-    ; Prompt — reverse-video alert bar so it can't be mistaken for idle status.
     lda #<new_dirty_text
     ldx #>new_dirty_text
-    jsr modal_draw_text
-@wait:
-    jsr GETIN
-    beq @wait
-    cmp #PET_STOP
-    beq @cancel
-    cmp #'Y'
-    beq @save
-    cmp #'y'
-    beq @save
-    cmp #'N'
-    beq @clear
-    cmp #'n'
-    beq @clear
-    jmp @wait
-@save:
-    jsr do_save_file            ; if save is cancelled, still proceed to clear
+    jsr dirty_prompt            ; C=1 → cancelled (STOP, or the save didn't happen)
+    bcs @done
 @clear:
     ; Reset gap buffer to empty
     lda #<work_buf
@@ -710,8 +699,8 @@ do_new_file:
     jsr render_status
     jsr render_viewport
     jsr draw_cursor
-@cancel:
-    jsr modal_exit              ; STOP: restore idle status bar before returning
+    jsr modal_exit              ; restore idle status bar before returning
+@done:
     rts
 
 new_dirty_text:
@@ -721,17 +710,52 @@ new_dirty_text:
 
 ; ============================================================================
 ; quit_dirty_prompt — "SAVE BEFORE QUIT (Y/N)?" on status bar.
-;
-; If Y: calls do_save_file, then returns C=0 (proceed to quit).
-; If N: returns C=0 (quit without saving).
-; If STOP: returns C=1 (cancel quit, back to editor).
-; Clobbers: A, X, Y.
+; Returns C=0 to proceed with the quit, C=1 to cancel (see dirty_prompt).
 ; ============================================================================
 
 quit_dirty_prompt:
     lda #<quit_dirty_text
     ldx #>quit_dirty_text
-    jsr modal_draw_text
+    jmp dirty_prompt
+
+quit_dirty_text:
+    ; "SAVE BEFORE QUIT (Y/N)?" in screen codes
+    .byte $13,$01,$16,$05,$20,$02,$05,$06,$0F,$12,$05,$20,$11,$15,$09,$14
+    .byte $20,$28,$19,$2F,$0E,$29,$3F, 0
+
+; ============================================================================
+; load_dirty_check — F3/F6 guard: ask before a load discards unsaved changes.
+; Returns C=0 to go ahead with the load, C=1 if the user cancelled.
+; ============================================================================
+
+load_dirty_check:
+    lda IS_DIRTY
+    beq @clean
+    lda #<load_dirty_text
+    ldx #>load_dirty_text
+    jmp dirty_prompt
+@clean:
+    clc
+    rts
+
+load_dirty_text:
+    ; "SAVE BEFORE LOAD (Y/N)?" in screen codes
+    .byte $13,$01,$16,$05,$20,$02,$05,$06,$0F,$12,$05,$20,$0C,$0F,$01,$04
+    .byte $20,$28,$19,$2F,$0E,$29,$3F, 0
+
+; ============================================================================
+; dirty_prompt — "SAVE BEFORE xxx (Y/N)?" modal shared by new, load and quit.
+;
+; Entry: A/X = lo/hi of the prompt text (screen codes, modal_draw_text format).
+; Y:    calls do_save_file. Returns C=0 if the write succeeded; C=1 if the
+;       save was cancelled or failed (do_save_file leaves IS_DIRTY set then).
+; N:    returns C=0 — proceed, discarding the changes.
+; STOP: returns C=1 — cancel; the idle status bar is restored via modal_exit.
+; Clobbers: A, X, Y.
+; ============================================================================
+
+dirty_prompt:
+    jsr modal_draw_text             ; reverse-video alert bar
 @wait:
     jsr GETIN
     beq @wait
@@ -742,26 +766,21 @@ quit_dirty_prompt:
     cmp #'y'
     beq @save
     cmp #'N'
-    beq @nosave
+    beq @proceed
     cmp #'n'
-    beq @nosave
+    beq @proceed
     jmp @wait
 @save:
-    jsr do_save_file                ; save — clears IS_DIRTY on success
-    clc
-    rts
-@nosave:
+    jsr do_save_file                ; clears IS_DIRTY only on a successful write
+    lda IS_DIRTY
+    bne @cancel                     ; save cancelled or failed: keep editing
+@proceed:
     clc
     rts
 @cancel:
     jsr modal_exit                  ; restore idle status bar (caller returns to editor)
     sec
     rts
-
-quit_dirty_text:
-    ; "SAVE BEFORE QUIT (Y/N)?" in screen codes
-    .byte $13,$01,$16,$05,$20,$02,$05,$06,$0F,$12,$05,$20,$11,$15,$09,$14
-    .byte $20,$28,$19,$2F,$0E,$29,$3F, 0
 
 ; ============================================================================
 ; init_settings — write compiled-in defaults into the SETTING_* BSS bytes.

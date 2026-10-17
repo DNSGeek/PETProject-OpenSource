@@ -244,6 +244,17 @@ pass2:
     jsr setup_staging           ; linearise source, set SRC_PTR
     bcs @error
 
+    ; The source is now linear in [staging_start..BUF_END): the editor's gap
+    ; no longer exists in it.  advance_src (used by parse_line_number and
+    ; skip_to_next_cr) still warps SRC_PTR from REN_GAP to REN_GAP_END when
+    ; it lands on the old GAP_START — with a pre-gap larger than the gap,
+    ; the staging area straddles that address and the warp silently dropped
+    ; gap_size bytes of program mid-line.  Make the warp a no-op from here on.
+    lda REN_GAP_END_LO
+    sta REN_GAP_LO
+    lda REN_GAP_END_HI
+    sta REN_GAP_HI
+
     ; DST_PTR = work_buf
     lda REN_BUF_LO
     sta DST_PTR

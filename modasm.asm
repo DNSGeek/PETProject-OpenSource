@@ -1934,8 +1934,11 @@ emit_instruction:
     ; FIX (branch offset): compute signed relative offset as a proper 16-bit
     ; subtraction: offset = target - (PC + 2).
     ; PC still points to the branch opcode (not yet advanced).
-    ; The hi byte of the result must be $00 (forward) or $FF (backward);
-    ; anything else means the target is more than 128 bytes away.
+    ; The hi byte of the result must be $00 (forward) or $FF (backward), and
+    ; the lo byte's sign must agree with it: $00xx needs bit 7 of xx clear
+    ; (offset 0..+127), $FFxx needs it set (offset -128..-1).  Checking the
+    ; hi byte alone accepted +128..+255 and -129..-256 and emitted an offset
+    ; that branched to the wrong place.
     ;
     ; Compute PC+2 into TMP2
     lda ASM_PC_LO
@@ -1951,13 +1954,18 @@ emit_instruction:
     sbc TMP2
     sta TMP                     ; lo byte = branch offset to emit
     lda ASM_VAL_HI
-    sbc TMP2+1                  ; hi byte: $00=forward in range, $FF=backward in range
-    beq @rel_ok
+    sbc TMP2+1                  ; hi byte: $00=forward, $FF=backward
+    beq @rel_fwd
     cmp #$FF
     bne @rel_range_err
+    lda TMP                     ; backward: lo must be $80..$FF
+    bpl @rel_range_err          ; $FF00..$FF7F = -256..-129
+    bmi @rel_ok
+@rel_fwd:
+    lda TMP                     ; forward: lo must be $00..$7F
+    bmi @rel_range_err          ; $0080..$00FF = +128..+255
 @rel_ok:
-    lda TMP
-    jsr emit_byte
+    jsr emit_byte               ; A = offset lo byte
     bcs @err
     jmp @done
 

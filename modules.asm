@@ -837,6 +837,10 @@ run_sel_loaded:
     sta CURSOR_ROW
     sta CURSOR_COL
     jsr ensure_cursor_visible   ; scroll/compute so display agrees with the gap
+    ; The module rewrote the buffer (renumber, tokenize...): the text no
+    ; longer matches what is on disk, so the new/load/quit prompts must fire.
+    lda #$FF
+    sta IS_DIRTY
     rts
 
 @check_reposition:
@@ -856,6 +860,10 @@ run_sel_loaded:
     sta GAP_END+1
     ; TOP_LINE intentionally not reset — ensure_cursor_visible (called by
     ; do_search_replace after we return) will scroll as needed.
+    ; MODSFR reports $04 after a replace as well as after a plain find, and
+    ; does not say which; a replace edits the buffer, so mark it dirty.
+    lda #$FF
+    sta IS_DIRTY
     rts
 
 @check_err:

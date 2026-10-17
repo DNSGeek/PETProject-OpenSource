@@ -2387,7 +2387,7 @@ open_output:
     jsr SETNAM
 
     jsr OPEN
-    bcs @err
+    bcs @err_close              ; LFN is registered even when OPEN fails
 
     ldx #ASM_OUT_LA_VAL
     jsr CHKOUT
@@ -2407,8 +2407,13 @@ open_output:
     rts
 
 @err_close:
+    ; The Kernal registers the logical file before the serial OPEN can fail
+    ; (DEVICE NOT PRESENT etc.): without this CLOSE every later assembly in
+    ; the session fails with FILE OPEN on LFN 4.  The caller expects an
+    ; error to have been recorded, so record I/O ERROR here.
     lda #ASM_OUT_LA_VAL
     jsr CLOSE
+    jsr set_err_io
 @err:
     sec
     rts

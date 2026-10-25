@@ -12,6 +12,7 @@ MOD_BUF_LO       = $0214
 MOD_BUF_HI       = $0215
 MOD_BUF_END_LO   = $021A
 MOD_BUF_END_HI   = $021B
+MOD_SFR_EDITED   = $021F           ; out: nonzero if a replace edited the buffer
 
 ; Editor ZP — borrowed for pointer dereferences while module runs.
 ; These are offsets into the editor's .zeropage block (editor.asm), whose
@@ -143,6 +144,7 @@ sfr_main:
     sta sfr_repl_buf
     sta sfr_have_match
     sta sfr_did_move
+    sta sfr_did_edit
     sta sfr_cur_field
     lda #$FF
     sta sfr_case_mode
@@ -203,6 +205,8 @@ sfr_loop:
     jmp sfr_loop
 
 sfr_exit:
+    lda sfr_did_edit
+    sta MOD_SFR_EDITED
     lda sfr_did_move
     beq @nomove
     lda sfr_gs_lo
@@ -296,38 +300,15 @@ sfr_do_return:
     beq @done
     lda sfr_have_match
     beq @find
-    ; Replace then find next
-    lda sfr_repl_len
-    bne @do_repl
-    ; Empty replacement: skip match by advancing GAP_END
-    lda sfr_ge_lo
-    clc
-    adc sfr_find_len
-    sta sfr_ge_lo
-    sta ZP_GAP_END
-    sta MOD_GAP_END_LO
-    lda sfr_ge_hi
-    adc #0
-    sta sfr_ge_hi
-    sta ZP_GAP_END+1
-    sta MOD_GAP_END_HI
-    ; Deleting the match shrinks the document — keep sfr_total in sync,
-    ; or later searches scan find_len bytes past the real content and can
-    ; act on phantom matches beyond the buffer.
-    lda sfr_total_lo
-    sec
-    sbc sfr_find_len
-    sta sfr_total_lo
-    lda sfr_total_hi
-    sbc #0
-    sta sfr_total_hi
-    lda #$FF
-    sta sfr_did_move
-    jmp @after_repl
-@do_repl:
+    ; RETURN in the FIND field steps to the next match (srch already points
+    ; past this one); only RETURN in the REPLACE field edits the buffer. An
+    ; empty replacement deletes the match.
+    lda sfr_cur_field
+    beq @find
     jsr sfr_replace_at_match
     bcs @done                   ; no room in gap — replace aborted
-@after_repl:
+    lda #$FF
+    sta sfr_did_edit
     lda #0
     sta sfr_have_match
     lda sfr_gs_lo
@@ -547,6 +528,14 @@ sfr_move_gap:
     lda sfr_buf_hi
     adc sfr_match_hi
     sta sfr_gs_hi
+    ; The moved block now sits just below the old GAP_END: pull it down.
+    lda sfr_ge_lo
+    sec
+    sbc sfr_mv_sz_lo
+    sta sfr_ge_lo
+    lda sfr_ge_hi
+    sbc sfr_mv_sz_hi
+    sta sfr_ge_hi
     lda sfr_match_lo
     sta sfr_pre_lo
     lda sfr_match_hi
@@ -1097,6 +1086,7 @@ sfr_case_mode:  .res 1
 sfr_cur_field:  .res 1
 sfr_have_match: .res 1
 sfr_did_move:   .res 1
+sfr_did_edit:   .res 1
 
 sfr_match_lo:   .res 1
 sfr_match_hi:   .res 1

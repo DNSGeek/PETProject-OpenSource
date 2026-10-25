@@ -33,11 +33,15 @@ JIFFY_LO = 0xA2
 KEY_STOP = 0x03
 
 
-def run_module(name, pre, post=b"", buf_end=BUF_END, max_steps=50_000_000, keys=None):
+def run_module(
+    name, pre, post=b"", buf_end=BUF_END, max_steps=50_000_000, keys=None, fill=None
+):
     """Run module `name` on the gap buffer [pre | gap | post].
 
     With `keys`, GETIN ($FFE4) returns those PETSCII codes one per call,
-    then STOP; the jiffy clock at $A2 ticks so timed waits finish.
+    then STOP; the jiffy clock at $A2 ticks so timed waits finish. With
+    `fill`, the module's 4 K region is pre-filled with that byte, standing
+    in for whatever a previously loaded module left past the image.
 
     Returns (status, linear output or None, memory).
     """
@@ -45,6 +49,8 @@ def run_module(name, pre, post=b"", buf_end=BUF_END, max_steps=50_000_000, keys=
     load = prg[0] | (prg[1] << 8)
     m = MPU()
     mem = m.memory
+    if fill is not None:
+        mem[load : load + 0x1000] = [fill] * 0x1000
     mem[load : load + len(prg) - 2] = list(prg[2:])
 
     gs = BUF + len(pre)
@@ -252,9 +258,22 @@ def test_shifted_abbreviations():
     want = b"\x8d20:\x98A:\x9b:\x81I:\x82:\xd3:\x8c"
     check(st == 0x02 and body(out) == want, "shifted-letter abbreviations")
     # A shifted letter EQUAL to a keyword's final char is not an
-    # abbreviation (F<shift-N> is not FN): the match runs on past the entry.
+    # abbreviation (F<shift-N> is not FN, T<shift-O> is not TO): that entry
+    # doesn't match, and the search moves on. T<shift-O> used to compare on
+    # past the keyword table's end into whatever memory followed it.
     st, out, _ = run_module("modtok", b"10 PRINTF\xce(1)\r")
     check(st == 0x02 and body(out) == b"\x99F\xce(1)", "F<shift-N> stays literal")
+    st, out, _ = run_module("modtok", b"10 FORI=1T\xcf9\r", max_steps=200_000)
+    check(
+        st == 0x02 and body(out) == b"\x81I\xb21T\xcf9",
+        "T<shift-O> stays literal and stays inside the table",
+    )
+    # keywords typed with a shifted final letter, garbage after the table
+    for kw in (b"TO", b"FN", b"OR", b"IF", b"AND", b"NOT", b"END"):
+        src = b"10 X=" + kw[:-1] + bytes([kw[-1] | 0x80]) + b"\r"
+        st, out, _ = run_module("modtok", src, max_steps=200_000, fill=0x41)
+        assert st == 0x02 and body(out).endswith(src[5:-1]), f"{src!r}: {out!r}"
+    print("ok: shifted final letters never complete a keyword")
 
 
 def test_tokenize_page_boundaries():

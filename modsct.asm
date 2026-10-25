@@ -1280,7 +1280,6 @@ try_keyword:
     ; Y-indexed walk with one pointer advance per entry.
     ldy #0
     lda (SRC_PTR),y
-    sta KW_XSAVE                ; cache first source char for entry rejects
     ldx #7
 @op_chk:
     cmp kw_op_chars,x
@@ -1293,8 +1292,9 @@ try_keyword:
     bcs @kw_no_match
 
     ; First-letter index (kwtab.inc) — see modtok's try_keyword: only
-    ; this letter's entries, in table order; a shifted letter equal to an
-    ; entry's final char hands over to the original linear walk.
+    ; this letter's entries, in table order. A shifted letter equal to an
+    ; entry's final char does not match it ("T<shift-O>" is not TO): try
+    ; the next candidate.
     tax
     lda kw_first-'A',x
     tax
@@ -1317,7 +1317,7 @@ try_keyword:
     bne @kw_cand_next
     bcs @kw_full_match
     lda (TMP16),y               ; exact match on the entry's final char?
-    bmi @kw_overrun
+    bmi @kw_cand_next           ; yes: a shifted final letter — no match
     iny
     bne @kw_cmp                 ; always taken
 @kw_cand_next:
@@ -1335,51 +1335,6 @@ try_keyword:
     sec
     rts
 
-@kw_overrun:
-    iny
-    jmp @kw_match
-
-    ; ---- The original linear table walk (only via @kw_overrun) ----
-@kw_entry:
-    ldy #0
-    lda (TMP16),y               ; token byte, $FF = sentinel
-    cmp #$FF
-    beq @kw_no_match
-    sta KW_TOKEN
-    ldy #1
-    lda (TMP16),y
-    and #$7F
-    cmp KW_XSAVE
-    bne @kw_skip_entry
-
-@kw_match:
-    dey
-    lda (SRC_PTR),y             ; source char at (kw index - 1)
-    iny
-    eor (TMP16),y               ; $00 = match; $80 = match on final char
-    asl                         ; C = final-char flag, A = difference << 1
-    bne @kw_skip_from_y
-    bcs @kw_full_match
-    iny
-    bne @kw_match               ; always taken
-
-@kw_skip_entry:
-    ldy #1
-@kw_skip_from_y:
-    lda (TMP16),y
-    bmi @kw_advance_entry
-    iny
-    bne @kw_skip_from_y         ; always taken
-@kw_advance_entry:
-    iny                         ; Y = offset of the next entry's token byte
-    tya
-    clc
-    adc TMP16
-    sta TMP16
-    bcc @kw_entry
-    inc TMP16+1
-    jmp @kw_entry
-
 @kw_full_match:
     tya                         ; Y = keyword length (never 0)
     clc
@@ -1393,7 +1348,7 @@ try_keyword:
 
 ; Single-char operator dispatch — chars and their BASIC tokens (same
 ; encodings as the kwtab's 1-char entries, which are never matched as
-; entries but are still read by the @kw_overrun walk).
+; entries).
 kw_op_chars:  .byte $2A,$2B,$2D,$2F,$3C,$3D,$3E,$5E   ; * + - / < = > ^
 kw_op_tokens: .byte $AC,$AA,$AB,$AD,$B3,$B2,$B1,$AE
 
@@ -1500,8 +1455,6 @@ tok_after_data:
 ; Prefix conflicts are resolved by that order: RUNPROG (7) before RUN (3),
 ; ONERR (5) before ON (2).
 ;
-; The index goes before the table, so the table is still followed by the
-; reserved scratch below: the @kw_overrun walk can read past the sentinel.
 ; ============================================================================
 
     kw_index

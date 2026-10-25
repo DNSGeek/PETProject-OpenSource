@@ -464,7 +464,6 @@ tokenize:
 ; Register protocol:
 ;   TMP16 (ZP_SCRATCH+2/+3): address of the entry being compared.
 ;   KW_TOKEN (ZP_SCRATCH+0): token byte of that entry.
-;   KW_XSAVE (ZP_SCRATCH+1): first source char (the linear walk's reject key).
 ;   X: position in kw_idx_lo/hi.  Y: index into the entry (source index Y-1).
 ;
 ; Returns carry set + A=token on match (SRC_PTR advanced by keyword length).
@@ -483,7 +482,6 @@ try_keyword:
     ; Since then: a first-letter index replaces the first-char rejects.
     ldy #0
     buf_lda SRC_PTR
-    sta KW_XSAVE                ; cache first source char for entry rejects
     ldx #7
 @op_chk:
     cmp kw_op_chars,x
@@ -526,14 +524,15 @@ try_keyword:
     asl                         ; C = final-char flag, A = difference << 1
     bne @kw_cand_next           ; real difference → next candidate
     bcs @kw_full_match          ; matched the entry's final char
-    ; Exact match. If that was the entry's final char (bit 7 set, i.e.
-    ; a shifted source letter equal to it), the original walk ran on past
-    ; the entry into the following table bytes and — on a mismatch there
-    ; — resumed its entry-by-entry scan from wherever that left it, no
-    ; longer on entry boundaries. Hand over to that walk (below) to keep
-    ; the result identical.
+    ; Exact match. If that was the entry's final char (bit 7 set), the
+    ; source has a SHIFTED letter equal to it — "T<shift-O>" against TO.
+    ; That is not this keyword (a shifted letter only ends an abbreviation
+    ; before the final char), so try the next candidate. The old code
+    ; compared on into the following table bytes instead, off entry
+    ; boundaries, and could run past the $FF sentinel into whatever
+    ; memory followed the module — on a common abbreviation habit.
     lda (TMP16),y
-    bmi @kw_overrun
+    bmi @kw_cand_next
     iny
     bne @kw_cmp                 ; always taken (Y stays tiny)
 @kw_cand_next:
@@ -551,59 +550,6 @@ try_keyword:
     sec
     rts
 
-@kw_overrun:
-    iny
-    jmp @kw_match
-
-    ; ---- The original linear table walk ----
-    ; Reached only through @kw_overrun, with TMP16 at the current entry
-    ; and Y one past its final char; from there it behaves exactly as the
-    ; full scan always did.
-@kw_entry:
-    ldy #0
-    lda (TMP16),y               ; token byte, $FF = sentinel
-    cmp #$FF
-    beq @kw_no_match
-    sta KW_TOKEN
-    ; First-char reject: most entries fail here for 13 cycles instead of
-    ; a byte-by-byte walk.
-    ldy #1
-    lda (TMP16),y
-    and #$7F
-    cmp KW_XSAVE
-    bne @kw_skip_entry
-
-    ; Full compare.  Y indexes the keyword inside the entry (1..len);
-    ; the matching source index is always Y-1.
-@kw_match:
-    dey
-    buf_lda SRC_PTR             ; source char at (kw index - 1)
-    iny
-    eor (TMP16),y               ; $00 = match; $80 = match on final char
-    asl                         ; C = final-char flag, A = difference << 1
-    bne @kw_skip_from_y         ; real difference → try next entry
-    bcs @kw_full_match          ; matched the entry's final char
-    iny
-    bne @kw_match               ; always taken (Y stays tiny)
-
-@kw_skip_entry:
-    ldy #1
-@kw_skip_from_y:
-    ; Find the entry's final char (bit7 set); next entry starts at Y+1.
-    lda (TMP16),y
-    bmi @kw_advance_entry
-    iny
-    bne @kw_skip_from_y         ; always taken
-@kw_advance_entry:
-    iny                         ; Y = offset of the next entry's token byte
-    tya
-    clc
-    adc TMP16
-    sta TMP16
-    bcc @kw_entry
-    inc TMP16+1
-    jmp @kw_entry
-
 @kw_full_match:
     ; Keyword chars occupy offsets 1..Y, so Y = keyword length (1..255,
     ; never 0): advance SRC_PTR past them in one add.
@@ -619,7 +565,7 @@ try_keyword:
 
 ; Single-char operator dispatch — chars and their BASIC tokens (same
 ; encodings as the kwtab's 1-char entries, which are never matched as
-; entries but are still read by the @kw_overrun walk).
+; entries).
 kw_op_chars:  .byte $2A,$2B,$2D,$2F,$3C,$3D,$3E,$5E   ; * + - / < = > ^
 kw_op_tokens: .byte $AC,$AA,$AB,$AD,$B3,$B2,$B1,$AE
 
@@ -703,9 +649,6 @@ reloc_hi:
 ; ============================================================================
 ; Keyword table and its first-letter index (kwtab.inc).
 ;
-; kwtab stays the LAST thing in the module, as it always was: the
-; @kw_overrun walk can read past the sentinel, and what lies beyond it
-; (memory after the image) is then the same as before.
 ; ============================================================================
 
     kw_index

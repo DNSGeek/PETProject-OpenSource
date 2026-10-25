@@ -129,97 +129,111 @@ COL_ASM_STRING    = 5    ; green — strings in .text/.byte
 ; No terminators; use kw_len_tab for each entry's length.
 ; Used by tl_match_kw for on-commit tokenization.
 ; Stored as lowercase so ca65 -t c64 produces uppercase PETSCII ($41-$5A).
+;
+; Each entry goes through the KW macro, which emits exactly the same bytes a
+; plain .byte would, and also records the entry's offset into kw_strtab and
+; its first character (kw_off_<n> / kw_ch0_<n>, n = token - $80). The
+; first-letter index used by col_match_kw (kw_let_start / kw_cand_*, after
+; kw_len_tab) is generated from those, so it cannot drift from this table.
 ; ============================================================================
+KW_N .set 0
+.macro KW str
+    .ident(.sprintf("kw_off_%d", KW_N)) = * - kw_strtab
+    .ident(.sprintf("kw_ch0_%d", KW_N)) = .strat(str, 0)
+    .byte str
+    KW_N .set KW_N + 1
+.endmacro
+
 kw_strtab:
-    .byte "end"         ; $80  3
-    .byte "for"         ; $81  3
-    .byte "next"        ; $82  4
-    .byte "data"        ; $83  4
-    .byte "input#"      ; $84  6
-    .byte "input"       ; $85  5
-    .byte "dim"         ; $86  3
-    .byte "read"        ; $87  4
-    .byte "let"         ; $88  3
-    .byte "goto"        ; $89  4
-    .byte "run"         ; $8A  3
-    .byte "if"          ; $8B  2
-    .byte "restore"     ; $8C  7
-    .byte "gosub"       ; $8D  5
-    .byte "return"      ; $8E  6
-    .byte "rem"         ; $8F  3
-    .byte "stop"        ; $90  4
-    .byte "on"          ; $91  2
-    .byte "wait"        ; $92  4
-    .byte "load"        ; $93  4
-    .byte "save"        ; $94  4
-    .byte "verify"      ; $95  6
-    .byte "def"         ; $96  3
-    .byte "poke"        ; $97  4
-    .byte "print#"      ; $98  6
-    .byte "print"       ; $99  5
-    .byte "cont"        ; $9A  4
-    .byte "list"        ; $9B  4
-    .byte "clr"         ; $9C  3
-    .byte "cmd"         ; $9D  3
-    .byte "sys"         ; $9E  3
-    .byte "open"        ; $9F  4
-    .byte "close"       ; $A0  5
-    .byte "get"         ; $A1  3
-    .byte "new"         ; $A2  3
-    .byte "tab("        ; $A3  4
-    .byte "to"          ; $A4  2
-    .byte "fn"          ; $A5  2
-    .byte "spc("        ; $A6  4
-    .byte "then"        ; $A7  4
-    .byte "not"         ; $A8  3
-    .byte "step"        ; $A9  4
-    .byte "+"           ; $AA  1
-    .byte "-"           ; $AB  1
-    .byte "*"           ; $AC  1
-    .byte "/"           ; $AD  1
-    .byte "^"           ; $AE  1
-    .byte "and"         ; $AF  3
-    .byte "or"          ; $B0  2
-    .byte ">"           ; $B1  1
-    .byte "="           ; $B2  1
-    .byte "<"           ; $B3  1
-    .byte "sgn"         ; $B4  3
-    .byte "int"         ; $B5  3
-    .byte "abs"         ; $B6  3
-    .byte "usr"         ; $B7  3
-    .byte "fre"         ; $B8  3
-    .byte "pos"         ; $B9  3
-    .byte "sqr"         ; $BA  3
-    .byte "rnd"         ; $BB  3
-    .byte "log"         ; $BC  3
-    .byte "exp"         ; $BD  3
-    .byte "cos"         ; $BE  3
-    .byte "sin"         ; $BF  3
-    .byte "tan"         ; $C0  3
-    .byte "atn"         ; $C1  3
-    .byte "peek"        ; $C2  4
-    .byte "len"         ; $C3  3
-    .byte "str$"        ; $C4  4
-    .byte "val"         ; $C5  3
-    .byte "asc"         ; $C6  3
-    .byte "chr$"        ; $C7  4
-    .byte "left$"       ; $C8  5
-    .byte "right$"      ; $C9  6
-    .byte "mid$"        ; $CA  4
-    .byte "go"          ; $CB  2
-    .byte "assemble"   ; $CC  8
-    .byte "include"    ; $CD  7
-    .byte "runprog"    ; $CE  7
-    .byte "scratch"    ; $CF  7
-    .byte "delete"     ; $D0  6
-    .byte "exists"     ; $D1  6
-    .byte "rename"     ; $D2  6
-    .byte "status"     ; $D3  6
-    .byte "drive"      ; $D4  5
-    .byte "onerr"      ; $D5  5
-    .byte "pause"      ; $D6  5
-    .byte "copy"       ; $D7  4
-    .byte "dir"        ; $D8  3
+    KW "end"         ; $80  3
+    KW "for"         ; $81  3
+    KW "next"        ; $82  4
+    KW "data"        ; $83  4
+    KW "input#"      ; $84  6
+    KW "input"       ; $85  5
+    KW "dim"         ; $86  3
+    KW "read"        ; $87  4
+    KW "let"         ; $88  3
+    KW "goto"        ; $89  4
+    KW "run"         ; $8A  3
+    KW "if"          ; $8B  2
+    KW "restore"     ; $8C  7
+    KW "gosub"       ; $8D  5
+    KW "return"      ; $8E  6
+    KW "rem"         ; $8F  3
+    KW "stop"        ; $90  4
+    KW "on"          ; $91  2
+    KW "wait"        ; $92  4
+    KW "load"        ; $93  4
+    KW "save"        ; $94  4
+    KW "verify"      ; $95  6
+    KW "def"         ; $96  3
+    KW "poke"        ; $97  4
+    KW "print#"      ; $98  6
+    KW "print"       ; $99  5
+    KW "cont"        ; $9A  4
+    KW "list"        ; $9B  4
+    KW "clr"         ; $9C  3
+    KW "cmd"         ; $9D  3
+    KW "sys"         ; $9E  3
+    KW "open"        ; $9F  4
+    KW "close"       ; $A0  5
+    KW "get"         ; $A1  3
+    KW "new"         ; $A2  3
+    KW "tab("        ; $A3  4
+    KW "to"          ; $A4  2
+    KW "fn"          ; $A5  2
+    KW "spc("        ; $A6  4
+    KW "then"        ; $A7  4
+    KW "not"         ; $A8  3
+    KW "step"        ; $A9  4
+    KW "+"           ; $AA  1
+    KW "-"           ; $AB  1
+    KW "*"           ; $AC  1
+    KW "/"           ; $AD  1
+    KW "^"           ; $AE  1
+    KW "and"         ; $AF  3
+    KW "or"          ; $B0  2
+    KW ">"           ; $B1  1
+    KW "="           ; $B2  1
+    KW "<"           ; $B3  1
+    KW "sgn"         ; $B4  3
+    KW "int"         ; $B5  3
+    KW "abs"         ; $B6  3
+    KW "usr"         ; $B7  3
+    KW "fre"         ; $B8  3
+    KW "pos"         ; $B9  3
+    KW "sqr"         ; $BA  3
+    KW "rnd"         ; $BB  3
+    KW "log"         ; $BC  3
+    KW "exp"         ; $BD  3
+    KW "cos"         ; $BE  3
+    KW "sin"         ; $BF  3
+    KW "tan"         ; $C0  3
+    KW "atn"         ; $C1  3
+    KW "peek"        ; $C2  4
+    KW "len"         ; $C3  3
+    KW "str$"        ; $C4  4
+    KW "val"         ; $C5  3
+    KW "asc"         ; $C6  3
+    KW "chr$"        ; $C7  4
+    KW "left$"       ; $C8  5
+    KW "right$"      ; $C9  6
+    KW "mid$"        ; $CA  4
+    KW "go"          ; $CB  2
+    KW "assemble"   ; $CC  8
+    KW "include"    ; $CD  7
+    KW "runprog"    ; $CE  7
+    KW "scratch"    ; $CF  7
+    KW "delete"     ; $D0  6
+    KW "exists"     ; $D1  6
+    KW "rename"     ; $D2  6
+    KW "status"     ; $D3  6
+    KW "drive"      ; $D4  5
+    KW "onerr"      ; $D5  5
+    KW "pause"      ; $D6  5
+    KW "copy"       ; $D7  4
+    KW "dir"        ; $D8  3
 
 ; kw_len_tab — display width (screen columns) for each C64 BASIC 2.0 keyword.
 ; Indexed by (token_byte - $80). 76 entries for tokens $80-$CB.
@@ -316,6 +330,63 @@ kw_len_tab:
     .byte 5   ; $D6 PAUSE
     .byte 4   ; $D7 COPY
     .byte 3   ; $D8 DIR
+
+; ============================================================================
+; First-letter keyword index for col_match_kw (generated from the KW entries).
+;
+; kw_cand_tok/kw_cand_off list every keyword that starts with a letter,
+; grouped by first letter (A..Z) and in token order within each group, so
+; scanning one group visits exactly the entries the old full-table scan
+; could have matched, in the same order: the first full match is the same.
+;   kw_cand_tok:  bits 0-6 = token - $80, bit 7 = bit 8 of the kw_strtab offset
+;   kw_cand_off:  low byte of the kw_strtab offset
+; One sentinel follows the last group: an entry whose first char is not a
+; letter, so a group always ends at an entry with a different first char.
+; kw_let_start: per letter, index of its first candidate; $FF = no keyword.
+; ============================================================================
+KW_COUNT = KW_N
+.assert KW_COUNT = $D9 - $80, error, "kw_strtab must hold tokens $80-$D8"
+.assert .ident(.sprintf("kw_off_%d", KW_COUNT - 1)) < 512, error, "kw_strtab offset exceeds 9 bits"
+
+KW_SENTINEL = $AA - $80             ; "+": first char is not a letter
+
+kw_let_start:
+KW_C .set 0
+.repeat 26, L
+    KW_F .set $FF
+    .repeat KW_COUNT, T
+        .if .ident(.sprintf("kw_ch0_%d", T)) = $41 + L
+            .if KW_F = $FF
+                KW_F .set KW_C
+            .endif
+            KW_C .set KW_C + 1
+        .endif
+    .endrep
+    .byte KW_F
+.endrep
+
+.macro KW_CAND_TABLE hi
+    .repeat 26, L
+        .repeat KW_COUNT, T
+            .if .ident(.sprintf("kw_ch0_%d", T)) = $41 + L
+                .if hi
+                    .byte T | ((.ident(.sprintf("kw_off_%d", T)) >> 1) & $80)
+                .else
+                    .byte <.ident(.sprintf("kw_off_%d", T))
+                .endif
+            .endif
+        .endrep
+    .endrep
+    .if hi
+        .byte KW_SENTINEL | ((.ident(.sprintf("kw_off_%d", KW_SENTINEL)) >> 1) & $80)
+    .else
+        .byte <.ident(.sprintf("kw_off_%d", KW_SENTINEL))
+    .endif
+.endmacro
+
+kw_cand_tok:    KW_CAND_TABLE 1
+kw_cand_off:    KW_CAND_TABLE 0
+.assert kw_cand_off - kw_cand_tok = KW_C + 1, error, "kw_cand table size mismatch"
 
 ; ============================================================================
 ; colorize_row
@@ -556,7 +627,7 @@ colorize_row:
 
     ; BASIC keyword? (buffer is plain text; match keyword strings, not tokens)
 @n_try_kw:
-    jsr col_match_kw                ; C=1 -> CLR_KWLEN=len, KW_TOKEN=token
+    jsr col_match_kw                ; A = the letter; C=1 -> CLR_KWLEN=len, KW_TOKEN=token
     bcc @n_no_match
 
     ; Matched: paint CLR_KWLEN cells with the keyword color and advance past
@@ -690,29 +761,49 @@ clr_at_eof:
     rts
 
 ; ============================================================================
-; col_match_kw — gap-aware longest-match keyword scan at the current colorizer
-; position (BUF_PTR, which may be just before the gap).
+; col_match_kw — gap-aware keyword scan at the current colorizer position
+; (BUF_PTR, which may be just before the gap).
 ;
 ; The buffer is plain PETSCII text (keywords are NOT tokenized — MODDET/MODTOK
 ; keep work_buf in plain text). This routine matches the text at BUF_PTR
-; against the keyword table (kw_strtab / kw_len_tab, token order $80-$D8),
-; longest entry wins because the table is ordered longest-first within length
-; groups and we accept the first full match.
+; against the keyword table (kw_strtab / kw_len_tab, token order $80-$D8) and
+; accepts the first full match in token order (INPUT# before INPUT, GOTO
+; before GO, ...).
 ;
-; To stay correct across the gap, it first copies up to 8 logical characters
+; Only keywords starting with the current letter can match, so the scan goes
+; through that letter's group in the first-letter index (kw_let_start /
+; kw_cand_*), which holds those keywords in token order: same candidates,
+; same order, same result as walking the whole table, but a word start
+; tries ~5 entries instead of ~89, and letters no keyword starts with
+; (B H J K Q X Y Z) return at once without filling the lookahead.
+;
+; To stay correct across the gap, it copies up to 9 logical characters
 ; ahead into COL_PEEK using the same gap-warp rule as clr_advance, padding with
 ; $00 at CR / EOF / gap-of-document. The flat COL_PEEK buffer is then matched.
 ;
+; Entry:  A = char at BUF_PTR, a letter ($41-$5A)
 ; Returns:
 ;   C=1  match → CLR_KWLEN = char count, KW_TOKEN = token byte ($80-$D8)
 ;   C=0  no match
-; Clobbers A, X, Y, CLR_CTMP, CLR_TMP. Preserves BUF_PTR.
+; Clobbers A, X, Y, CLR_CTMP, CLR_TMP (candidate index), CLR_KWLEN, KW_TOKEN.
+; Preserves BUF_PTR.
 ; ============================================================================
 COL_PEEK_LEN = 9                ; fill 9: 8 for the longest keyword + 1 trailing
                                 ; boundary char (so PRINTER won't match PRINT)
 
 col_match_kw:
-    ; ---- Fill COL_PEEK[0..7] with logical lookahead, gap-aware ----
+    ; ---- First-letter index: no keyword starts with this letter -> done ----
+    sec
+    sbc #$41
+    tax
+    lda kw_let_start,x
+    bpl @have_cands
+    clc                         ; $FF: no candidates (C was set by sbc)
+    rts
+@have_cands:
+    sta CLR_TMP                 ; CLR_TMP = index of first candidate
+
+    ; ---- Fill COL_PEEK[0..8] with logical lookahead, gap-aware ----
     lda BUF_PTR
     sta CLR_CTMP
     lda BUF_PTR+1
@@ -760,21 +851,27 @@ col_match_kw:
     cpx #COL_PEEK_LEN
     bcc @peek_pad_loop
 
-    ; ---- Match COL_PEEK against the keyword table ----
+    ; ---- Match COL_PEEK against this letter's candidates ----
 @match:
-    lda #<kw_strtab
-    sta CLR_CTMP
-    lda #>kw_strtab
-    sta CLR_CTMP+1
-    lda #$80
-    sta KW_TOKEN                ; current token being tried
 @mk_try:
-    lda KW_TOKEN
-    cmp #$D9                    ; past last keyword ($D8)?
-    bcs @mk_no_match
-    sec
-    sbc #$80
-    tax                         ; X = index into kw_len_tab
+    ; CLR_CTMP = kw_strtab + 9-bit offset of candidate CLR_TMP
+    ldx CLR_TMP
+    lda kw_cand_tok,x
+    asl                         ; C = offset bit 8
+    lda #>kw_strtab
+    adc #0
+    sta CLR_CTMP+1
+    lda kw_cand_off,x
+    clc
+    adc #<kw_strtab
+    sta CLR_CTMP
+    bcc :+
+    inc CLR_CTMP+1
+:   lda kw_cand_tok,x
+    and #$7F
+    tax                         ; X = token - $80 = index into kw_len_tab
+    ora #$80
+    sta KW_TOKEN                ; current token being tried
     lda kw_len_tab,x
     sta CLR_KWLEN               ; candidate length
     ldy #0
@@ -806,14 +903,11 @@ col_match_kw:
     sec
     rts
 @mk_miss:
-    ; advance table pointer past this keyword's CLR_KWLEN chars
-    clc
-    lda CLR_CTMP
-    adc CLR_KWLEN
-    sta CLR_CTMP
-    bcc :+
-    inc CLR_CTMP+1
-:   inc KW_TOKEN
+    ; A mismatch on the first char means we ran off the end of this letter's
+    ; group (every candidate inside it shares the first char): no match.
+    cpy #0
+    beq @mk_no_match
+    inc CLR_TMP                 ; next candidate
     jmp @mk_try
 @mk_no_match:
     clc

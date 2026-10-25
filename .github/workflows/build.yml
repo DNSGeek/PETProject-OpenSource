@@ -51,6 +51,13 @@ jobs:
           head -c 3 build/c128/boot128.bin | grep -q CBM
           echo "All PRGs (C64 + C128), the boot sector and the disk image are present."
 
+      - name: Run module tests (py65)
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet py65
+          /tmp/venv/bin/python tests/test_include.py
+          /tmp/venv/bin/python tests/test_modules.py
+
       - name: Upload disk image artifact
         uses: actions/upload-artifact@v4
         with:

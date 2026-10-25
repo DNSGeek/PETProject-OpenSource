@@ -6,8 +6,9 @@ Runs the real assembled C64 modules (build/*.prg) on an emulated 6502
 parameter block at $0212, editor gap pointers in zero page $02-$05.
 
 Covers MODTOK/MODDET (tokenize + detokenize round trip, REM/DATA literals,
-overflow restore) and MODREN (ON...GOTO lists, a split gap, the in-place
-overtake guard).
+overflow restore), MODREN (ON...GOTO lists, a split gap, the in-place
+overtake guard) and MODSFR (find / find next / replace / delete, case
+folding, the gap-full guard), driven by a scripted GETIN key queue.
 
 Usage:
     bash make_petproject.sh      # produces build/*.prg
@@ -28,10 +29,15 @@ BUF = 0x3000
 BUF_END = 0x9000  # 24 K, like the C64 editor's buffer
 RETURN_TO = 0xCFF0  # sentinel return address for the module's RTS
 GETIN = 0xFFE4
+JIFFY_LO = 0xA2
+KEY_STOP = 0x03
 
 
-def run_module(name, pre, post=b"", buf_end=BUF_END, max_steps=50_000_000):
+def run_module(name, pre, post=b"", buf_end=BUF_END, max_steps=50_000_000, keys=None):
     """Run module `name` on the gap buffer [pre | gap | post].
+
+    With `keys`, GETIN ($FFE4) returns those PETSCII codes one per call,
+    then STOP; the jiffy clock at $A2 ticks so timed waits finish.
 
     Returns (status, linear output or None, memory).
     """
@@ -71,9 +77,20 @@ def run_module(name, pre, post=b"", buf_end=BUF_END, max_steps=50_000_000):
     m.stPush((RETURN_TO - 1) >> 8)
     m.stPush((RETURN_TO - 1) & 0xFF)
     m.pc = load
-    for _ in range(max_steps):
+    keys = None if keys is None else list(keys)
+    for n in range(max_steps):
         if m.pc == RETURN_TO:
             break
+        if keys is not None:
+            if not n & 63:
+                mem[JIFFY_LO] = (mem[JIFFY_LO] + 1) & 0xFF
+            if m.pc == GETIN:
+                m.a = keys.pop(0) if keys else KEY_STOP
+                m.p &= ~(m.ZERO | m.NEGATIVE)
+                m.p |= (m.ZERO if m.a == 0 else 0) | (m.a & m.NEGATIVE)
+                ret = m.stPop() | (m.stPop() << 8)
+                m.pc = ret + 1
+                continue
         m.step()
     else:
         raise AssertionError(f"{name}: runaway at ${m.pc:04x}")
@@ -140,14 +157,89 @@ def test_renumber_overtake_guard():
     check(st == 0x02 and out == expected, "renumber: 399 lines with room to grow")
 
 
+KEY_RETURN = 0x0D
+KEY_F1 = 0x85  # toggle case sensitivity
+KEY_CRSR_DN = 0x11  # FIND -> REPLACE field
+KEY_DEL = 0x14
+
+
+def run_sfr(doc, keys, cursor=0, buf_end=BUF_END):
+    """Run MODSFR on `doc` with scripted keys; STOP is sent once they run out.
+
+    The editor's gap (its cursor, where the search starts) is at `cursor`.
+
+    Returns (status, text, cursor offset, edited flag, status-bar text):
+    the text is the buffer read across the module's final gap, the cursor
+    offset is where that gap starts (the match the editor will show).
+    """
+    pre, post = doc[:cursor], doc[cursor:]
+    st, _, mem = run_module("modsfr", pre, post, buf_end=buf_end, keys=keys)
+    gs = mem[0x0216] | (mem[0x0217] << 8)
+    ge = mem[0x0218] | (mem[0x0219] << 8)
+    text = bytes(mem[BUF:gs]) + bytes(mem[ge:buf_end])
+    bar = "".join(
+        chr(c + 0x40) if 1 <= c <= 26 else chr(c) for c in mem[0x0400:0x040B]
+    ).rstrip()
+    return st, text, gs - BUF, mem[0x021F], bar
+
+
+def test_search_replace():
+    doc = b'10 PRINT"hello"\r20 PRINT HELLO:REM hello\r'
+    st, text, cur, ed, bar = run_sfr(doc, b"HELLO\r")
+    check(
+        (st, text, cur, ed, bar) == (0x04, doc, 9, 0, "FOUND"),
+        "sfr: case-insensitive find moves the cursor to the first match",
+    )
+    st, _, cur, _, _ = run_sfr(doc, b"HELLO\r\r\r")
+    check(st == 0x04 and cur == 35, "sfr: RETURN in FIND steps to later matches")
+    st, _, cur, _, bar = run_sfr(doc, b"HELLO\r\r\r\r")
+    check(cur == 35 and bar == "NOT FOUND", "sfr: past the last match")
+    st, _, cur, _, _ = run_sfr(doc, bytes([KEY_F1]) + b"HELLO\r")
+    check(st == 0x04 and cur == 25, "sfr: F1 makes the search case-sensitive")
+    st, text, cur, ed, bar = run_sfr(doc, b"XHELLO\r")
+    check(
+        (st, text, ed, bar) == (0x00, doc, 0, "NOT FOUND"),
+        "sfr: no match leaves the buffer and cursor alone",
+    )
+    st, _, _, _, bar = run_sfr(b"AB", b"ABC\r")
+    check(st == 0x00 and bar == "NOT FOUND", "sfr: pattern longer than text")
+
+    st, _, cur, _, _ = run_sfr(b"XXAB", b"AB\r")
+    check(st == 0x04 and cur == 2, "sfr: match ending at the last byte")
+    st, _, cur, _, _ = run_sfr(doc, b"HELLO\r", cursor=10)
+    check(st == 0x04 and cur == 25, "sfr: the search starts at the cursor")
+    st, _, cur, _, bar = run_sfr(doc, b"PRINT\r", cursor=doc.index(b"20") + 4)
+    check(st == 0x00 and bar == "NOT FOUND", "sfr: nothing before the cursor")
+
+    keys = b"HELLO\r" + bytes([KEY_CRSR_DN]) + b"BYE\r"
+    st, text, _, ed, _ = run_sfr(doc, keys)
+    check(
+        st == 0x04 and ed and text == doc.replace(b"hello", b"BYE", 1),
+        "sfr: RETURN in REPLACE replaces the current match",
+    )
+    keys = b"HELLO\r" + bytes([KEY_CRSR_DN]) + b"\r\r\r"
+    st, text, _, ed, _ = run_sfr(doc, keys)
+    check(
+        st == 0x04 and ed and text == b'10 PRINT""\r20 PRINT :REM \r',
+        "sfr: empty replacement deletes each match in turn",
+    )
+    keys = b"HELLX" + bytes([KEY_DEL]) + b"O\r" + bytes([KEY_CRSR_DN]) + b"HI\r"
+    st, text, _, _, bar = run_sfr(doc, keys, buf_end=BUF + len(doc) + 1)
+    check(
+        st == 0x04 and text == doc and bar == "BUFFER FULL",
+        "sfr: replace refused when the gap is too small",
+    )
+
+
 def main():
-    for name in ("modtok", "moddet", "modren"):
+    for name in ("modtok", "moddet", "modren", "modsfr"):
         if not (BUILD / f"{name}.prg").exists():
             sys.exit(f"build/{name}.prg not found — run: bash make_petproject.sh")
     test_tokenize_round_trip()
     test_tokenize_overflow_restores_text()
     test_renumber()
     test_renumber_overtake_guard()
+    test_search_replace()
     print("\nall module tests passed")
 
 

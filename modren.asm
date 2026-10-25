@@ -39,6 +39,7 @@ PET_0            = $30
 PET_9            = $39
 PET_SPACE        = $20
 PET_QUOTE        = $22
+PET_COMMA        = $2C
 CONTENT_ROWS     = 24           ; sentinel CRs written after output
 
 REN_MAX_HI       = $FA          ; new number overflows when hi >= $FA (>= 64000)
@@ -255,23 +256,26 @@ pass2:
     lda REN_GAP_END_HI
     sta REN_GAP_HI
 
-    ; DST_PTR = work_buf
-    lda REN_BUF_LO
-    sta DST_PTR
-    lda REN_BUF_HI
-    sta DST_PTR+1
-
-@line_loop:
-    lda SRC_PTR+1
-    cmp REN_END_HI
-    bne @do_line
-    lda SRC_PTR
-    cmp REN_END_LO
-    beq @all_done
-@do_line:
-    jsr process_line
-    jmp @line_loop
-
+    ; The rewrite runs in place: output from BUF up, input from the staging
+    ; area, which starts only gap_size bytes higher. Numbers that grow eat
+    ; into that head start, and with a nearly full buffer the output would
+    ; overtake input it has not read yet. So rehearse first: a dry run
+    ; walks the same path without writing and checks every output byte
+    ; against the read position. Only if it never catches up is the buffer
+    ; rewritten for real.
+    lda #$FF
+    sta REN_DRY
+    lda #0
+    sta REN_OVF
+    jsr rewrite
+    lda REN_OVF
+    beq @fits
+    jsr unstage                 ; put the editor's gap layout back
+    jmp @error
+@fits:
+    lda #0
+    sta REN_DRY
+    jsr rewrite
 @all_done:
     ; Output complete. DST_PTR is the true end of renumbered text. Do NOT
     ; write sentinel CRs here or advance past them: MOD_NEW_END must point at
@@ -283,6 +287,70 @@ pass2:
     rts
 @error:
     sec
+    rts
+
+; ============================================================================
+; rewrite — one pass over the staged source, SRC→DST (writes unless REN_DRY).
+; ============================================================================
+rewrite:
+    lda REN_STAG_LO
+    sta SRC_PTR
+    lda REN_STAG_HI
+    sta SRC_PTR+1
+    lda REN_BUF_LO
+    sta DST_PTR
+    lda REN_BUF_HI
+    sta DST_PTR+1
+@line_loop:
+    lda SRC_PTR+1
+    cmp REN_END_HI
+    bne @do_line
+    lda SRC_PTR
+    cmp REN_END_LO
+    beq @done
+@do_line:
+    jsr process_line
+    jmp @line_loop
+@done:
+    rts
+
+; ============================================================================
+; unstage — undo setup_staging: move the pre-gap back down to BUF, so the
+; buffer again matches the editor's GAP_START/GAP_END. Ascending is safe:
+; the destination is below the source.
+; ============================================================================
+unstage:
+    lda REN_STAG_LO
+    sta SRC_PTR
+    lda REN_STAG_HI
+    sta SRC_PTR+1
+    lda REN_BUF_LO
+    sta DST_PTR
+    lda REN_BUF_HI
+    sta DST_PTR+1
+    lda REN_PREGAP_LO
+    sta TMP2
+    lda REN_PREGAP_HI
+    sta TMP2+1
+    ldy #0
+@copy:
+    lda TMP2
+    ora TMP2+1
+    beq @done
+    buf_lda SRC_PTR
+    buf_sta DST_PTR
+    inc SRC_PTR
+    bne :+
+    inc SRC_PTR+1
+:   inc DST_PTR
+    bne :+
+    inc DST_PTR+1
+:   lda TMP2
+    bne :+
+    dec TMP2+1
+:   dec TMP2
+    jmp @copy
+@done:
     rts
 
 ; ============================================================================
@@ -636,7 +704,32 @@ renumber_ref:
     jsr parse_line_number
     jsr find_mapping
     jsr write_number
+    ; ON X GOTO/GOSUB a,b,c — a ',' continues the list of targets.
+@after:
+    jsr at_ref_end
+    bcs @done
+    ldy #0
+    buf_lda SRC_PTR
+    cmp #PET_SPACE
+    bne :+
+    jsr emit_src_char
+    jmp @after
+:   cmp #PET_COMMA
+    bne @done
+    jsr emit_src_char
+    jmp @sp
 @done:
+    rts
+
+; at_ref_end — C=1 when SRC_PTR has reached REN_END.
+at_ref_end:
+    lda SRC_PTR+1
+    cmp REN_END_HI
+    bne :+
+    lda SRC_PTR
+    cmp REN_END_LO
+    rts
+:   clc
     rts
 
 ; ============================================================================
@@ -645,16 +738,8 @@ renumber_ref:
 copy_kw_only:
     tax
 @lp:
-    ldy #0
-    buf_lda SRC_PTR
-    buf_sta DST_PTR
-    inc SRC_PTR
-    bne :+
-    inc SRC_PTR+1
-:   inc DST_PTR
-    bne :+
-    inc DST_PTR+1
-:   dex
+    jsr emit_src_char
+    dex
     bne @lp
     rts
 
@@ -664,11 +749,34 @@ copy_kw_only:
 emit_src_char:
     ldy #0
     buf_lda SRC_PTR
-    buf_sta DST_PTR
-    inc SRC_PTR
-    bne :+
+    inc SRC_PTR                 ; consumed before the write, so put_dst's
+    bne :+                      ; overtake check sees the true read position
     inc SRC_PTR+1
-:   inc DST_PTR
+:   ; fall through
+
+; ============================================================================
+; put_dst — write A at (DST_PTR) and advance it. In a dry run (REN_DRY set)
+; nothing is written; instead REN_OVF is set if the write would land at or
+; past SRC_PTR, the next byte still to be read. Preserves X. Y = 0 on exit.
+; ============================================================================
+put_dst:
+    ldy #0
+    bit REN_DRY
+    bpl @write
+    pha
+    lda DST_PTR
+    cmp SRC_PTR
+    lda DST_PTR+1
+    sbc SRC_PTR+1
+    bcc :+                      ; DST < SRC — safe
+    lda #$FF
+    sta REN_OVF
+:   pla
+    jmp @adv
+@write:
+    buf_sta DST_PTR
+@adv:
+    inc DST_PTR
     bne :+
     inc DST_PTR+1
 :   rts
@@ -775,12 +883,7 @@ write_number:
     lda REN_DIGIT
     ora #$30
 @wr:
-    ldy #0
-    buf_sta DST_PTR
-    inc DST_PTR
-    bne :+
-    inc DST_PTR+1
-:
+    jsr put_dst
 @skip:
     inx
     cpx #4
@@ -789,12 +892,7 @@ write_number:
     ; Units digit — always emit
     lda TMP2
     ora #$30
-    ldy #0
-    buf_sta DST_PTR
-    inc DST_PTR
-    bne :+
-    inc DST_PTR+1
-:   rts
+    jmp put_dst
 
 wn_div_lo: .byte <10000, <1000, <100, <10
 wn_div_hi: .byte >10000, >1000, >100, >10
@@ -1191,6 +1289,8 @@ REN_LEADING:     .res 1        ; 0 = suppressing leading zeros
 REN_DIV_LO:      .res 1        ; divisor lo for write_number
 REN_DIV_HI:      .res 1        ; divisor hi
 REN_DIGIT:       .res 1        ; digit accumulator for write_number
+REN_DRY:         .res 1        ; $FF = pass-2 rehearsal, nothing is written
+REN_OVF:         .res 1        ; $FF = rehearsal found output overtaking input
 LINENO_SAVE:     .res 2        ; SRC_PTR save for check_lineno_directive
 
 ; Mapping table: [old_lo, old_hi, new_lo, new_hi] × 512

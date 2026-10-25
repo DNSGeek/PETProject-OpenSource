@@ -379,7 +379,9 @@ assemble:
     jsr prompt_outfile          ; fills ASM_FNAME/ASM_FNAME_LEN; C=1 if cancelled
     sei
     bcc @name_done
-    jmp @restore_zp             ; cancelled  -  return with MOD_STATUS unchanged ($FF)
+    lda #$00                    ; cancelled  -  no change, nothing to report
+    sta MOD_STATUS
+    jmp @restore_zp
 @name_done:
 
     ; ---- Pass 1: build symbol table ----

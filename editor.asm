@@ -271,8 +271,6 @@ c128_entry:
     lda #RPTFLG_ALL
     sta RPTFLG
 
-    jsr load_settings
-
     ; Check for warm-boot magic written by the NMI/exit stub.
     lda BOOT_MAGIC
     cmp #RESUME_MAGIC
@@ -295,6 +293,7 @@ c128_entry:
     ; ------------------------------------------------------------------
 cold_start:
     jsr init_settings              ; write defaults into SETTING_* bytes
+    jsr load_settings              ; then let a config file overlay them
     jsr setup_screen               ; clear display, init gap buffer
     jmp editor_ready
 
@@ -307,8 +306,8 @@ warm_start:
     lda #0
     sta BOOT_MAGIC                 ; consume the magic so next boot is cold
 
-    jsr init_settings              ; apply defaults (config file would overlay
-                                   ; these in load_settings once implemented)
+    jsr init_settings              ; apply defaults...
+    jsr load_settings              ; ...then let a config file overlay them
     jsr setup_screen_blank         ; clear display, empty gap buffer
 
     ; Future: if BOOT_FNAME_LEN > 0, call load_file with BOOT_FNAME/LEN.
@@ -318,6 +317,11 @@ warm_start:
     ; jsr load_source_file         ; (file I/O not yet implemented)
 
 editor_ready:
+    ; BSS is not cleared at load, so the completion state starts as whatever
+    ; was in RAM; a stale "cycling" flag made the first CTRL+I rewind the gap
+    ; by a garbage length, below the start of the buffer.
+    lda #0
+    sta COMPL_ACTIVE
     jsr apply_colors               ; push SETTING_* values to VIC + color RAM
     jsr render_status
     jsr ensure_cursor_visible
@@ -3507,7 +3511,8 @@ POP_CHAR_TMP:     .res 1          ; single-char scratch for settings renderer
 
 ; ---- File I/O scratch ----
 FNAME_BUF:       .res 16            ; filename entered by user (PETSCII, not NUL-term)
-FNAME_LEN:       .res 1             ; length of FNAME_BUF content
+FNAME_LEN:       .res 1             ; length of FNAME_BUF content (must follow it)
+FNAME_STASH:     .res 17            ; FNAME_BUF+FNAME_LEN saved around a load
 DSK_PEND_FNAME:  .res 16            ; MODDSK's chosen file, adopted on load
 DSK_PEND_LEN:    .res 1
 IO_STATUS:       .res 1             ; ST value captured after file operations

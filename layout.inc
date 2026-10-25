@@ -21,7 +21,8 @@
 ; ---------------------------------------------------------------------------
 ; C64 (default) — the layout the project has always used
 ; ---------------------------------------------------------------------------
-;   $0801-$8C1E  editor (24 K buffer)          $A000-$BFFF  MOD_HI (8 K)
+;   $0801-$9FFF  editor (24 K buffer; the link fails past $A000)
+;                                              $A000-$BFFF  MOD_HI (8 K)
 ;   $C000-$CFFF  MOD_LO (4 K)                  $D000+       I/O, KERNAL
 ;
 ; ---------------------------------------------------------------------------
@@ -93,7 +94,9 @@ FAR_STA_SCR4    = FAR_API + 13 * 3
 FAR_API_ENTRIES = 14
 .else
 EDITOR_LOAD     = $0801
-EDITOR_END      = $D000
+EDITOR_END      = $A000         ; = MOD_HI_BASE: the editor and its buffer must
+                                ; end below the module regions, or loading a
+                                ; module would overwrite them
 EDITOR_BUF_SIZE = $6000
 MOD_LO_BASE     = $C000
 MOD_LO_SIZE     = $1000

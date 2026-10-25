@@ -3508,6 +3508,8 @@ POP_CHAR_TMP:     .res 1          ; single-char scratch for settings renderer
 ; ---- File I/O scratch ----
 FNAME_BUF:       .res 16            ; filename entered by user (PETSCII, not NUL-term)
 FNAME_LEN:       .res 1             ; length of FNAME_BUF content
+DSK_PEND_FNAME:  .res 16            ; MODDSK's chosen file, adopted on load
+DSK_PEND_LEN:    .res 1
 IO_STATUS:       .res 1             ; ST value captured after file operations
 PROMPT_IS_SAVE:  .res 1
 LOAD_AS_SOURCE:  .res 1             ; F6 load: 1 = force SEQ source (",S,R", no

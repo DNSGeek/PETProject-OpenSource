@@ -309,10 +309,7 @@ warm_start:
     jsr setup_screen_blank         ; clear display, empty gap buffer
 
     ; Future: if BOOT_FNAME_LEN > 0, call load_file with BOOT_FNAME/LEN.
-    ; For now, warm boot just opens a blank buffer.
-    lda BOOT_FNAME_LEN
-    beq editor_ready               ; no filename recorded — start blank
-    ; jsr load_source_file         ; (file I/O not yet implemented)
+    ; For now, warm boot just opens a blank buffer (falls into editor_ready).
 
 editor_ready:
     ; BSS is not cleared at load, so the completion state starts as whatever
@@ -673,14 +670,9 @@ do_new_file:
     bcs @done
 @clear:
     ; Reset gap buffer to empty
-    lda #<work_buf
-    sta GAP_START
+    ldx #<work_buf
     lda #>work_buf
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
+    jsr gap_at_xa
     ; Reset viewport and cursor
     lda #<work_buf
     sta TOP_LINE
@@ -698,10 +690,9 @@ do_new_file:
     sta IS_NEW_FILE
     sta IS_BASIC
     jsr ensure_cursor_visible
-    jsr render_status
     jsr render_viewport
     jsr draw_cursor
-    jsr modal_exit              ; restore idle status bar before returning
+    jsr modal_exit              ; restore idle status bar (render_status)
 @done:
     rts
 
@@ -802,12 +793,10 @@ init_settings:
     sta SETTING_DRIVE
     lda #0
     sta FNAME_LEN
-    lda #0
     sta IS_BASIC
+    sta IS_DIRTY
     lda #$FF
     sta IS_NEW_FILE   ; new editor session starts with a new file
-    lda #0
-    sta IS_DIRTY
     rts
 
 ; ============================================================================
@@ -870,22 +859,8 @@ apply_colors:
 ; ============================================================================
 
 setup_screen:
-    ; Clear screen RAM
-    ldx #0
-    lda #SCR_SPACE
-@clr:
-    sta SCREEN+$000,x
-    sta SCREEN+$100,x
-    sta SCREEN+$200,x
-    sta SCREEN+$300,x
-    inx
-    bne @clr
-
-    ; GAP_END = work_buf_end (entire buffer is gap to start with)
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
+    ; Clear screen, empty gap, TOP_LINE/LEFT_COL/IS_BASIC — same as blank
+    jsr setup_screen_blank
 
     ; Copy test content into work_buf.
     lda #<test_buffer
@@ -915,20 +890,7 @@ setup_screen:
     inc BUF_PTR+1
     jmp @copy
 @copy_done:
-    lda BUF_PTR
-    sta GAP_START
-    lda BUF_PTR+1
-    sta GAP_START+1
-
-    lda #<work_buf
-    sta TOP_LINE
-    lda #>work_buf
-    sta TOP_LINE+1
-    lda #0
-    sta LEFT_COL
-    lda #$FF
-    sta IS_BASIC
-    rts
+    jmp gap_at_buf_ptr      ; GAP_START = BUF_PTR (tail call)
 
 ; ============================================================================
 ; setup_screen_blank — like setup_screen but initialises an empty gap buffer.
@@ -946,14 +908,9 @@ setup_screen_blank:
     inx
     bne @clr
 
-    lda #<work_buf
-    sta GAP_START
+    ldx #<work_buf
     lda #>work_buf
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
+    jsr gap_at_xa
 
     lda #<work_buf
     sta TOP_LINE
@@ -1015,9 +972,7 @@ modal_draw_text:
 ; Single choke point so the restore (and any future cursor un-park) lives in
 ; one place. Clobbers A, X (via render_status).
 ; ============================================================================
-modal_exit:
-    jmp render_status             ; tail-call: repaints the whole status row
-
+modal_exit:                       ; same routine: repaints the whole status row
 render_status:
     ldx #0
 @loop:
@@ -1604,15 +1559,12 @@ settings_draw_row:
 ; SCREEN_PTR must already point to the screen row start.
 ; ============================================================================
 settings_write_label:
-    stx SAVED_X                    ; preserve row index
-
-    ; Load label pointer for row X (sequential tables, index directly)
+    ; Load label pointer for row X (sequential tables, index directly).
+    ; X is not touched, so the row index survives for the caller.
     lda pop_label_lo,x
     sta TMP
     lda pop_label_hi,x
     sta TMP+1
-
-    ldx SAVED_X                    ; restore row index into X
 
     ldy #0
     sty POP_LBL_IDX                ; label byte index starts at 0
@@ -1620,9 +1572,6 @@ settings_write_label:
     ldy POP_LBL_IDX
     lda (TMP),y                    ; read next label byte
     beq @lbl_done                  ; zero terminator = done
-    ldy POP_LBL_IDX
-    clc
-    adc #0                         ; no-op, keep A
     pha                            ; save char
     lda POP_LBL_IDX
     clc

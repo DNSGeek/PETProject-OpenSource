@@ -170,6 +170,7 @@ ASM_OPC_PTR_HI  = ASM_STATE + $57   ; saved opcode table pointer hi
 ; Lives in the gap between ASM_OPC_PTR_HI (+$57) and SYM_TABLE (+$60).
 ASM_LOAD_LO     = ASM_STATE + $58   ; PRG load address lo
 ASM_LOAD_HI     = ASM_STATE + $59   ; PRG load address hi
+ASM_DS_CODE     = ASM_MNEM          ; close_output scratch: drive status digit
 
 ; Activity spinner — same corner cell and toggle mechanic as MODDIS.
 ASM_SPINNER     = ASM_STATE + $5A   ; 8-bit line counter; every 16 lines → color flip
@@ -200,6 +201,7 @@ SYM_MAX         = 400
 
 ; ---- Output file ----
 ASM_OUT_LA_VAL  = 4       ; logical file 4 for output
+ASM_DS_LA       = 15      ; logical file for the drive's error channel
 
 ; ============================================================================
 ; Include / source-stack state
@@ -2007,7 +2009,7 @@ emit_instruction:
 emit_byte:
     jsr CHROUT
     jsr READST
-    and #$42                    ; error or EOF
+    and #$83                    ; device not present, or a timeout
     beq :+
     sec
     rts
@@ -2391,9 +2393,27 @@ open_output:
     ldy #1                      ; SA=1 = write
     jsr SETLFS
 
-    lda ASM_FNAME_LEN
-    ldx #<ASM_FNAME
-    ldy #>ASM_FNAME
+    ; Open as "@0:<name>" so re-assembling replaces the old file; a bare
+    ; name fails with 63 FILE EXISTS, reported only on the error channel.
+    ; LINE_BUF is idle until pass 2 reads an include, and OPEN has sent the
+    ; name by the time it returns.
+    lda #'@'
+    sta LINE_BUF
+    lda #'0'
+    sta LINE_BUF+1
+    lda #':'
+    sta LINE_BUF+2
+    ldy #0
+:   lda ASM_FNAME,y
+    sta LINE_BUF+3,y
+    iny
+    cpy ASM_FNAME_LEN
+    bne :-
+    tya
+    clc
+    adc #3
+    ldx #<LINE_BUF
+    ldy #>LINE_BUF
     jsr SETNAM
 
     jsr OPEN
@@ -2436,6 +2456,31 @@ close_output:
     jsr CLOSE
     lda #0
     sta ASM_OUT_OPEN
+    ; Disk full, write protect and the like reach us only through the
+    ; drive's error channel: read the status code's tens digit.
+    lda #0
+    jsr SETNAM
+    lda #ASM_DS_LA
+    ldx MOD_DRIVE
+    ldy #15
+    jsr SETLFS
+    lda #'0'
+    sta ASM_DS_CODE
+    jsr OPEN
+    bcs @ds_close
+    ldx #ASM_DS_LA
+    jsr CHKIN
+    bcs @ds_close
+    jsr CHRIN
+    sta ASM_DS_CODE
+@ds_close:
+    jsr CLRCHN
+    lda #ASM_DS_LA
+    jsr CLOSE
+    lda ASM_DS_CODE
+    cmp #'2'                    ; codes 20-99 are errors
+    bcc @done
+    jsr set_err_io
 @done:
     rts
 

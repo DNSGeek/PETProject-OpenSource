@@ -187,10 +187,13 @@ load_body:
     jmp @close_err
 :
     ; ---- Read bytes into work_buf (BUF_PTR set above) ----
-@read_loop:
+    ; ST is checked once up front (an empty file / immediate EOF or error
+    ; reads nothing). The loop only comes back round when the READST after
+    ; CHRIN returned 0, and nothing in between touches ST, so re-reading it
+    ; at the top of each pass would always see 0.
     jsr READST
-    bne @read_done              ; EOF or error
-
+    bne @read_done              ; EOF or error before the first byte
+@read_loop:
     jsr CHRIN                   ; A = next byte
 
     ; Some drives set EOF on the byte that holds valid data, so check
@@ -242,26 +245,19 @@ load_body:
     jsr CLOSE
 
     ; BUF_PTR now one past the last loaded byte.
+    ; Every success path below starts as an existing, clean, plain-text
+    ; document with content = [work_buf..BUF_PTR), gap = [BUF_PTR..work_buf_end)
+    ; (MODDET reads the gap to find where the tokenized bytes end). Only the
+    ; BASIC path then flips IS_BASIC.
+    lda #0
+    sta IS_BASIC
+    sta IS_NEW_FILE         ; it's an existing file
+    sta IS_DIRTY            ; freshly loaded — not dirty
+    jsr gap_at_buf_ptr
 
     ; F6 source load: skip all PRG detection — the file is text by request.
     lda LOAD_AS_SOURCE
-    beq @basic_detect
-    ; ---- Set up as plain text (no detokenize, no disassemble) ----
-    lda #0
-    sta IS_BASIC
-    sta IS_NEW_FILE
-    sta IS_DIRTY
-    lda BUF_PTR
-    sta GAP_START
-    lda BUF_PTR+1
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
-    jmp @load_viewport
-
-@basic_detect:
+    bne @load_viewport
     ; Check first two bytes of work_buf for PRG load address $0801 ($01 $08).
     lda work_buf+0
     cmp #$01
@@ -273,37 +269,10 @@ load_body:
     ; It's a BASIC PRG. Set flag and run MODDET to detokenize into plain text.
     lda #$FF
     sta IS_BASIC
-    lda #0
-    sta IS_NEW_FILE         ; it's an existing file
-    sta IS_DIRTY            ; freshly loaded — not dirty
-    ; Set gap so MODDET knows where tokenized content ends in work_buf.
-    lda BUF_PTR
-    sta GAP_START
-    lda BUF_PTR+1
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
     jsr load_run_moddet     ; detokenizes work_buf in place; sets GAP from MOD_NEW_END
     jmp @load_viewport
 
 @not_basic:
-    lda #0
-    sta IS_BASIC
-    sta IS_NEW_FILE         ; it's an existing file
-    sta IS_DIRTY            ; freshly loaded — not dirty
-
-    ; Set up gap: content = [work_buf..BUF_PTR), gap = [BUF_PTR..work_buf_end)
-    lda BUF_PTR
-    sta GAP_START
-    lda BUF_PTR+1
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
-
     ; Detect binary PRG vs text: a text assembly source file always starts
     ; with a printable character (>= $20). A binary PRG's first byte is the
     ; lo byte of the load address — common values ($00, $01) are all < $20.
@@ -353,14 +322,7 @@ load_body:
     lda #$FF
     sta IS_NEW_FILE
     sta IS_DIRTY
-    lda BUF_PTR
-    sta GAP_START
-    lda BUF_PTR+1
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
+    jsr gap_at_buf_ptr
     lda #<work_buf
     sta TOP_LINE
     lda #>work_buf
@@ -422,20 +384,12 @@ do_save_file:
     inc TXT_PTR+1
 
 @no_append_cr:
-    lda TXT_PTR
-    sta IO_END_LO
+    ; Re-open gap at end of compacted content (IO_END = content end too)
+    ldx TXT_PTR
     lda TXT_PTR+1
+    stx IO_END_LO
     sta IO_END_HI
-
-    ; Re-open gap at end of compacted content
-    lda IO_END_LO
-    sta GAP_START
-    lda IO_END_HI
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
+    jsr gap_at_xa
 
     ; ---- If new file, ask BASIC or plain text? ----
     lda IS_NEW_FILE
@@ -572,14 +526,9 @@ do_save_file:
 
 @restore_gap:
     ; Tokenize failed — restore gap pointers to plain-text content end
-    lda TXT_PTR
-    sta GAP_START
+    ldx TXT_PTR
     lda TXT_PTR+1
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
+    jsr gap_at_xa
     jmp @done
 
 @close_err:
@@ -653,27 +602,13 @@ load_run_moddet:
     bne @plain                      ; fall back to treating whole buf as text
 
     ; Set gap from detokenized content end
-    lda MOD_NEW_END_LO
-    sta GAP_START
+    ldx MOD_NEW_END_LO
     lda MOD_NEW_END_HI
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
-    rts
+    jmp gap_at_xa                   ; tail call
 
 @plain:
     ; Fallback: use BUF_PTR as content end (set by read loop)
-    lda BUF_PTR
-    sta GAP_START
-    lda BUF_PTR+1
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
-    rts
+    jmp gap_at_buf_ptr              ; tail call
 
 ; ============================================================================
 ; load_run_moddis — disassemble binary content in work_buf to assembly source.
@@ -698,9 +633,20 @@ load_run_moddis:
     rts
 
 @moddis_plain:
-    lda BUF_PTR
-    sta GAP_START
+    ; Fallback: the raw bytes stay as text, gap at BUF_PTR.
+    ; fall through to gap_at_buf_ptr (tail call)
+
+; ============================================================================
+; gap_at_buf_ptr — GAP_START = BUF_PTR, GAP_END = work_buf_end.
+; gap_at_xa      — GAP_START = X (lo) / A (hi), GAP_END = work_buf_end.
+; Clobbers: A (and X for gap_at_buf_ptr).
+; ============================================================================
+
+gap_at_buf_ptr:
+    ldx BUF_PTR
     lda BUF_PTR+1
+gap_at_xa:
+    stx GAP_START
     sta GAP_START+1
     lda #<work_buf_end
     sta GAP_END

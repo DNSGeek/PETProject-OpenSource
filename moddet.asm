@@ -18,11 +18,11 @@
 ;     - Emit $0D (CR) after each line.
 ;   When done, report MOD_STATUS=$02 (output was streamed in place).
 ;
-; ROM keyword table ($A09E):
+; Keyword table (embedded copy in the BASIC ROM's $A09E format):
 ;   Contiguous keyword strings, last char of each has bit 7 set.
-;   Token $80 = index 0 (END), $81 = index 1 (FOR), ..., $CB = index $4B (GO).
-;   Walk: skip (token - $80) null-terminated-by-high-bit entries, then copy
-;   chars with bit 7 cleared until we see a char with bit 7 set (inclusive).
+;   Token $80 = index 0 (END), $81 = index 1 (FOR), ..., $D8 (DIR).
+;   kw_off locates a token's entry directly; its chars are copied with
+;   bit 7 cleared up to and including the one with bit 7 set.
 ;
 ; Zero page used (free during our execution; addresses come from zp.inc):
 ;   ZP_PTR2      — SRC_PTR:  walks tokenized source
@@ -413,248 +413,172 @@ pow10_lo:   .byte <1, <10, <100, <1000, <10000
 pow10_hi:   .byte >1, >10, >100, >1000, >10000
 
 ; ============================================================================
-; emit_keyword — look up and emit the keyword for token byte in A.
+; emit_keyword — look up and emit the keyword for token byte in A
+; ($80-$D8; the caller checks the range).
 ;
-; Token $80 = keyword index 0 (END), $81 = index 1 (FOR), etc.
-; ROM table at BASIC_KWTAB: last char of each keyword has bit 7 set.
-; Walk: skip (A - $80) entries, then emit chars with bit 7 cleared,
-; emit the final char (bit 7 set) with bit 7 cleared.
+; The keyword table has the BASIC ROM's format (last char of each keyword
+; has bit 7 set); kw_off gives each token's entry directly, so the lookup
+; no longer walks (token - $80) entries byte by byte. Each char is emitted
+; with bit 7 cleared, up to and including the final one.
 ; Clobbers: A, X, Y, KWTAB
 ; ============================================================================
 
 emit_keyword:
-    ; Look up keyword for token byte in A using our own embedded table.
-    ; No ROM banking required — immune to whatever $00/$01 state the editor sets.
-    ;
-    ; Table format: same as BASIC ROM — last char of each keyword has bit 7 set.
-    ; Token $80 = index 0 (END), $81 = index 1 (FOR), ..., $CB = index $4B (GO).
-    ;
-    ; X = number of keywords to skip = token - $80
-    sec
-    sbc #$80
-    tax                             ; X = skip count
-
-    ; Point KWTAB at our embedded keyword table
-    lda #<kwtab
+    ; Own embedded table: no ROM banking required — immune to whatever
+    ; $00/$01 state the editor sets.
+    tax                             ; X = token
+    ldy #>kwtab
+    cpx #KW_SECOND_HALF             ; from here on: offsets from kwtab+256
+    bcc :+
+    iny
+:   lda kw_off-$80,x
+    clc
+    adc #<kwtab
     sta KWTAB
-    lda #>kwtab
-    sta KWTAB+1
-
-    ; Skip X keywords (each ends with a byte that has bit 7 set).
-    ; CRITICAL: JSR inc_kwtab corrupts the N flag (INC inside sets N based on the
-    ; new pointer value, not the kwtab byte). Save A before the JSR and check
-    ; bit 7 of A explicitly after it returns.
-    cpx #0
-    beq @emit_chars
-@skip_loop:
-    ldy #0
-    lda (KWTAB),y               ; read kwtab byte
-    pha                         ; save it — JSR will corrupt N
-    jsr inc_kwtab               ; advance KWTAB (N is now from INC, not from LDA)
-    pla                         ; restore kwtab byte; PLA sets N from this byte
-    bpl @skip_loop              ; N from PLA: bit7 clear → mid-keyword, keep consuming
-    dex                         ; bit7 set → end of keyword
-    bne @skip_loop              ; more keywords to skip
-
+    bcc :+
+    iny
+:   sty KWTAB+1
 @emit_chars:
-    ; KWTAB now points to first char of target keyword. Same flag-save pattern.
     ldy #0
     lda (KWTAB),y
-    pha                         ; save kwtab byte before JSR corrupts N
-    jsr inc_kwtab
-    pla                         ; PLA sets N from the kwtab byte
-    pha                         ; save again for the BPL check after emit
-    and #$7F                    ; strip high bit for output
-    jsr emit_byte
-    pla                         ; restore kwtab byte; PLA sets N
-    bpl @emit_chars             ; bit7 clear → more chars in keyword
-    rts                         ; bit7 set → keyword done
+    bmi @last                       ; bit 7 set → the keyword's final char
+    jsr emit_byte                   ; (clobbers Y, hence the pointer bump)
+    inc KWTAB
+    bne @emit_chars
+    inc KWTAB+1
+    bne @emit_chars                 ; always taken
+@last:
+    and #$7F                        ; strip the end marker for output
+    jmp emit_byte
+
+; One keyword-table entry: the string with its last char OR'd with $80,
+; at label kwt_<token - $80>.
+KW_TOK .set $80
+.macro dkw str
+    .ident(.sprintf("kwt_%d", KW_TOK - $80)) := *
+    .repeat .strlen(str) - 1, KWI
+        .byte .strat(str, KWI)
+    .endrepeat
+    .byte .strat(str, .strlen(str) - 1) | $80
+    KW_TOK .set KW_TOK + 1
+.endmacro
 
 ; ============================================================================
-; kwtab — embedded BASIC 2.0 keyword table
-;
-; Each keyword string ends with its last character OR'd with $80.
-; Tokens $80–$CB map to indices 0–75.
+; kwtab — embedded BASIC 2.0 keyword table, plus PETProject's extended
+; keywords $CC-$D8. Each keyword string ends with its last character
+; OR'd with $80; one entry per token, in token order from $80.
 ; ============================================================================
 kwtab:
-    ; $80 END
-    .byte $45,$4E,$C4
-    ; $81 FOR
-    .byte $46,$4F,$D2
-    ; $82 NEXT
-    .byte $4E,$45,$58,$D4
-    ; $83 DATA
-    .byte $44,$41,$54,$C1
-    ; $84 INPUT#
-    .byte $49,$4E,$50,$55,$54,$A3
-    ; $85 INPUT
-    .byte $49,$4E,$50,$55,$D4
-    ; $86 DIM
-    .byte $44,$49,$CD
-    ; $87 READ
-    .byte $52,$45,$41,$C4
-    ; $88 LET
-    .byte $4C,$45,$D4
-    ; $89 GOTO
-    .byte $47,$4F,$54,$CF
-    ; $8A RUN
-    .byte $52,$55,$CE
-    ; $8B IF
-    .byte $49,$C6
-    ; $8C RESTORE
-    .byte $52,$45,$53,$54,$4F,$52,$C5
-    ; $8D GOSUB
-    .byte $47,$4F,$53,$55,$C2
-    ; $8E RETURN
-    .byte $52,$45,$54,$55,$52,$CE
-    ; $8F REM
-    .byte $52,$45,$CD
-    ; $90 STOP
-    .byte $53,$54,$4F,$D0
-    ; $91 ON
-    .byte $4F,$CE
-    ; $92 WAIT
-    .byte $57,$41,$49,$D4
-    ; $93 LOAD
-    .byte $4C,$4F,$41,$C4
-    ; $94 SAVE
-    .byte $53,$41,$56,$C5
-    ; $95 VERIFY
-    .byte $56,$45,$52,$49,$46,$D9
-    ; $96 DEF
-    .byte $44,$45,$C6
-    ; $97 POKE
-    .byte $50,$4F,$4B,$C5
-    ; $98 PRINT#
-    .byte $50,$52,$49,$4E,$54,$A3
-    ; $99 PRINT
-    .byte $50,$52,$49,$4E,$D4
-    ; $9A CONT
-    .byte $43,$4F,$4E,$D4
-    ; $9B LIST
-    .byte $4C,$49,$53,$D4
-    ; $9C CLR
-    .byte $43,$4C,$D2
-    ; $9D CMD
-    .byte $43,$4D,$C4
-    ; $9E SYS
-    .byte $53,$59,$D3
-    ; $9F OPEN
-    .byte $4F,$50,$45,$CE
-    ; $A0 CLOSE
-    .byte $43,$4C,$4F,$53,$C5
-    ; $A1 GET
-    .byte $47,$45,$D4
-    ; $A2 NEW
-    .byte $4E,$45,$D7
-    ; $A3 TAB(
-    .byte $54,$41,$42,$A8
-    ; $A4 TO
-    .byte $54,$CF
-    ; $A5 FN
-    .byte $46,$CE
-    ; $A6 SPC(
-    .byte $53,$50,$43,$A8
-    ; $A7 THEN
-    .byte $54,$48,$45,$CE
-    ; $A8 NOT
-    .byte $4E,$4F,$D4
-    ; $A9 STEP
-    .byte $53,$54,$45,$D0
-    ; $AA +
-    .byte $AB
-    ; $AB -
-    .byte $AD
-    ; $AC *
-    .byte $AA
-    ; $AD /
-    .byte $AF
-    ; $AE ^
-    .byte $DE
-    ; $AF AND
-    .byte $41,$4E,$C4
-    ; $B0 OR
-    .byte $4F,$D2
-    ; $B1 >
-    .byte $BE
-    ; $B2 =
-    .byte $BD
-    ; $B3 <
-    .byte $BC
-    ; $B4 SGN
-    .byte $53,$47,$CE
-    ; $B5 INT
-    .byte $49,$4E,$D4
-    ; $B6 ABS
-    .byte $41,$42,$D3
-    ; $B7 USR
-    .byte $55,$53,$D2
-    ; $B8 FRE
-    .byte $46,$52,$C5
-    ; $B9 POS
-    .byte $50,$4F,$D3
-    ; $BA SQR
-    .byte $53,$51,$D2
-    ; $BB RND
-    .byte $52,$4E,$C4
-    ; $BC LOG
-    .byte $4C,$4F,$C7
-    ; $BD EXP
-    .byte $45,$58,$D0
-    ; $BE COS
-    .byte $43,$4F,$D3
-    ; $BF SIN
-    .byte $53,$49,$CE
-    ; $C0 TAN
-    .byte $54,$41,$CE
-    ; $C1 ATN
-    .byte $41,$54,$CE
-    ; $C2 PEEK
-    .byte $50,$45,$45,$CB
-    ; $C3 LEN
-    .byte $4C,$45,$CE
-    ; $C4 STR$
-    .byte $53,$54,$52,$A4
-    ; $C5 VAL
-    .byte $56,$41,$CC
-    ; $C6 ASC
-    .byte $41,$53,$C3
-    ; $C7 CHR$
-    .byte $43,$48,$52,$A4
-    ; $C8 LEFT$
-    .byte $4C,$45,$46,$54,$A4
-    ; $C9 RIGHT$
-    .byte $52,$49,$47,$48,$54,$A4
-    ; $CA MID$
-    .byte $4D,$49,$44,$A4
-    ; $CB GO
-    .byte $47,$CF
-; $CC ASSEMBLE
-    .byte $41,$53,$53,$45,$4D,$42,$4C,$C5
-    ; $CD INCLUDE
-    .byte $49,$4E,$43,$4C,$55,$44,$C5
-    ; $CE RUNPROG
-    .byte $52,$55,$4E,$50,$52,$4F,$C7
-    ; $CF SCRATCH
-    .byte $53,$43,$52,$41,$54,$43,$C8
-    ; $D0 DELETE
-    .byte $44,$45,$4C,$45,$54,$C5
-    ; $D1 EXISTS
-    .byte $45,$58,$49,$53,$54,$D3
-    ; $D2 RENAME
-    .byte $52,$45,$4E,$41,$4D,$C5
-    ; $D3 STATUS
-    .byte $53,$54,$41,$54,$55,$D3
-    ; $D4 DRIVE
-    .byte $44,$52,$49,$56,$C5
-    ; $D5 ONERR
-    .byte $4F,$4E,$45,$52,$D2
-    ; $D6 PAUSE
-    .byte $50,$41,$55,$53,$C5
-    ; $D7 COPY
-    .byte $43,$4F,$50,$D9
-    ; $D8 DIR
-    .byte $44,$49,$D2
+    dkw "END"       ; $80
+    dkw "FOR"       ; $81
+    dkw "NEXT"      ; $82
+    dkw "DATA"      ; $83
+    dkw "INPUT#"    ; $84
+    dkw "INPUT"     ; $85
+    dkw "DIM"       ; $86
+    dkw "READ"      ; $87
+    dkw "LET"       ; $88
+    dkw "GOTO"      ; $89
+    dkw "RUN"       ; $8A
+    dkw "IF"        ; $8B
+    dkw "RESTORE"   ; $8C
+    dkw "GOSUB"     ; $8D
+    dkw "RETURN"    ; $8E
+    dkw "REM"       ; $8F
+    dkw "STOP"      ; $90
+    dkw "ON"        ; $91
+    dkw "WAIT"      ; $92
+    dkw "LOAD"      ; $93
+    dkw "SAVE"      ; $94
+    dkw "VERIFY"    ; $95
+    dkw "DEF"       ; $96
+    dkw "POKE"      ; $97
+    dkw "PRINT#"    ; $98
+    dkw "PRINT"     ; $99
+    dkw "CONT"      ; $9A
+    dkw "LIST"      ; $9B
+    dkw "CLR"       ; $9C
+    dkw "CMD"       ; $9D
+    dkw "SYS"       ; $9E
+    dkw "OPEN"      ; $9F
+    dkw "CLOSE"     ; $A0
+    dkw "GET"       ; $A1
+    dkw "NEW"       ; $A2
+    dkw "TAB("      ; $A3
+    dkw "TO"        ; $A4
+    dkw "FN"        ; $A5
+    dkw "SPC("      ; $A6
+    dkw "THEN"      ; $A7
+    dkw "NOT"       ; $A8
+    dkw "STEP"      ; $A9
+    dkw "+"         ; $AA
+    dkw "-"         ; $AB
+    dkw "*"         ; $AC
+    dkw "/"         ; $AD
+    dkw "^"         ; $AE
+    dkw "AND"       ; $AF
+    dkw "OR"        ; $B0
+    dkw ">"         ; $B1
+    dkw "="         ; $B2
+    dkw "<"         ; $B3
+    dkw "SGN"       ; $B4
+    dkw "INT"       ; $B5
+    dkw "ABS"       ; $B6
+    dkw "USR"       ; $B7
+    dkw "FRE"       ; $B8
+    dkw "POS"       ; $B9
+    dkw "SQR"       ; $BA
+    dkw "RND"       ; $BB
+    dkw "LOG"       ; $BC
+    dkw "EXP"       ; $BD
+    dkw "COS"       ; $BE
+    dkw "SIN"       ; $BF
+    dkw "TAN"       ; $C0
+    dkw "ATN"       ; $C1
+    dkw "PEEK"      ; $C2
+    dkw "LEN"       ; $C3
+    dkw "STR$"      ; $C4
+    dkw "VAL"       ; $C5
+    dkw "ASC"       ; $C6
+    dkw "CHR$"      ; $C7
+    dkw "LEFT$"     ; $C8
+    dkw "RIGHT$"    ; $C9
+    dkw "MID$"      ; $CA
+    dkw "GO"        ; $CB
+    dkw "ASSEMBLE"  ; $CC
+    dkw "INCLUDE"   ; $CD
+    dkw "RUNPROG"   ; $CE
+    dkw "SCRATCH"   ; $CF
+    dkw "DELETE"    ; $D0
+    dkw "EXISTS"    ; $D1
+    dkw "RENAME"    ; $D2
+    dkw "STATUS"    ; $D3
+    dkw "DRIVE"     ; $D4
+    dkw "ONERR"     ; $D5
+    dkw "PAUSE"     ; $D6
+    dkw "COPY"      ; $D7
+    dkw "DIR"       ; $D8
+KW_END_TOKEN = KW_TOK               ; one past the last token ($D9)
+
+; kw_off — each token's entry, as an offset from kwtab (tokens below
+; KW_SECOND_HALF) or from kwtab+256 (KW_SECOND_HALF and up): one byte per token, the
+; table being longer than a page.
+KW_SPLIT .set KW_END_TOKEN
+.repeat KW_END_TOKEN - $80, KWI
+    .if KW_SPLIT = KW_END_TOKEN && .ident(.sprintf("kwt_%d", KWI)) - kwtab > $FF
+        KW_SPLIT .set $80 + KWI
+    .endif
+.endrepeat
+KW_SECOND_HALF = KW_SPLIT           ; a constant: emit_keyword refers to it ahead
+kw_off:
+.repeat KW_END_TOKEN - $80, KWI
+    .if $80 + KWI < KW_SPLIT
+        .byte .ident(.sprintf("kwt_%d", KWI)) - kwtab
+    .else
+        .assert .ident(.sprintf("kwt_%d", KWI)) - kwtab - $100 <= $FF, error, "moddet: kwtab longer than two pages"
+        .byte .ident(.sprintf("kwt_%d", KWI)) - kwtab - $100
+    .endif
+.endrepeat
 
 ; ============================================================================
 ; emit_byte — write A to (DST_PTR), advance DST_PTR.
@@ -695,16 +619,6 @@ inc_src_ptr:
     inc SRC_PTR
     bne :+
     inc SRC_PTR+1
-:   rts
-
-; ============================================================================
-; inc_kwtab — advance KWTAB by 1.
-; ============================================================================
-
-inc_kwtab:
-    inc KWTAB
-    bne :+
-    inc KWTAB+1
 :   rts
 
 ; in_string — $FF while inside a "" string literal (module RAM; ZP is full)

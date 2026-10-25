@@ -135,6 +135,147 @@ def test_tokenize_overflow_restores_text():
     )
 
 
+KEYWORDS = [
+    "END",
+    "FOR",
+    "NEXT",
+    "DATA",
+    "INPUT#",
+    "INPUT",
+    "DIM",
+    "READ",
+    "LET",
+    "GOTO",
+    "RUN",
+    "IF",
+    "RESTORE",
+    "GOSUB",
+    "RETURN",
+    "REM",
+    "STOP",
+    "ON",
+    "WAIT",
+    "LOAD",
+    "SAVE",
+    "VERIFY",
+    "DEF",
+    "POKE",
+    "PRINT#",
+    "PRINT",
+    "CONT",
+    "LIST",
+    "CLR",
+    "CMD",
+    "SYS",
+    "OPEN",
+    "CLOSE",
+    "GET",
+    "NEW",
+    "TAB(",
+    "TO",
+    "FN",
+    "SPC(",
+    "THEN",
+    "NOT",
+    "STEP",
+    "+",
+    "-",
+    "*",
+    "/",
+    "^",
+    "AND",
+    "OR",
+    ">",
+    "=",
+    "<",
+    "SGN",
+    "INT",
+    "ABS",
+    "USR",
+    "FRE",
+    "POS",
+    "SQR",
+    "RND",
+    "LOG",
+    "EXP",
+    "COS",
+    "SIN",
+    "TAN",
+    "ATN",
+    "PEEK",
+    "LEN",
+    "STR$",
+    "VAL",
+    "ASC",
+    "CHR$",
+    "LEFT$",
+    "RIGHT$",
+    "MID$",
+    "GO",
+    "ASSEMBLE",
+    "INCLUDE",
+    "RUNPROG",
+    "SCRATCH",
+    "DELETE",
+    "EXISTS",
+    "RENAME",
+    "STATUS",
+    "DRIVE",
+    "ONERR",
+    "PAUSE",
+    "COPY",
+    "DIR",
+]
+
+
+def body(out):
+    """The token bytes of a one-line program: drop header, link, line no."""
+    return out[6:-3]
+
+
+def test_every_keyword():
+    # tokens $80-$D8 in order; each keyword alone on a line
+    for tok, kw in enumerate(KEYWORDS, 0x80):
+        src = b"10 " + kw.encode() + b"\r"
+        st, out, _ = run_module("modtok", src)
+        assert st == 0x02 and body(out) == bytes([tok]), f"{kw}: {out!r}"
+        st, back, _ = run_module("moddet", out)
+        assert st == 0x02 and back == src, f"{kw}: {back!r}"
+    print("ok: every keyword tokenizes to its token and back")
+
+
+def test_shifted_abbreviations():
+    # A shifted letter ends an abbreviation; the first entry in the
+    # longest-first table that it fits wins (G<shift-O> is GOSUB, not GOTO).
+    src = b"10 G\xcf20:P\xd2A:L\xc9:F\xcfI:NE\xd8:S\xd4:R\xc5\r"
+    st, out, _ = run_module("modtok", src)
+    want = b"\x8d20:\x98A:\x9b:\x81I:\x82:\xd3:\x8c"
+    check(st == 0x02 and body(out) == want, "shifted-letter abbreviations")
+    # A shifted letter EQUAL to a keyword's final char is not an
+    # abbreviation (F<shift-N> is not FN): the match runs on past the entry.
+    st, out, _ = run_module("modtok", b"10 PRINTF\xce(1)\r")
+    check(st == 0x02 and body(out) == b"\x99F\xce(1)", "F<shift-N> stays literal")
+
+
+def test_tokenize_page_boundaries():
+    # the relocation/restore copies go a page at a time: lengths around
+    # page multiples, with and without room for the output
+    line = b'10 PRINT"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789":GOTO10\r'
+    for n in (1, 255, 256, 257, 512, 513):
+        src = (line * (n // len(line) + 1))[:n]
+        st, out, _ = run_module("modtok", src)
+        assert st == 0x02, f"len {n}: status ${st:02x}"
+        st, back, _ = run_module("moddet", out)
+        assert st == 0x02, f"len {n}: moddet status ${st:02x}"
+        # the cut-off last line has no CR, so compare by re-tokenizing
+        st, again, _ = run_module("modtok", back)
+        assert again == out, f"len {n}: re-tokenize differs"
+        end = BUF + n + 3
+        st, _, mem = run_module("modtok", src, buf_end=end)
+        assert st == 0x01 and bytes(mem[BUF : BUF + n]) == src, f"len {n}: restore"
+    print("ok: tokenize/restore across page boundaries")
+
+
 def test_renumber():
     src = b"5 ON X GOTO 7, 9 ,5\r7 GOSUB 9\r9 IF A THEN 5\r"
     expected = b"10 ON X GOTO 20, 30 ,10\r20 GOSUB 30\r30 IF A THEN 10\r"
@@ -240,6 +381,9 @@ def main():
             sys.exit(f"build/{name}.prg not found — run: bash make_petproject.sh")
     test_tokenize_round_trip()
     test_tokenize_overflow_restores_text()
+    test_every_keyword()
+    test_shifted_abbreviations()
+    test_tokenize_page_boundaries()
     test_renumber()
     test_renumber_overtake_guard()
     test_search_replace()

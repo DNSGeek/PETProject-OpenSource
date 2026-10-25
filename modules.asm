@@ -613,6 +613,7 @@ run_selected_module:
     ; does, then adopt the chosen name.
     jsr load_dirty_check            ; C=1 → cancelled
     bcs @done
+    jsr prompt_stash_fname          ; a failed load restores the old name
     ldy #15
 :   lda DSK_PEND_FNAME,y
     sta FNAME_BUF,y

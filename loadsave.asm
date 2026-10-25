@@ -636,8 +636,8 @@ load_run_moddet:
 ; Calls MODDIS (module index 1) which reads the PRG binary starting at
 ; work_buf, disassembles it, and writes assembly source text back.
 ; On success: GAP_START set from MOD_NEW_END, GAP_END = work_buf_end.
-; On failure: gap left as-is (caller's gap setup stays valid as raw text).
-; Clobbers: A, X, Y, LPTR, FNAME_BUF, FNAME_LEN, MOD_* params.
+; On failure: the raw bytes stay as text, gap at BUF_PTR.
+; Clobbers: A, X, Y, LPTR, MOD_* params.
 ; ============================================================================
 
 load_run_moddis:
@@ -647,37 +647,9 @@ load_run_moddis:
     cmp #$02
     bne @moddis_plain
 
-    ; Write CONTENT_ROWS sentinel CRs after output end so scrolling past
-    ; the last valid line shows blank rows instead of garbage.
-    lda MOD_NEW_END_LO
-    sta BUF_PTR
-    lda MOD_NEW_END_HI
-    sta BUF_PTR+1
-    lda #CONTENT_ROWS
-    sta TMP
-@sentinel:
-    lda BUF_PTR+1               ; stop if at or past work_buf_end
-    cmp #>work_buf_end
-    bcs @sent_done
-    lda #PET_CR
-    ldy #0
-    sta (BUF_PTR),y
-    inc BUF_PTR
-    bne :+
-    inc BUF_PTR+1
-:   dec TMP
-    bne @sentinel
-@sent_done:
-    ; Zero-size gap at work_buf → cursor at position 0.
-    ; ensure_cursor_visible finds cursor on first comparison: O(1).
-    lda #<work_buf
-    sta GAP_START
-    lda #>work_buf
-    sta GAP_START+1
-    lda #<work_buf
-    sta GAP_END
-    lda #>work_buf
-    sta GAP_END+1
+    ; run_module_by_index already put the gap at MOD_NEW_END..work_buf_end:
+    ; the disassembly is the whole document and the rest is free space, the
+    ; same as after a BASIC load.
     rts
 
 @moddis_plain:

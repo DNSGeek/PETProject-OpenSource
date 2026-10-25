@@ -206,7 +206,7 @@ detokenize:
     cmp MOD_BUF_END_LO
     lda SRC_PTR+1
     sbc MOD_BUF_END_HI
-    bcs @all_done
+    bcs @to_all_done
 
     ; Check for end-of-program sentinel ($0000 link word)
     ldy #0
@@ -214,7 +214,9 @@ detokenize:
     bne @has_line
     iny
     buf_lda SRC_PTR
-    beq @all_done           ; both bytes zero = sentinel
+    bne @has_line
+@to_all_done:
+    jmp @all_done           ; both bytes zero = sentinel
 
 @has_line:
     ; Skip link word
@@ -240,9 +242,12 @@ detokenize:
     lda #$20
     jsr emit_byte
 
-    ; Quote mode resets at the start of every line (same as ROM LIST).
+    ; Quote mode resets at the start of every line (same as ROM LIST), and
+    ; so do the REM and DATA literal modes.
     lda #0
     sta in_string
+    sta after_rem
+    sta after_data
 
 ; ============================================================================
 ; @token_loop — process token bytes until line terminator ($00)
@@ -253,6 +258,12 @@ detokenize:
     buf_lda SRC_PTR             ; read next byte
     beq @end_line               ; $00 = end of this line
     jsr inc_src_ptr             ; advance past the byte we just read
+
+    ; After REM every byte to the end of the line is literal text: MODTOK
+    ; stores it untokenized, so expanding $80-$D8 here would turn graphics
+    ; and shifted letters into keywords — on every save, permanently.
+    ldx after_rem
+    bne @literal
 
     ; Quote tracking (same rule as ROM LIST): '"' toggles string mode, and
     ; inside a string EVERY byte is literal.  String contents are stored as
@@ -270,6 +281,17 @@ detokenize:
     ldx in_string
     bne @literal                ; inside a string: emit untouched
 
+    ; DATA items are literal up to an unquoted ':' (MODTOK's rule, and the
+    ; ROM's CRUNCH).
+    ldx after_data
+    beq @not_data
+    cmp #':'
+    bne @literal
+    ldx #0
+    stx after_data              ; ':' ends the statement and is literal
+    beq @literal
+@not_data:
+
     ; Token or literal char?
     cmp #$80
     bcc @literal                ; < $80 → emit as-is
@@ -279,7 +301,14 @@ detokenize:
     ; carries the extended entries, so emit_keyword handles the full range.
     cmp #$D9
     bcs @literal                ; >= $D9 → genuinely out of range, emit as-is
-    jsr emit_keyword            ; A = token byte on entry
+    ldx #$FF
+    cmp #$8F                    ; REM — rest of the line is literal
+    bne :+
+    stx after_rem
+:   cmp #$83                    ; DATA — rest of the statement is literal
+    bne :+
+    stx after_data
+:   jsr emit_keyword            ; A = token byte on entry
     jmp @token_loop
 
 @literal:
@@ -680,6 +709,11 @@ inc_kwtab:
 
 ; in_string — $FF while inside a "" string literal (module RAM; ZP is full)
 in_string:
+    .byte 0
+; after_rem / after_data — $FF while in a REM line / DATA statement
+after_rem:
+    .byte 0
+after_data:
     .byte 0
 
 ; det_reloc — start of the relocated tokenized input at the top of

@@ -51,13 +51,9 @@
 ;   After .include "loadsave.asm": .include "modules.asm"
 ;
 ;   .segment "BSS":
-;     MOD_LOADED:            .res 1
-;     SETTING_TOKENIZE_SAVE: .res 1
 ;     MOD_SEL_ROW:           .res 1
 ;     MOD_ITEM_TMP:          .res 1   ; item index scratch (distinct from MOD_TMP)
 ;     MOD_TMP:               .res 1   ; general popup scratch
-;
-;   init_settings: lda #$FF / sta MOD_LOADED / lda #0 / sta SETTING_TOKENIZE_SAVE
 ; ============================================================================
 
 MOD_MAGIC        = $0212

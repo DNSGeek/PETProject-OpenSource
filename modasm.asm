@@ -2790,96 +2790,76 @@ pop_src_frame:
 ; ============================================================================
 
 ; set_err_*  -  record error if none already recorded.
-; All check ASM_ERR first; only first error is kept.
-; Each routine: loads message address into TMP/TMP+1, falls into set_err_common.
+; Only the first error is kept: set_err_common returns at once if ASM_ERR
+; is already set.
+;
+; Each entry point is LDA #(offset of its message in err_msgs) followed by
+; a $2C byte, which turns the next entry's 2-byte LDA into the operand of a
+; harmless BIT abs (it only reads RAM at $xxA9, xx = a message offset, kept
+; below $A0 by the assert at err_msgs) — so every entry falls through to
+; set_err_common with its own offset in A.  A is clobbered (as before);
+; X is untouched, and Y is clobbered only when the error is recorded
+; (set_err_common's copy loop), exactly as before.
 
 set_err_deep:
-    lda #<err_deep_txt
-    sta TMP
-    lda #>err_deep_txt
-    sta TMP+1
-    jmp set_err_common
+    lda #err_deep_txt - err_msgs
+    .byte $2C                   ; BIT abs: skip the next LDA #
 
 set_err_phase:
-    lda #<err_phase_txt
-    sta TMP
-    lda #>err_phase_txt
-    sta TMP+1
-    jmp set_err_common
+    lda #err_phase_txt - err_msgs
+    .byte $2C                   ; BIT abs: skip the next LDA #
 
 set_err_truncate:
-    lda #<err_truncate_txt
-    sta TMP
-    lda #>err_truncate_txt
-    sta TMP+1
-    jmp set_err_common
+    lda #err_truncate_txt - err_msgs
+    .byte $2C                   ; BIT abs: skip the next LDA #
 
 set_err_syntax:
-    lda #<err_syntax_txt
-    sta TMP
-    lda #>err_syntax_txt
-    sta TMP+1
-    jmp set_err_common
+    lda #err_syntax_txt - err_msgs
+    .byte $2C                   ; BIT abs: skip the next LDA #
 
 set_err_value:
-    lda #<err_value_txt
-    sta TMP
-    lda #>err_value_txt
-    sta TMP+1
-    jmp set_err_common
+    lda #err_value_txt - err_msgs
+    .byte $2C                   ; BIT abs: skip the next LDA #
 
 set_err_symbol:
-    lda #<err_symbol_txt
-    sta TMP
-    lda #>err_symbol_txt
-    sta TMP+1
-    jmp set_err_common
+    lda #err_symbol_txt - err_msgs
+    .byte $2C                   ; BIT abs: skip the next LDA #
 
 set_err_mnemonic:
-    lda #<err_mnem_txt
-    sta TMP
-    lda #>err_mnem_txt
-    sta TMP+1
-    jmp set_err_common
+    lda #err_mnem_txt - err_msgs
+    .byte $2C                   ; BIT abs: skip the next LDA #
 
 set_err_unknown:
-    lda #<err_unknown_txt
-    sta TMP
-    lda #>err_unknown_txt
-    sta TMP+1
-    jmp set_err_common
+    lda #err_unknown_txt - err_msgs
+    .byte $2C                   ; BIT abs: skip the next LDA #
 
 set_err_operand:
-    lda #<err_operand_txt
-    sta TMP
-    lda #>err_operand_txt
-    sta TMP+1
-    jmp set_err_common
+    lda #err_operand_txt - err_msgs
+    .byte $2C                   ; BIT abs: skip the next LDA #
 
 set_err_mode:
-    lda #<err_mode_txt
-    sta TMP
-    lda #>err_mode_txt
-    sta TMP+1
-    jmp set_err_common
+    lda #err_mode_txt - err_msgs
+    .byte $2C                   ; BIT abs: skip the next LDA #
 
 set_err_range:
-    lda #<err_range_txt
-    sta TMP
-    lda #>err_range_txt
-    sta TMP+1
-    jmp set_err_common
+    lda #err_range_txt - err_msgs
+    .byte $2C                   ; BIT abs: skip the next LDA #
 
 set_err_io:
-    lda #<err_io_txt
-    sta TMP
-    lda #>err_io_txt
-    sta TMP+1
+    lda #err_io_txt - err_msgs
     ; fall through
 
 set_err_common:
-    lda ASM_ERR
-    bne @already               ; only record first error
+    ; A = offset of the message in err_msgs.  ASM_ERR is only ever $00 or
+    ; $FF, so BIT tests it without disturbing A.
+    bit ASM_ERR
+    bmi @already                ; only record first error
+    clc
+    adc #<err_msgs
+    sta TMP
+    lda #>err_msgs
+    adc #0
+    sta TMP+1
     lda #$FF
     sta ASM_ERR
     lda ASM_LINE_LO
@@ -2915,7 +2895,9 @@ copy_error_to_status:
 @done:
     rts
 
-; Error message strings (screen codes, zero-terminated, max 20 chars)
+; Error message strings (screen codes, zero-terminated, max 20 chars).
+; One contiguous block: set_err_* address a message by its offset in it.
+err_msgs:
 err_syntax_txt:
     .byte $13,$19,$0E,$14,$01,$18,$20,$05,$12,$12,$0F,$12, 0        ; SYNTAX ERROR
 err_value_txt:
@@ -2940,6 +2922,8 @@ err_deep_txt:
     .byte $09,$0E,$03,$0C,$15,$04,$05,$20,$14,$0F,$0F,$20,$04,$05,$05,$10, 0   ; INCLUDE TOO DEEP
 err_phase_txt:
     .byte $10,$08,$01,$13,$05,$20,$05,$12,$12,$0F,$12, 0            ; PHASE ERROR
+err_msgs_end:
+.assert err_msgs_end - err_msgs <= $A0, error, "modasm: err_msgs too long for the set_err_* offsets / BIT skip"
 
 ; ============================================================================
 ; Opcode table (526 bytes)

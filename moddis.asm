@@ -233,13 +233,13 @@ disassemble:
     cmp DIS_BUF_END_HI      ; TMP3 >= work_buf_end hi → overflow
     bcs @done_overflow
 
-    ; Activity spinner — toggle status-bar corner color every 256 instructions
+    ; Activity spinner — toggle the status-bar corner color every 16 instructions
     inc DIS_SPINNER
     lda DIS_SPINNER
     and #$0F
     bne @no_spin
     lda DIS_SPIN_IDX
-    eor #(SPIN_COLOR_A ^ SPIN_COLOR_B)  ; $01 XOR $07 = $06 — toggles between the two
+    eor #(SPIN_COLOR_A ^ SPIN_COLOR_B)  ; $01 XOR $00 = $01 — toggles white <-> black
     sta DIS_SPIN_IDX
     sta SPIN_CELL
 @no_spin:
@@ -335,16 +335,13 @@ disassemble:
 
 emit_line:
     ; 4 spaces indent
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
+    ldx #4
+    jsr emit_spaces
 
     ; Mnemonic (3 chars from mnem_strs table)
     lda TMP+1                   ; mnemonic index
     asl                         ; *2
-    adc TMP+1                   ; *3 (C clear since index <= 55, *3 <= 165 < 256)
+    adc TMP+1                   ; *3 (C clear since index <= 74, *3 <= 222 < 256)
     tax
     lda mnem_strs,x
     jsr emit_dst
@@ -357,75 +354,35 @@ emit_line:
     lda #$20
     jsr emit_dst
 
-    ; Operand based on mode
-    lda TMP2+1                  ; mode
-    cmp #MODE_IMP
-    bne :+
-    jmp @op_imp
-:   cmp #MODE_ACC
-    bne :+
-    jmp @op_acc
-:   cmp #MODE_IMM
-    bne :+
-    jmp @op_imm
-:   cmp #MODE_ZP
-    bne :+
-    jmp @op_zp
-:   cmp #MODE_ZPX
-    bne :+
-    jmp @op_zpx
-:   cmp #MODE_ZPY
-    bne :+
-    jmp @op_zpy
-:   cmp #MODE_ABS
-    bne :+
-    jmp @op_abs
-:   cmp #MODE_ABX
-    bne :+
-    jmp @op_abx
-:   cmp #MODE_ABY
-    bne :+
-    jmp @op_aby
-:   cmp #MODE_IND
-    bne :+
-    jmp @op_ind
-:   cmp #MODE_IZX
-    bne :+
-    jmp @op_izx
-:   cmp #MODE_IZY
-    bne :+
-    jmp @op_izy
-:   cmp #MODE_REL
-    bne :+
-    jmp @op_rel
-:   jmp @op_done                ; should not reach
+    ; Operand based on mode: dispatch through op_tab with the RTS trick
+    ; (push handler-1, RTS "returns" into the handler). mode_tab only holds
+    ; 0-12, so there is no out-of-range case to guard.
+    ldx TMP2+1                  ; mode
+    lda op_tab_hi,x
+    pha
+    lda op_tab_lo,x
+    pha
+    rts
 
-@op_imp:
+op_pad2:
+    ldx #2
+op_pad:
+    jsr emit_spaces             ; X spaces to finish the 7-char operand field
+    jmp op_done
+
+op_imp:
     ; implied: no operand, 7 spaces to align with widest mode
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jmp @op_done
+    ldx #7
+    bne op_pad                  ; always
 
-@op_acc:
+op_acc:
     ; accumulator: "A      " (7 chars)
     lda #$41                    ; 'A'
     jsr emit_dst
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jmp @op_done
+    ldx #6
+    bne op_pad                  ; always
 
-@op_imm:
+op_imm:
     ; immediate: "#$XX   " (7 chars)
     ldy #1
     buf_lda SRC_PTR
@@ -436,13 +393,10 @@ emit_line:
     jsr emit_dst
     txa
     jsr emit_hex_byte
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jmp @op_done
+    ldx #3
+    bne op_pad                  ; always
 
-@op_zp:
+op_zp:
     ; zero page: "$XX    " (7 chars)
     ldy #1
     buf_lda SRC_PTR
@@ -451,15 +405,19 @@ emit_line:
     jsr emit_dst
     txa
     jsr emit_hex_byte
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jmp @op_done
+    ldx #4
+    bne op_pad                  ; always
 
-@op_zpx:
+op_zpx:
     ; zero page,X: "$XX,X  " (7 chars)
+    lda #$58                    ; 'X'
+    bne op_zpidx                ; always
+
+op_zpy:
+    ; zero page,Y: "$XX,Y  " (7 chars)
+    lda #$59                    ; 'Y'
+op_zpidx:
+    sta TMP+1                   ; index register letter (mnem_idx no longer needed)
     ldy #1
     buf_lda SRC_PTR
     tax
@@ -469,111 +427,40 @@ emit_line:
     jsr emit_hex_byte
     lda #$2C                    ; ','
     jsr emit_dst
-    lda #$58                    ; 'X'
+    lda TMP+1
     jsr emit_dst
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jmp @op_done
+    jmp op_pad2
 
-@op_zpy:
-    ; zero page,Y: "$XX,Y  " (7 chars)
-    ldy #1
-    buf_lda SRC_PTR
-    tax
-    lda #$24
-    jsr emit_dst
-    txa
-    jsr emit_hex_byte
-    lda #$2C
-    jsr emit_dst
-    lda #$59                    ; 'Y'
-    jsr emit_dst
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jmp @op_done
-
-@op_abs:
+op_abs:
     ; absolute: "$XXXX  " (7 chars)
-    ldy #1
-    buf_lda SRC_PTR
-    sta TMP+1                   ; save lo (reuse, mnem_idx no longer needed)
-    iny
-    buf_lda SRC_PTR
-    tax                         ; hi
-    lda #$24
-    jsr emit_dst
-    txa
-    jsr emit_hex_byte           ; hi byte first
-    lda TMP+1
-    jsr emit_hex_byte           ; then lo byte
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jmp @op_done
+    jsr op_dollar_word
+    jmp op_pad2
 
-@op_abx:
+op_abx:
     ; absolute,X: "$XXXX,X"
-    ldy #1
-    buf_lda SRC_PTR
-    sta TMP+1
-    iny
-    buf_lda SRC_PTR
-    tax
-    lda #$24
-    jsr emit_dst
-    txa
-    jsr emit_hex_byte
-    lda TMP+1
-    jsr emit_hex_byte
+    jsr op_dollar_word
     lda #$2C
     jsr emit_dst
     lda #$58
-    jsr emit_dst
-    jmp @op_done
+    jmp op_last
 
-@op_aby:
+op_aby:
     ; absolute,Y: "$XXXX,Y"
-    ldy #1
-    buf_lda SRC_PTR
-    sta TMP+1
-    iny
-    buf_lda SRC_PTR
-    tax
-    lda #$24
-    jsr emit_dst
-    txa
-    jsr emit_hex_byte
-    lda TMP+1
-    jsr emit_hex_byte
+    jsr op_dollar_word
     lda #$2C
     jsr emit_dst
     lda #$59
-    jsr emit_dst
-    jmp @op_done
+    jmp op_last
 
-@op_ind:
+op_ind:
     ; indirect: "($XXXX)"
-    ldy #1
-    buf_lda SRC_PTR
-    sta TMP+1
-    iny
-    buf_lda SRC_PTR
-    tax
     lda #$28                    ; '('
     jsr emit_dst
-    lda #$24
-    jsr emit_dst
-    txa
-    jsr emit_hex_byte
-    lda TMP+1
-    jsr emit_hex_byte
+    jsr op_dollar_word
     lda #$29                    ; ')'
-    jsr emit_dst
-    jmp @op_done
+    jmp op_last
 
-@op_izx:
+op_izx:
     ; (indirect,X): "($XX,X)"
     ldy #1
     buf_lda SRC_PTR
@@ -589,10 +476,9 @@ emit_line:
     lda #$58
     jsr emit_dst
     lda #$29
-    jsr emit_dst
-    jmp @op_done
+    jmp op_last
 
-@op_izy:
+op_izy:
     ; (indirect),Y: "($XX),Y"
     ldy #1
     buf_lda SRC_PTR
@@ -608,10 +494,9 @@ emit_line:
     lda #$2C
     jsr emit_dst
     lda #$59
-    jsr emit_dst
-    jmp @op_done
+    jmp op_last
 
-@op_rel:
+op_rel:
     ldy #1
     buf_lda SRC_PTR             ; signed offset
     sta TMP+1                   ; save offset
@@ -648,12 +533,13 @@ emit_line:
     jsr emit_hex_byte
     lda TMP2+1                  ; lo
     jsr emit_hex_byte
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    ; fall through to @op_done
+    jmp op_pad2
 
-@op_done:
+op_last:
+    jsr emit_dst                ; last operand char, field already 7 wide
+    ; fall through
+
+op_done:
     ; Operand field is padded to 7 chars by each handler above.
     ; Emit " ;XXXX:XX [XX [XX]]" — semicolon lands at column 16 on every line.
     lda #$20
@@ -673,45 +559,72 @@ emit_line:
     ldy #0
     buf_lda SRC_PTR             ; opcode
     jsr emit_hex_byte
+    ldx #6                      ; 1-byte instr: "XX" + 6 pad = 8
     lda TMP3+1                  ; size
     cmp #1
-    beq @pad_size1
+    beq @pad_bytes
     lda #$20
     jsr emit_dst
     ldy #1
     buf_lda SRC_PTR
     jsr emit_hex_byte
+    ldx #3                      ; 2-byte instr: "XX XX" + 3 pad = 8
     lda TMP3+1
     cmp #2
-    beq @pad_size2
+    beq @pad_bytes
     lda #$20
     jsr emit_dst
     ldy #2
     buf_lda SRC_PTR
     jsr emit_hex_byte
-    jmp @emit_cr
-@pad_size1:
-    ; 1-byte instr emitted "XX" (2 chars) - need 6 more to reach 8
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jmp @emit_cr
-@pad_size2:
-    ; 2-byte instr emitted "XX XX" (5 chars) - need 3 more to reach 8
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-@emit_cr:
-    lda #$20
-    jsr emit_dst
+    ldx #0                      ; 3-byte instr: "XX XX XX", no pad
+@pad_bytes:
+    inx                         ; +1: the space before the hint
+    jsr emit_spaces
     jsr emit_petscii_hint
     lda #$0D
+    jmp emit_dst
+
+; ----------------------------------------------------------------------------
+; op_dollar_word - emit "$HHLL" for the 16-bit operand at SRC_PTR+1/+2.
+; Clobbers A, X, Y, TMP+1.
+; ----------------------------------------------------------------------------
+
+op_dollar_word:
+    ldy #1
+    buf_lda SRC_PTR
+    sta TMP+1                   ; save lo (reuse, mnem_idx no longer needed)
+    iny
+    buf_lda SRC_PTR
+    tax                         ; hi
+    lda #$24                    ; '$'
     jsr emit_dst
+    txa
+    jsr emit_hex_byte           ; hi byte first
+    lda TMP+1
+    jmp emit_hex_byte           ; then lo byte
+
+; Operand handlers by mode (RTS trick: address-1).
+; IMP=0 ACC=1 IMM=2 ZP=3 ZPX=4 ZPY=5 ABS=6 ABX=7 ABY=8 IND=9 IZX=10 IZY=11 REL=12
+op_tab_lo:
+    .lobytes op_imp-1, op_acc-1, op_imm-1, op_zp-1, op_zpx-1, op_zpy-1
+    .lobytes op_abs-1, op_abx-1, op_aby-1, op_ind-1, op_izx-1, op_izy-1
+    .lobytes op_rel-1
+op_tab_hi:
+    .hibytes op_imp-1, op_acc-1, op_imm-1, op_zp-1, op_zpx-1, op_zpy-1
+    .hibytes op_abs-1, op_abx-1, op_aby-1, op_ind-1, op_izx-1, op_izy-1
+    .hibytes op_rel-1
+
+; ----------------------------------------------------------------------------
+; emit_spaces - emit X spaces (X >= 1). Clobbers A, X, Y.
+; ----------------------------------------------------------------------------
+
+emit_spaces:
+    lda #$20
+@loop:
+    jsr emit_dst
+    dex
+    bne @loop
     rts
 
 ; ============================================================================
@@ -729,11 +642,8 @@ emit_illegal:
     sta TMP                     ; opcode byte
 
     ; "    .BYTE $XX   ;XXXX:XX\r" — semicolon at column 16
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
+    ldx #4
+    jsr emit_spaces
     lda #$2E                    ; '.'
     jsr emit_dst
     lda #$42                    ; 'B'
@@ -751,10 +661,8 @@ emit_illegal:
     lda TMP
     jsr emit_hex_byte
     ; pad + comment
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
+    ldx #3
+    jsr emit_spaces
     lda #$3B                    ; ';'
     jsr emit_dst
     lda DIS_PC_HI
@@ -770,13 +678,8 @@ emit_illegal:
     bne :+
     inc DIS_PC_HI
 :   ; pad "XX" (2 chars) to the fixed 8-char field width, same as emit_line
-    lda #$20
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
-    jsr emit_dst
+    ldx #6
+    jsr emit_spaces
     jsr emit_petscii_hint
     lda #$0D
     jsr emit_dst
@@ -907,8 +810,8 @@ emit_hex_nib:
     jmp emit_dst
 
 ; ============================================================================
-; emit_dst - write byte A to staging at TMP2/TMP3, advance pointer
-; Clobbers: nothing (preserves A, X, Y via stack)
+; emit_dst - write byte A to the output at DST_PTR, advance pointer
+; Preserves A and X; clobbers Y
 ; ============================================================================
 
 emit_dst:
@@ -950,9 +853,8 @@ emit_petscii_hint:
     lda TMP3+1
     cmp #1
     bne @hint_byte2
-    lda #$20                    ; pad 2 chars
-    jsr emit_dst
-    jsr emit_dst
+    ldx #2                      ; pad 2 chars
+    jsr emit_spaces
     jmp @hint_close
 @hint_byte2:
     ldy #1
@@ -1112,5 +1014,5 @@ DIS_BUF_LO:       .res 1          ; work_buf base lo
 DIS_BUF_HI:       .res 1          ; work_buf base hi
 DIS_BUF_END_LO:   .res 1          ; work_buf_end lo
 DIS_BUF_END_HI:   .res 1          ; work_buf_end hi
-DIS_SPINNER:      .res 1          ; 8-bit down-counter; wraps -> color flip
-DIS_SPIN_IDX:     .res 1          ; current color: $01=white $07=yellow (toggles)
+DIS_SPINNER:      .res 1          ; 8-bit up-counter; low nibble 0 -> color flip
+DIS_SPIN_IDX:     .res 1          ; current color: $01=white $00=black (toggles)

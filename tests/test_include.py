@@ -519,7 +519,26 @@ def main():
     expect_error(m, "BRANCH RANGE", "BNE -133", line=133)
     print("ok: relative branch range (lo-byte sign checked)")
 
-    # 15. Output errors only the drive's error channel reports: a full
+    # 15. Symbol table past one 256-entry page of the hash index: forward
+    #     and backward references on both sides of the boundary resolve,
+    #     a duplicate of a first-page label defined in the second page is
+    #     caught, and the 401st label overflows the table (SYM_MAX = 400).
+    n = 300
+    src = "        *= $1000\n" + "".join(
+        f"S{i}:\n        JMP S{(i * 97 + 13) % n}\n" for i in range(n)
+    )
+    expected = bytearray(b"\x00\x10")
+    for i in range(n):
+        target = 0x1000 + 3 * ((i * 97 + 13) % n)
+        expected += bytes([0x4C, target & 0xFF, target >> 8])
+    expect_output(assemble(src), bytes(expected), "300 symbols")
+    src = "        *= $1000\n" + "".join(f"S{i}:\n" for i in range(270)) + "S5:\n"
+    expect_error(assemble(src), "SYMBOL ERROR", "duplicate on page 2", line=272)
+    src = "        *= $1000\n" + "".join(f"S{i}:\n" for i in range(401))
+    expect_error(assemble(src), "SYMBOL ERROR", "401 symbols", line=402)
+    print("ok: symbol table beyond 256 entries, duplicate, overflow")
+
+    # 16. Output errors only the drive's error channel reports: a full
     #     disk must fail the assembly, and an existing output file must be
     #     replaced rather than silently kept.
     src = "        *= $C000\n        RTS\n"

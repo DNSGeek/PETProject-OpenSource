@@ -213,7 +213,7 @@ ASM_DS_LA       = 15      ; logical file for the drive's error channel
 ; parser's rewind-on-lookahead (check_for_label) keeps working unchanged.
 ;
 ; Placed at fixed addresses high in MAIN ($BFxx). The code ends well below
-; that (the link fails if it doesn't, see MODASM_CODE_END), so this free RAM is in the same always-visible bank ($01=$36) as the code —
+; that and SYM_HASH (the link fails if it doesn't, see MODASM_CODE_END), so this free RAM is in the same always-visible bank ($01=$36) as the code —
 ; no banking concerns, and it doesn't touch the packed $C0xx state or the
 ; symbol table.
 ;
@@ -259,6 +259,23 @@ INC_LFN_BASE    = 5       ; LFN for depth-1 include; depth-N uses LFN (INC_LFN_B
 ; Frame addresses never carry into the next page, so src_frame_ptr can
 ; leave the hi byte constant.
 .assert >(SRC_STACK + SRC_MAX_DEPTH * SRC_FRAME_SIZE - 1) = >SRC_STACK, error, "modasm: SRC_STACK crosses a page"
+
+; ---- Symbol-table hash index ----
+; SYM_HASH[i] is an 8-bit hash of symbol i's name (sym_hash), written by
+; sym_define next to SYM_TABLE entry i.  sym_lookup sweeps these bytes —
+; one compare per symbol — and does the full 8-byte name compare only on
+; a hash match, instead of walking every 10-byte entry.  The hash is a
+; pure function of the 8 name bytes, so equal names always hash equal:
+; the index only filters and can never hide a match.  Page-aligned so
+; each 256 symbols are one (ptr),y sweep.  Like SRC_STACK it is free RAM
+; above the module image (MODASM_CODE_END guards the overlap).
+SYM_HASH        = $BD00   ; SYM_MAX bytes: $BD00..$BE8F
+SYM_HCUR        = $BF32   ; hash of ASM_LABEL, set by sym_lookup
+SYM_IDX         = $BF33   ; sym_lookup: sweep index saved around a candidate
+SYM_T0          = $BF34   ; sym_entry_addr scratch (2 bytes)
+.assert <SYM_HASH = 0, error, "modasm: SYM_HASH must be page-aligned"
+.assert SYM_HASH + SYM_MAX <= SRC_DEPTH, error, "modasm: SYM_HASH overruns SRC_DEPTH"
+.assert LINE_BUF_END < SYM_HCUR && SYM_T0 + 2 <= LINE_BUF, error, "modasm: symbol scratch overlaps the include state"
 
 
 ; ============================================================================
@@ -2017,7 +2034,7 @@ emit_byte:
 ; C=1 if table full or duplicate.
 sym_define:
     ; Check for duplicate (only warn  -  allow redefinition in pass 1 context)
-    jsr sym_lookup
+    jsr sym_lookup              ; also leaves ASM_LABEL's hash in SYM_HCUR
     bcs @not_dup                ; not found  -  good
     ; Duplicate: set error and return
     sec
@@ -2031,37 +2048,12 @@ sym_define:
     sbc #>SYM_MAX
     bcs @full
 
-    ; Compute table entry address: SYM_TABLE + count * 10
-    ; count * 10 = count * 8 + count * 2
+    ; TMP2 = entry address = SYM_TABLE + count * 10
     lda ASM_SYM_LO
-    sta TMP
+    sta TMP2
     lda ASM_SYM_HI
-    sta TMP+1
-    ; TMP * 10
-    asl TMP
-    rol TMP+1                   ; *2
-    lda TMP
-    sta TMP2
-    lda TMP+1
     sta TMP2+1
-    asl TMP
-    rol TMP+1                   ; *4
-    asl TMP
-    rol TMP+1                   ; *8
-    lda TMP
-    clc
-    adc TMP2
-    sta TMP
-    lda TMP+1
-    adc TMP2+1
-    sta TMP+1                   ; TMP = count*10
-    lda TMP
-    clc
-    adc #<SYM_TABLE
-    sta TMP2
-    lda TMP+1
-    adc #>SYM_TABLE
-    sta TMP2+1                  ; TMP2 = entry address
+    jsr sym_entry_addr
 
     ; Write 8-char name
     ldy #0
@@ -2079,6 +2071,17 @@ sym_define:
     lda ASM_PC_HI
     sta (TMP2),y
 
+    ; Index the name's hash: SYM_HASH[count] = SYM_HCUR
+    lda ASM_SYM_LO
+    sta TMP3                    ; SYM_HASH is page-aligned: lo = count lo
+    lda ASM_SYM_HI
+    clc
+    adc #>SYM_HASH
+    sta TMP3+1
+    ldy #0
+    lda SYM_HCUR
+    sta (TMP3),y
+
     ; Increment symbol count
     inc ASM_SYM_LO
     bne :+
@@ -2092,29 +2095,63 @@ sym_define:
 
 ; sym_lookup  -  search for ASM_LABEL in symbol table.
 ; C=0: found, TMP/TMP+1 = value. C=1: not found.
+; Either way SYM_HCUR = hash of ASM_LABEL (sym_define stores it).
+; Clobbers A, Y, TMP2, TMP3; preserves X.
+;
+; Sweeps the SYM_HASH bytes (14 cycles per symbol), one 256-symbol page at
+; a time, from the page's last symbol down.  Only a hash match costs a
+; full name compare.  Names in the table are unique (sym_define rejects
+; duplicates, pass 2 defines nothing), so the sweep order does not matter.
 sym_lookup:
-    lda #<SYM_TABLE
-    sta TMP2
-    lda #>SYM_TABLE
-    sta TMP2+1
-    lda #0
-    sta TMP3                    ; entry counter lo
-    sta TMP3+1                  ; entry counter hi
-
-@loop:
-    ; Done if counter >= SYM_COUNT
-    lda TMP3
-    cmp ASM_SYM_LO
+    jsr sym_hash                ; SYM_HCUR = hash (clobbers Y)
+    lda #<SYM_HASH
+    sta TMP3
+    lda #>SYM_HASH
+    sta TMP3+1                  ; TMP3 = hash bytes of page 0 (symbols 0..255)
+@page:
+    ; Y = number of symbols in this page (0 = a full 256)
     lda TMP3+1
-    sbc ASM_SYM_HI
+    sec
+    sbc #>SYM_HASH              ; A = page number (symbol index hi)
+    cmp ASM_SYM_HI
+    bcs @last_page
+    ldy #0                      ; below the last page: all 256 symbols
+    beq @sweep                  ; (always)
+@last_page:
+    ldy ASM_SYM_LO              ; the last page holds count lo symbols
+    beq @not_found
+@sweep:
+    lda SYM_HCUR
+@scan:
+    dey
+    cmp (TMP3),y
+    beq @cand
+@resume:
+    cpy #0
+    bne @scan
+    ; Page done: move on unless it was the last one.
+    lda TMP3+1
+    sec
+    sbc #>SYM_HASH
+    cmp ASM_SYM_HI
     bcs @not_found
+    inc TMP3+1
+    bne @page                   ; (always)
 
-    ; Compare 8-char name
+@cand:
+    ; Hash match on symbol (page, Y): compare the full 8-char name.
+    sty SYM_IDX
+    sty TMP2
+    lda TMP3+1
+    sec
+    sbc #>SYM_HASH
+    sta TMP2+1                  ; TMP2 = symbol index
+    jsr sym_entry_addr          ; TMP2 = its SYM_TABLE entry
     ldy #0
 @cmp:
     lda (TMP2),y
     cmp ASM_LABEL,y
-    bne @next
+    bne @miss
     iny
     cpy #8
     bne @cmp
@@ -2127,22 +2164,62 @@ sym_lookup:
     clc
     rts
 
-@next:
-    ; Advance TMP2 by 10
-    lda TMP2
-    clc
-    adc #SYM_ENTRY_SIZE
-    sta TMP2
-    bcc :+
-    inc TMP2+1
-:
-    inc TMP3
-    bne @loop
-    inc TMP3+1
-    jmp @loop
+@miss:
+    ldy SYM_IDX                 ; resume the sweep below this symbol
+    lda SYM_HCUR
+    jmp @resume
 
 @not_found:
     sec
+    rts
+
+; sym_hash  -  A = SYM_HCUR = 8-bit hash of the 8 bytes of ASM_LABEL:
+; h = h*5 + c over the bytes from last to first.  (Of the cheap 6502
+; mixes tried, this one spread both random names and L0001-style
+; numbered names well.)  Clobbers Y; preserves X.
+sym_hash:
+    lda #0
+    ldy #7
+@loop:
+    sta SYM_HCUR
+    asl
+    asl
+    clc
+    adc SYM_HCUR                ; h*5
+    clc
+    adc ASM_LABEL,y             ; + c
+    dey
+    bpl @loop
+    sta SYM_HCUR
+    rts
+
+; sym_entry_addr  -  TMP2 = SYM_TABLE + TMP2 * SYM_ENTRY_SIZE (10).
+; Clobbers A and SYM_T0; preserves X and Y.
+sym_entry_addr:
+    lda TMP2
+    sta SYM_T0
+    lda TMP2+1
+    sta SYM_T0+1
+    asl TMP2
+    rol TMP2+1                  ; *2
+    asl TMP2
+    rol TMP2+1                  ; *4
+    lda TMP2
+    clc
+    adc SYM_T0
+    sta TMP2
+    lda TMP2+1
+    adc SYM_T0+1
+    sta TMP2+1                  ; *5
+    asl TMP2
+    rol TMP2+1                  ; *10
+    lda TMP2
+    clc
+    adc #<SYM_TABLE
+    sta TMP2
+    lda TMP2+1
+    adc #>SYM_TABLE
+    sta TMP2+1
     rts
 
 ; ============================================================================
@@ -2995,10 +3072,11 @@ opcode_table:
     .byte $00,$00,$00                ; end of table
 
 ; The module image must stay below the fixed-address RAM it uses at run
-; time (SRC_DEPTH/SRC_STACK/LINE_BUF at $BFxx).  modasm.cfg's MAIN area
-; runs to $BFFF, so the linker alone would let the code grow into it.
+; time (SYM_HASH at $BD00, then SRC_DEPTH/SRC_STACK/LINE_BUF at $BFxx).
+; modasm.cfg's MAIN area runs to $BFFF, so the linker alone would let the
+; code grow into it.
 MODASM_CODE_END:
-.assert MODASM_CODE_END <= SRC_DEPTH, lderror, "modasm: code overruns the fixed RAM at SRC_DEPTH"
+.assert MODASM_CODE_END <= SYM_HASH, lderror, "modasm: code overruns the fixed RAM at SYM_HASH"
 
 ; ============================================================================
 ; Linker config note: use modasm.cfg with

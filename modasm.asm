@@ -212,8 +212,8 @@ ASM_DS_LA       = 15      ; logical file for the drive's error channel
 ; line at a time into LINE_BUF, so SRC_PTR always points at real RAM and the
 ; parser's rewind-on-lookahead (check_for_label) keeps working unchanged.
 ;
-; Placed at fixed addresses high in MAIN ($BFxx). Code ends well below $B000,
-; so this free RAM is in the same always-visible bank ($01=$36) as the code —
+; Placed at fixed addresses high in MAIN ($BFxx). The code ends well below
+; that (the link fails if it doesn't, see MODASM_CODE_END), so this free RAM is in the same always-visible bank ($01=$36) as the code —
 ; no banking concerns, and it doesn't touch the packed $C0xx state or the
 ; symbol table.
 ;
@@ -2993,6 +2993,12 @@ opcode_table:
     .byte "TXS", $00,$9A, $FF
     .byte "TYA", $00,$98, $FF
     .byte $00,$00,$00                ; end of table
+
+; The module image must stay below the fixed-address RAM it uses at run
+; time (SRC_DEPTH/SRC_STACK/LINE_BUF at $BFxx).  modasm.cfg's MAIN area
+; runs to $BFFF, so the linker alone would let the code grow into it.
+MODASM_CODE_END:
+.assert MODASM_CODE_END <= SRC_DEPTH, lderror, "modasm: code overruns the fixed RAM at SRC_DEPTH"
 
 ; ============================================================================
 ; Linker config note: use modasm.cfg with

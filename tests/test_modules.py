@@ -201,6 +201,9 @@ def test_search_replace():
         (st, text, ed, bar) == (0x00, doc, 0, "NOT FOUND"),
         "sfr: no match leaves the buffer and cursor alone",
     )
+    # shifted letters ($C1-$DA, how the editor stores SHIFT+letter) fold too
+    st, _, cur, _, _ = run_sfr(b"10 REM \xc8\xc5\xcc\xcc\xcf\r", b"hello\r")
+    check(st == 0x04 and cur == 7, "sfr: case-insensitive find matches shifted text")
     st, _, _, _, bar = run_sfr(b"AB", b"ABC\r")
     check(st == 0x00 and bar == "NOT FOUND", "sfr: pattern longer than text")
 

@@ -794,20 +794,19 @@ sfr_fold:
     ; (SHIFT+letter as stored by the editor — the normal way uppercase
     ; glyphs appear in the lowercase charset).  The old fold handled only
     ; $61-$7A, so case-insensitive search never matched shifted text.
+    cmp #$C1
+    bcs @try_shifted        ; test $C1-$DA first: they are >= $7B, which the
+                            ; lowercase test below would pass through unfolded
     cmp #$61
-    bcc @try_shifted
+    bcc @done
     cmp #$7B
     bcs @done
-    sec
-    sbc #$20                ; $61-$7A → $41-$5A
+    sbc #$1F                ; C=0 here: $61-$7A - $20 → $41-$5A
     rts
 @try_shifted:
-    cmp #$C1
-    bcc @done
     cmp #$DB
     bcs @done
-    sec
-    sbc #$80                ; $C1-$DA → $41-$5A
+    sbc #$7F                ; C=0 here: $C1-$DA - $80 → $41-$5A
 @done:
     rts
 

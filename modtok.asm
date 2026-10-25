@@ -364,14 +364,7 @@ tokenize:
     jsr emit_byte               ; null terminator
     jsr inc_basic_addr
 
-    ; back-patch link word
-    ldy #0
-    lda BASIC_ADDR
-    buf_sta LINK_PTR
-    iny
-    lda BASIC_ADDR+1
-    buf_sta LINK_PTR
-
+    jsr patch_link
     jmp @line_loop
 
 @eof_line:
@@ -382,12 +375,7 @@ tokenize:
     lda #0
     jsr emit_byte
     jsr inc_basic_addr
-    ldy #0
-    lda BASIC_ADDR
-    buf_sta LINK_PTR
-    iny
-    lda BASIC_ADDR+1
-    buf_sta LINK_PTR
+    jsr patch_link
     jmp @all_done
 
 ; ============================================================================
@@ -608,6 +596,25 @@ emit_byte:
 @overflow:
     ldy #$FF
     sty OVFLAG
+    rts
+
+; ============================================================================
+; patch_link — back-patch the current line's link word with BASIC_ADDR.
+; Skipped once the output has overflowed: emit_byte then freezes DST_PTR at
+; reloc, so LINK_PTR points INTO the relocated source text, and the patch
+; would corrupt the copy @all_done restores the user's text from.
+; ============================================================================
+
+patch_link:
+    lda OVFLAG
+    bne @skip
+    ldy #0
+    lda BASIC_ADDR
+    buf_sta LINK_PTR
+    iny
+    lda BASIC_ADDR+1
+    buf_sta LINK_PTR
+@skip:
     rts
 
 ; ============================================================================

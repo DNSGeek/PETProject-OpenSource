@@ -480,7 +480,7 @@ tok_main_script:
 @token_loop:
     jsr tok_src_peek
     bne :+
-    jmp @all_done
+    jmp @eof_line               ; source ended mid-line — close the line first
 :   cmp #$0D
     bne :+
     jmp @end_line
@@ -570,15 +570,17 @@ tok_main_script:
     jsr emit_byte         ; null terminator
     jsr inc_basic_addr
 
-    ; Back-patch link word with current BASIC_ADDR
-    ldy #0
-    lda BASIC_ADDR
-    sta (LINK_PTR),y
-    iny
-    lda BASIC_ADDR+1
-    sta (LINK_PTR),y
-
+    jsr patch_link
     jmp @line_loop
+
+@eof_line:
+    ; No trailing CR: emit the terminator and back-patch the link as for any
+    ; other line, or the link stays at its $0000 placeholder — BASIC's
+    ; end-of-program marker — and the last line never runs.
+    lda #0
+    jsr emit_byte
+    jsr inc_basic_addr
+    jsr patch_link
 
 @all_done:
     lda #0
@@ -609,6 +611,21 @@ tok_main_script:
     rts
 :
     clc
+    rts
+
+; patch_link — back-patch the current line's link word with BASIC_ADDR.
+; Skipped after an overflow: emit_byte stops advancing DST_PTR then, so
+; LINK_PTR can point past the output into the user's text.
+patch_link:
+    lda OVFLAG
+    bne @skip
+    ldy #0
+    lda BASIC_ADDR
+    sta (LINK_PTR),y
+    iny
+    lda BASIC_ADDR+1
+    sta (LINK_PTR),y
+@skip:
     rts
 
 ; Gap-skipping source walker state (set up before tok_main_script)

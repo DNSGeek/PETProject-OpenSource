@@ -256,6 +256,10 @@ LINE_BUF_END    = $BF31   ; lo byte of address past last content byte (hi=$BF al
                           ; set by fill_line_buf (points at the CR terminator)
 INC_LFN_BASE    = 5       ; LFN for depth-1 include; depth-N uses LFN (INC_LFN_BASE+N-1)
 
+; Frame addresses never carry into the next page, so src_frame_ptr can
+; leave the hi byte constant.
+.assert >(SRC_STACK + SRC_MAX_DEPTH * SRC_FRAME_SIZE - 1) = >SRC_STACK, error, "modasm: SRC_STACK crosses a page"
+
 
 ; ============================================================================
 ; Module entry point
@@ -1803,23 +1807,12 @@ parse_directive:
 
 @inc_push:
     ; Compute address of the NEW frame (at index SRC_DEPTH+1) into TMP2.
-    ; Same N*6 multiply used in src_at_end / skip_to_next_line.
     ; SRC_DEPTH itself is incremented only after the file is open, so an
     ; OPEN failure leaves the stack untouched.
     lda SRC_DEPTH
     clc
     adc #1                      ; new frame index = current top + 1
-    asl                         ; *2
-    sta TMP2
-    asl                         ; *4
-    clc
-    adc TMP2                    ; *6
-    clc
-    adc #<SRC_STACK
-    sta TMP2
-    lda #>SRC_STACK
-    adc #0
-    sta TMP2+1                  ; TMP2 = base of new frame
+    jsr src_frame_ptr           ; TMP2 = base of new frame (X preserved)
 
     ; Fill frame fields
     lda #SRC_KIND_FILE
@@ -2217,26 +2210,12 @@ src_advance:
 ;   KIND=BUFFER (frame 0): gap-buffer end check (original logic).
 ;   KIND=FILE: LINE_BUF end check (step 2+; placeholder for now).
 src_at_end:
-    ; Compute base address of current top frame into TMP3.
-    ; TMP3 = SRC_STACK + SRC_DEPTH * SRC_FRAME_SIZE
     lda SRC_DEPTH
     beq @buf_frame               ; depth=0 is always the buffer frame (fast path)
-    ; General case: index into stack.  Depth is small (<=8), so multiply by 6
-    ; with shift-and-add: N*6 = N*4 + N*2.
-    asl                          ; A = depth*2
-    sta TMP3                     ; save depth*2
-    asl                          ; A = depth*4
-    clc
-    adc TMP3                     ; A = depth*6
-    clc
-    adc #<SRC_STACK
-    sta TMP3                     ; TMP3 lo = frame base lo
-    lda #>SRC_STACK
-    adc #0
-    sta TMP3+1                   ; TMP3 hi = frame base hi
+    jsr src_frame_ptr            ; TMP2 = base of current top frame
     ; Read KIND field (FILE or FEOF — both are file frames)
     ldy #SRC_FRAME_KIND
-    lda (TMP3),y
+    lda (TMP2),y
     cmp #SRC_KIND_FILE
     bcs @file_frame
 
@@ -2293,20 +2272,9 @@ skip_to_next_line:
     ; Fast path: depth=0 is always the buffer frame.
     lda SRC_DEPTH
     beq @buf_skip
-    ; Compute frame base into TMP3 (same multiply as src_at_end).
-    asl
-    sta TMP3
-    asl
-    clc
-    adc TMP3
-    clc
-    adc #<SRC_STACK
-    sta TMP3
-    lda #>SRC_STACK
-    adc #0
-    sta TMP3+1
+    jsr src_frame_ptr           ; TMP2 = base of current top frame
     ldy #SRC_FRAME_KIND
-    lda (TMP3),y
+    lda (TMP2),y
     cmp #SRC_KIND_FILE
     bcs @file_skip              ; FILE or FEOF
 
@@ -2599,27 +2567,15 @@ outfile_prompt:
 ;
 ; Returns: C=0 line ready; C=1 EOF (file exhausted, nothing written).
 ;
-; Clobbers: A, X, Y, TMP, TMP2  (TMP3 = frame pointer, already set by caller
-;           in skip_to_next_line; we recompute it here to be self-contained).
+; Clobbers: A, X, Y, TMP, TMP2 (TMP2 = frame pointer, recomputed here so the
+;           routine is self-contained).
 ;
 ; IRQ is disabled throughout (SEI is in effect from assemble entry).
 ; CHKIN/CHRIN are Kernal calls that need IRQ OFF — already satisfied.
 ; ============================================================================
 
 fill_line_buf:
-    ; Compute current frame base into TMP2 (TMP3 may be in use by caller).
-    lda SRC_DEPTH
-    asl
-    sta TMP2
-    asl
-    clc
-    adc TMP2
-    clc
-    adc #<SRC_STACK
-    sta TMP2
-    lda #>SRC_STACK
-    adc #0
-    sta TMP2+1                  ; TMP2 = base of top frame
+    jsr src_top_frame_ptr       ; TMP2 = base of top frame
 
     ; If a previous fill saw the EOF status arrive with the file's final
     ; byte, the frame was latched to FEOF: the file is fully consumed.
@@ -2768,6 +2724,27 @@ fill_line_buf:
     rts
 
 ; ============================================================================
+; src_top_frame_ptr  -  TMP2 = base of the top frame (index SRC_DEPTH).
+; src_frame_ptr      -  TMP2 = base of frame A (0..SRC_MAX_DEPTH-1).
+; TMP2 = SRC_STACK + index * SRC_FRAME_SIZE.  Clobbers A only (X and Y are
+; preserved: the .include push keeps the filename length in X across it).
+; The frames never cross a page (asserted), so the hi byte is constant.
+; ============================================================================
+
+src_top_frame_ptr:
+    lda SRC_DEPTH
+src_frame_ptr:
+    asl                         ; *2 (index < 128, so C=0 after)
+    sta TMP2
+    asl                         ; *4, C=0
+    adc TMP2                    ; *6, C=0 (result < 256)
+    adc #<SRC_STACK             ; no carry: asserted not to cross a page
+    sta TMP2
+    lda #>SRC_STACK
+    sta TMP2+1
+    rts
+
+; ============================================================================
 ; pop_src_frame  -  close current include file, pop the frame stack,
 ; restore SRC_PTR and ASM_LINE from the parent frame's saved values.
 ;
@@ -2777,19 +2754,7 @@ fill_line_buf:
 ; ============================================================================
 
 pop_src_frame:
-    ; Compute frame base of current top frame into TMP2
-    lda SRC_DEPTH
-    asl
-    sta TMP2
-    asl
-    clc
-    adc TMP2
-    clc
-    adc #<SRC_STACK
-    sta TMP2
-    lda #>SRC_STACK
-    adc #0
-    sta TMP2+1
+    jsr src_top_frame_ptr       ; TMP2 = base of top frame
 
     ; Close the file: CLOSE(LFN).  CLOSE talks on the serial bus, which
     ; drops any active LISTEN — release channels first and re-select the

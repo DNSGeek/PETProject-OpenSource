@@ -127,7 +127,7 @@ COL_ASM_STRING    = 5    ; green — strings in .text/.byte
 ; ============================================================================
 ; kw_strtab — concatenated PETSCII keyword strings, in token order ($80-$CB).
 ; No terminators; use kw_len_tab for each entry's length.
-; Used by tl_match_kw for on-commit tokenization.
+; Used by col_match_kw (via the first-letter index below) and tab completion.
 ; Stored as lowercase so ca65 -t c64 produces uppercase PETSCII ($41-$5A).
 ;
 ; Each entry goes through the KW macro, which emits exactly the same bytes a

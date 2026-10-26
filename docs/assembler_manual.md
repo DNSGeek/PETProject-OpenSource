@@ -257,7 +257,7 @@ Directives are assembler commands that don't produce machine code instructions d
 
 ### `.org` — Set the Program Counter
 
-Tells the assembler that the code that follows should start at a specific address. This determines the **load address** of the output PRG file. Use it once, at the very start of your source.
+Tells the assembler that the code that follows should start at a specific address. Used at the start of your source, it determines the **load address** of the output PRG file.
 
 ```
         .org $C000      ; code will load at $C000
@@ -271,10 +271,32 @@ Tells the assembler that the code that follows should start at a specific addres
 
 If you don't use `.org` or `*=`, the default load address is **$0801** (the start of the BASIC area).
 
+More precisely, the load address is the address of the **first byte your
+program emits** (an instruction, `.byte`, `.word` or `.text`). Any number of
+`.org` lines may come before it; only the address in effect at the first
+emitted byte counts. Code written before the first `.org` therefore loads
+at `$0801`, where its labels say it is.
+
 A label on the same line as `.org` or `*=` names the **new** address, so
 `start: *= $C000` defines `start` as `$C000`.
 
-You can also use `.org` mid-source to skip ahead in memory (for example, to place data at a known fixed address), but this will leave a gap of uninitialised bytes in the output file. Usually it is simpler to just define your data at a convenient offset from your code.
+You can also use `.org` mid-source to skip ahead in memory (for example, to
+place data at a known fixed address). A PRG file is one contiguous block, so
+the assembler fills the gap with `$00` bytes: everything after the `.org`
+loads exactly where its labels say. A big jump makes a big file (and
+overwrites the memory in between when loaded), so usually it is simpler to
+just define your data at a convenient offset from your code.
+
+```
+        .org $C000
+        RTS
+        .org $C100      ; $C001-$C0FF are filled with $00
+data:   .byte 1         ; loads at $C100
+```
+
+Once code or data has been emitted, `.org` can only move **forward**: an
+address below the current position stops assembly with `ORG BACKWARDS`
+(before any file is written).
 
 ---
 
@@ -471,7 +493,7 @@ Used exclusively by the eight branch instructions (`BCC`, `BCS`, `BEQ`, `BMI`, `
         BNE @loop       ; branch back to @loop if X ≠ 0
 ```
 
-> **Range Limit:** Branches can only reach targets within **−128 to +127 bytes** of the instruction following the branch. If your target is too far away, you will get a `BAD ADDR MODE` error. The fix is to branch to a nearby `JMP` instruction that jumps to the real target.
+> **Range Limit:** Branches can only reach targets within **−128 to +127 bytes** of the instruction following the branch. If your target is too far away, you will get a `BRANCH RANGE` error. The fix is to branch to a nearby `JMP` instruction that jumps to the real target.
 
 ---
 
@@ -621,7 +643,10 @@ When an error occurs, assembly stops at the first error found. The status bar sh
 | `BAD MNEMONIC`     | The 3-letter instruction name couldn't be read — check your spelling and spacing (`STA1` is not `STA`).                          |
 | `UNKNWN OP`        | The mnemonic is not a known 6502 instruction.                                                                                    |
 | `BAD OPERAND`      | The operand syntax is wrong — mismatched parentheses, missing `X`/`Y`, etc.                                                      |
-| `BAD ADDR MODE`    | The instruction doesn't support the addressing mode you used, or a branch target is out of range.                                |
+| `BAD ADDR MODE`    | The instruction doesn't support the addressing mode you used.                                                                    |
+| `BRANCH RANGE`     | A branch target is more than −128/+127 bytes away (see [Relative](#relative-branch-instructions)).                              |
+| `ORG BACKWARDS`    | A `.org` / `*=` after emitted code or data moves to a lower address than the current one (see [`.org`](#org--set-the-program-counter)). |
+| `PHASE ERROR`      | The two passes disagreed about an instruction's size, so labels would point to the wrong place — typically a forward reference to a zero-page label. Define zero-page labels before using them. |
 | `I/O ERROR`        | A disk problem — the output file couldn't be written (disk full, write-protected), or an included file is missing or unreadable. |
 | `INCLUDE TOO DEEP` | `.include` files are nested more than 7 levels deep.                                                                             |
 | `LINE TOO LONG`    | A line in an included file is longer than 80 characters.                                                                         |

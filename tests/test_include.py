@@ -562,9 +562,9 @@ def main():
     )
     m = assemble("START:  *= $C000\n        JMP START\n")
     expect_output(m, bytes.fromhex("00c04c00c0"), "label + *=")
-    m = assemble("        NOP\nHERE:   .org $0900\n        JMP HERE\n")
-    assert m.status == 0, m.err_msg
-    assert m.output.endswith(bytes.fromhex("4c0009")), m.output.hex(" ")
+    m = assemble("        NOP\nHERE:   .org $0810\n        JMP HERE\n")
+    expected = bytes.fromhex("0108 ea") + bytes(14) + bytes.fromhex("4c1008")
+    expect_output(m, expected, "label + mid-source .org")
     print("ok: label followed by a directive or origin on the same line")
 
     # 18. @local labels are scoped to the preceding global label: the same
@@ -654,6 +654,48 @@ def main():
         m = assemble("        *= $C000\n" + line + "\n        RTS\n", files)
         expect_error(m, msg, f"trailing text: {line.strip()!r}", line=2)
     print("ok: trailing text after a statement is an error")
+
+    # 21. The output is one contiguous image from the first output byte:
+    #     a forward .org after code is padded with $00 so data loads where
+    #     its label says, a backward one is an error (in pass 1, so no
+    #     file is written), and code before the first .org loads at its
+    #     own address.
+    src = (
+        "        *= $C000\n"
+        "        RTS\n"
+        "        .org $C004\n"
+        "DATA:   .byte 1\n"
+        "        LDA DATA\n"
+    )
+    expect_output(assemble(src), bytes.fromhex("00c0 60 000000 01 ad04c0"), "org gap")
+    m = assemble("        *= $C000\n        RTS\n        .org $BFFF\n        RTS\n")
+    expect_error(m, "ORG BACKWARDS", "backward org", line=3)
+    assert m.output is None, "backward org must not write a file"
+    m = assemble("        NOP\n        .org $0810\n        RTS\n")
+    expected = bytes.fromhex("0108 ea") + bytes(14) + b"\x60"
+    expect_output(m, expected, "code before the first .org")
+    m = assemble("        .org $C000\nLBL:\n        .org $1000\n        RTS\n")
+    expect_output(m, bytes.fromhex("0010 60"), "orgs before any output")
+    m = assemble("LBL:\n")
+    expect_output(m, bytes.fromhex("0108"), "no output bytes")
+    print("ok: .org gaps padded, backward .org rejected, load address")
+
+    # 22. PHASE ERROR: a forward reference sized ABS in pass 1 that
+    #     resolves to zero page in pass 2 shifts every later label.  The
+    #     first label after the divergence reports it, even when a later
+    #     .org re-synchronises the PC (which hid it from the end-of-pass
+    #     check); with no label in between, the .org padding absorbs it.
+    src = "        *= $0080\n        LDA ZPV\nMID:    RTS\nZPV:    .byte 0\n"
+    expect_error(assemble(src), "PHASE ERROR", "phase, no org", line=3)
+    src = (
+        "        *= $0080\n        LDA ZPV\nMID:    RTS\n"
+        "        .org $0090\nZPV:    .byte 0\n"
+    )
+    expect_error(assemble(src), "PHASE ERROR", "phase hidden by .org", line=3)
+    src = "        *= $0080\n        LDA ZPV\n        .org $0090\nZPV:    .byte 7\n"
+    expected = bytes.fromhex("8000 a590") + bytes(14) + b"\x07"
+    expect_output(assemble(src), expected, "divergence absorbed by .org")
+    print("ok: phase errors caught per label")
 
     print("\nall include tests passed")
 

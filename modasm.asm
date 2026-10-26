@@ -17,7 +17,9 @@
 ;
 ; Output: PRG file written directly to disk via Kernal channel I/O.
 ;         Filename: editor prompts for output name via status bar before assembly.
-;         PRG header: $01,$08 (or .org address if specified before any code).
+;         PRG header: the address of the first output byte ($0801 by default).
+;         The file is one contiguous image: a later forward .org is padded
+;         with $00 bytes, a backward one is an error (ORG BACKWARDS).
 ;
 ; Symbol table: ASM_STATE+$60 .. ASM_STATE+$FFF, 10 bytes/entry (8-char name + 2-byte value).
 ;               Up to 409 symbols. Linear scan  -  fast enough for casual use.
@@ -133,7 +135,7 @@ ASM_ERR_LINE_HI = ASM_STATE + $09   ; line number of first error hi
 ASM_ERR_MSG     = ASM_STATE + $0A   ; 20-byte error message (screen codes, zero-terminated)
 ASM_OUT_LA      = ASM_STATE + $1E   ; logical file number for output
 ASM_OUT_OPEN    = ASM_STATE + $1F   ; $FF = output file is open
-ASM_ORG_SET     = ASM_STATE + $20   ; $FF = .org has been seen (affects PRG header)
+ASM_EMITTED     = ASM_STATE + $20   ; $FF = this pass has placed an output byte
 ASM_FNAME_LEN   = ASM_STATE + $21   ; output filename length
 ASM_FNAME       = ASM_STATE + $22   ; output filename (16 bytes)
 
@@ -165,8 +167,8 @@ ASM_YPEEK       = ASM_STATE + $55   ; scratch: src_peek Y save (1 byte, at end o
 ASM_OPC_PTR_LO  = ASM_STATE + $56   ; saved opcode table pointer lo (preserved across parse_operand)
 ASM_OPC_PTR_HI  = ASM_STATE + $57   ; saved opcode table pointer hi
 
-; FIX (load address): PRG load address = address of first .org/.* seen, or $0801.
-; Stored here during pass 1; used by open_output for the PRG header.
+; PRG load address = the PC at the first output byte (mark_emit, pass 1),
+; or $0801 if nothing is emitted.  Used by open_output for the PRG header.
 ; Lives in the gap between ASM_OPC_PTR_HI (+$57) and SYM_TABLE (+$60).
 ASM_LOAD_LO     = ASM_STATE + $58   ; PRG load address lo
 ASM_LOAD_HI     = ASM_STATE + $59   ; PRG load address hi
@@ -280,7 +282,11 @@ SYM_T0          = $BF34   ; sym_entry_addr scratch (2 bytes)
 ; ---- Per-line label state (the packed ASM_STATE block is full) ----
 ; ASM_LBL_FLAG is cleared at the start of every line.  Pass 1 sets it to
 ; $FF when the line defined a label, so that an origin directive on the
-; same line ("start: *= $C000") moves the label to the new PC.
+; same line ("start: *= $C000") moves the label to the new PC.  Pass 2
+; sets it when the line's label does not match the PC (ASM_LBL_VAL = the
+; label's pass-1 value); an origin on the line that lands on the label
+; clears it again, and if it is still set at the end of the line the
+; passes have diverged: PHASE ERROR.
 ASM_LBL_FLAG    = $BF36
 ; @local label scope: the number of global (non-@) labels seen so far in
 ; this pass.  read_name stores a local "@name" as '@', SCOPE lo, SCOPE hi,
@@ -289,7 +295,8 @@ ASM_LBL_FLAG    = $BF36
 ; two locals in different scopes differ in the SCOPE bytes: no collisions.
 ASM_SCOPE_LO    = $BF37
 ASM_SCOPE_HI    = $BF38
-.assert ASM_SCOPE_HI + 1 <= LINE_BUF, error, "modasm: line state overlaps LINE_BUF"
+ASM_LBL_VAL     = $BF39             ; 2 bytes
+.assert ASM_LBL_VAL + 2 <= LINE_BUF, error, "modasm: line state overlaps LINE_BUF"
 
 
 ; ============================================================================
@@ -368,7 +375,6 @@ assemble:
     sta ASM_LINE_HI
     sta ASM_ERR
     sta ASM_OUT_OPEN
-    sta ASM_ORG_SET
     sta ASM_FNAME_LEN
 
     ; Default PC = $0801
@@ -377,8 +383,8 @@ assemble:
     lda #$08
     sta ASM_PC_HI
 
-    ; FIX (load address): default load address = $0801.
-    ; Updated to first .org/.* address seen during pass 1.
+    ; Default load address = $0801.  Pass 1 replaces it with the PC at
+    ; the first output byte (mark_emit).
     lda #$01
     sta ASM_LOAD_LO
     lda #$08
@@ -440,9 +446,7 @@ assemble:
     lda #1
     sta ASM_PASS
 
-    ; FIX (load address): reset PC for pass 2 BEFORE opening the output file,
-    ; so that open_output reads ASM_LOAD_LO/HI (set during pass 1) not ASM_PC
-    ; (which held the end-of-pass-1 address).
+    ; Reset PC for pass 2.  (open_output writes ASM_LOAD, set by pass 1.)
     lda #$01
     sta ASM_PC_LO
     lda #$08
@@ -530,6 +534,7 @@ run_pass:
     lda #0
     sta ASM_SCOPE_LO            ; @local scopes are numbered from 0 each pass
     sta ASM_SCOPE_HI
+    sta ASM_EMITTED             ; no output byte placed yet
     sta SRC_DEPTH
     sta SRC_STACK + SRC_FRAME_LFN
     sta SRC_STACK + SRC_FRAME_SLO
@@ -625,13 +630,31 @@ parse_line:
     inc ASM_SCOPE_HI
 @local:
     lda ASM_PASS
-    bne @skip_label_def         ; pass 2: ignore label definitions
+    bne @label_pass2
     ; Pass 1: add label to symbol table with current PC
     jsr sym_define
     bcc :+
     jmp @err_sym                ; symbol table full or duplicate
 :   lda #$FF
     sta ASM_LBL_FLAG            ; an origin on this line re-points it
+    bne @skip_label_def         ; (always)
+@label_pass2:
+    ; Pass 2: the label's pass-1 value must be the PC here (or, on an
+    ; origin line, the new PC: set_org settles that).  Otherwise the two
+    ; passes sized something differently and the output is misplaced.
+    ; Checked per label because an .org re-synchronises the PC, which
+    ; would hide the divergence from the end-of-pass check.
+    jsr sym_lookup              ; TMP = the label's value
+    bcc :+
+    jmp @err_phase              ; (pass 1 defined every label)
+:   lda TMP
+    sta ASM_LBL_VAL
+    lda TMP+1
+    sta ASM_LBL_VAL+1
+    jsr lbl_vs_pc
+    beq @skip_label_def
+    lda #$FF
+    sta ASM_LBL_FLAG            ; mismatch, unless an origin fixes it
 @skip_label_def:
 
     ; Label-only line?
@@ -726,6 +749,7 @@ parse_line:
     jmp @done
 
 @pass1_advance:
+    jsr mark_emit               ; may fix the load address
     lda ASM_INSTR_SIZE
     clc
     adc ASM_PC_LO
@@ -759,6 +783,14 @@ parse_line:
 @err_emit:
     jsr set_err_io
 @done:
+    ; Pass 2: a label that never matched its PC (see @label_pass2)
+    lda ASM_PASS
+    beq @rts
+    bit ASM_LBL_FLAG
+    bpl @rts
+@err_phase:
+    jmp set_err_phase
+@rts:
     rts
 
 ; ============================================================================
@@ -1633,14 +1665,11 @@ parse_directive:
     bcc :+
     jmp @err
     :
-    ; Pass 2: emit byte (don't advance PC here — happens unconditionally below)
-    lda ASM_PASS
-    beq @byte_advance
     lda TMP
-    jsr emit_byte
-    bcc @byte_advance
-    jmp @err
-@byte_advance:
+    jsr emit_byte               ; (pass 1: only notes the position)
+    bcc :+
+    jmp @io
+:
     ; Always advance PC by 1, in BOTH passes.
     ; Previously pass 2 skipped this, leaving ASM_PC stale for later branches.
     inc ASM_PC_LO
@@ -1670,19 +1699,15 @@ parse_directive:
     bcc :+
     jmp @err
     :
-    ; Pass 2: emit two bytes (lo, hi). PC advance happens below in BOTH passes.
-    lda ASM_PASS
-    beq @word_advance
     lda TMP
-    jsr emit_byte
+    jsr emit_byte               ; (pass 1: only notes the position)
     bcc :+
-    jmp @err
+    jmp @io
 :   lda TMP+1
     jsr emit_byte
     bcc :+
-    jmp @err
+    jmp @io
 :
-@word_advance:
     ; Always advance PC by 2, in BOTH passes.
     lda ASM_PC_LO
     clc
@@ -1728,15 +1753,10 @@ parse_directive:
     beq @dir_err_near
     cmp #'"'
     beq @text_done
-    ; Pass 2: emit the byte. PC advance happens below in BOTH passes.
-    lda ASM_PASS
-    beq @text_advance
-    jsr src_peek
-    jsr emit_byte
+    jsr emit_byte               ; (pass 1: only notes the position)
     bcc :+
-    jmp @dir_err_near
+    jmp @io
 :
-@text_advance:
     ; Always advance both source and PC, in BOTH passes.
     jsr src_advance
     inc ASM_PC_LO
@@ -1901,34 +1921,62 @@ parse_directive:
 @dir_err:
 @unknown_dir:
 @err:
-    jsr set_err_syntax
-    rts
+    jmp set_err_syntax
+@io:
+    jmp set_err_io
 
 ; ============================================================================
 ; set_org  -  ".org" / "*=": set the PC to TMP/TMP+1.
-; The first origin seen in pass 1 also fixes the PRG load address.
+;
+; The output file is one contiguous image starting at the load address
+; (the PC of the first output byte, see mark_emit), so once a byte has
+; been placed the PC may only move forward: pass 2 fills the gap with $00
+; bytes so that everything after it loads where its labels say.  Moving
+; back is ORG BACKWARDS (caught in pass 1, before any file is written).
+; Before the first output byte an origin just moves the PC.
+;
 ; A label defined on the same line ("start: *= $C000") names the new
-; address: pass 1 just appended it to the symbol table, so its entry is the
-; last one — re-point it here.
+; address: pass 1 just appended it to the symbol table, so its entry is
+; the last one — re-point it here.  Pass 2 clears a phase mismatch flagged
+; for such a label once the new PC matches (see parse_line).
+; Errors are recorded here.
 ; ============================================================================
 
 set_org:
+    bit ASM_EMITTED
+    bpl @move                   ; nothing placed yet: any address goes
+    lda TMP
+    sec
+    sbc ASM_PC_LO
+    sta TMP2
+    lda TMP+1
+    sbc ASM_PC_HI
+    sta TMP2+1                  ; TMP2 = gap size
+    bcc @back
+    lda ASM_PASS
+    beq @move                   ; pass 1: only the PC moves
+@fill:
+    lda TMP2
+    ora TMP2+1
+    beq @move
+    lda #0
+    jsr emit_raw
+    bcs @io
+    lda TMP2
+    bne :+
+    dec TMP2+1
+:   dec TMP2
+    jmp @fill
+
+@move:
     lda TMP
     sta ASM_PC_LO
     lda TMP+1
     sta ASM_PC_HI
-    ; FIX (load address): capture load address from first origin seen
-    lda ASM_ORG_SET
-    bne :+
-    lda TMP
-    sta ASM_LOAD_LO
-    lda TMP+1
-    sta ASM_LOAD_HI
-:
-    lda #$FF
-    sta ASM_ORG_SET
-    bit ASM_LBL_FLAG            ; set only in pass 1, after a sym_define
+    bit ASM_LBL_FLAG
     bpl @done
+    lda ASM_PASS
+    bne @pass2
     lda ASM_SYM_LO
     sec
     sbc #1
@@ -1945,6 +1993,25 @@ set_org:
     sta (TMP2),y
 @done:
     rts
+@pass2:
+    jsr lbl_vs_pc
+    bne @done
+    lda #0
+    sta ASM_LBL_FLAG            ; the label is the new PC: in phase
+    rts
+@back:
+    jmp set_err_org
+@io:
+    jmp set_err_io
+
+; lbl_vs_pc  -  Z=1 if ASM_LBL_VAL equals the PC.  Clobbers A.
+lbl_vs_pc:
+    lda ASM_LBL_VAL
+    cmp ASM_PC_LO
+    bne :+
+    lda ASM_LBL_VAL+1
+    cmp ASM_PC_HI
+:   rts
 
 ; ============================================================================
 ; parse_value  -  wrapper: parse_expr into TMP/TMP+1
@@ -2046,7 +2113,22 @@ emit_instruction:
     sec
     rts
 
+; emit_byte  -  place the output byte A at the PC, in either pass.
+; Pass 1 only notes the position (mark_emit); pass 2 also writes it.
+; C=1 on an output error.  Clobbers A.
 emit_byte:
+    pha
+    jsr mark_emit
+    lda ASM_PASS
+    bne @write
+    pla
+    clc
+    rts
+@write:
+    pla
+    ; fall through
+; emit_raw  -  pass 2: write A to the output file.  C=1 on an I/O error.
+emit_raw:
     jsr CHROUT
     jsr READST
     and #$83                    ; device not present, or a timeout
@@ -2054,6 +2136,24 @@ emit_byte:
     sec
     rts
 :   clc
+    rts
+
+; mark_emit  -  an output byte is about to be placed at the PC.  The
+; first one in pass 1 fixes the PRG load address: the file image starts
+; there, so code before a leading .org loads where its labels say.
+; Clobbers A.
+mark_emit:
+    bit ASM_EMITTED
+    bmi @done
+    lda #$FF
+    sta ASM_EMITTED
+    lda ASM_PASS
+    bne @done
+    lda ASM_PC_LO
+    sta ASM_LOAD_LO
+    lda ASM_PC_HI
+    sta ASM_LOAD_HI
+@done:
     rts
 
 ; ============================================================================
@@ -2522,9 +2622,8 @@ open_output:
     jsr CHKOUT
     bcs @err_close
 
-    ; FIX (load address): write PRG header from ASM_LOAD_LO/HI, which holds
-    ; the address of the first .org/.* seen during pass 1, or $0801 if none.
-    ; Previously used ASM_PC_LO/HI here, which was the end-of-pass-1 PC.
+    ; PRG header from ASM_LOAD_LO/HI: the address of the first output
+    ; byte, recorded by mark_emit in pass 1 ($0801 if nothing is emitted).
     lda ASM_LOAD_LO
     jsr CHROUT
     lda ASM_LOAD_HI
@@ -2932,6 +3031,10 @@ pop_src_frame:
 ; X is untouched, and Y is clobbered only when the error is recorded
 ; (set_err_common's copy loop), exactly as before.
 
+set_err_org:
+    lda #err_org_txt - err_msgs ; first in the chain: its own offset is
+    .byte $2C                   ; never a BIT operand (see the asserts)
+
 set_err_deep:
     lda #err_deep_txt - err_msgs
     .byte $2C                   ; BIT abs: skip the next LDA #
@@ -3053,8 +3156,13 @@ err_deep_txt:
     .byte $09,$0E,$03,$0C,$15,$04,$05,$20,$14,$0F,$0F,$20,$04,$05,$05,$10, 0   ; INCLUDE TOO DEEP
 err_phase_txt:
     .byte $10,$08,$01,$13,$05,$20,$05,$12,$12,$0F,$12, 0            ; PHASE ERROR
+; err_org_txt is last: set_err_org heads the chain, so its offset is never
+; the hi byte of a BIT operand and may exceed $A0.
+err_org_txt:
+    .byte $0F,$12,$07,$20,$02,$01,$03,$0B,$17,$01,$12,$04,$13, 0    ; ORG BACKWARDS
 err_msgs_end:
-.assert err_msgs_end - err_msgs <= $A0, error, "modasm: err_msgs too long for the set_err_* offsets / BIT skip"
+.assert err_org_txt - err_msgs <= $A0, error, "modasm: err_msgs too long for the set_err_* offsets / BIT skip"
+.assert err_msgs_end - err_msgs <= $100, error, "modasm: err_msgs offsets must fit in a byte"
 
 ; ============================================================================
 ; Opcode table (526 bytes)

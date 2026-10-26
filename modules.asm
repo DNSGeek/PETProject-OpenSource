@@ -34,6 +34,7 @@
 ;   $0220  MOD_NEW_END_HI   new content end hi
 ;   $0221  MOD_LOAD_LO      load address of this module (lo)
 ;   $0222  MOD_LOAD_HI      load address of this module (hi)
+;   $022B  MOD_PROG_DRIVE   drive the editor (and the modules) loaded from
 ;
 ; MOD_STATUS values:
 ;   $00  OK, buffer unchanged
@@ -98,6 +99,7 @@ MOD_LOAD_SAVE_HI = $0229
 ; Index of the most recently run module — lets mpop_show_error honor
 ; MODASM's rich-error flag (ASM_ERR) only when MODASM actually ran.
 MOD_LAST_IDX     = $022A
+MOD_PROG_DRIVE   = $022B             ; for modules that load other modules
 MOD_IDX_MODASM   = 0
 
 ; ============================================================================
@@ -677,7 +679,7 @@ run_module_by_index:
     sta $0226                   ; DSK_FNAME_LEN_HI
 
     ; ---- Module load via Kernal LOAD ($FFD5) ----
-    ; Module binaries always load from drive 8 (where PETPROJECT is booted).
+    ; Module binaries load from PROG_DRIVE (where PETPROJECT was booted).
     ; Each module's PRG header carries its correct load address ($A000 or
     ; $C000), so LOAD with A=0 places it where it belongs.
     ;
@@ -686,12 +688,15 @@ run_module_by_index:
     ; itself — only for execution.  No SEI/CLI dance, no bank fiddling.
     ; Any fastloader cartridge / JiffyDOS transparently accelerates LOAD.
 
-    ; ---- SETLFS: LA=MOD_LA, device=8, SA=1 (use PRG header load addr) ----
+    ; ---- SETLFS: LA=MOD_LA, device=PROG_DRIVE, SA=1 (PRG header addr) ----
+    ; Modules load from the drive the editor itself came from (init_settings
+    ; records it), not a fixed 8: booting from drive 9 used to leave every
+    ; module "not found".
     ; SA convention for LOAD:
     ;   SA=0 → ignore PRG header, use X/Y as load address
     ;   SA=1 → use PRG header's load address (what we want for modules)
     lda #MOD_LA
-    ldx #8
+    ldx PROG_DRIVE
     ldy #1
     jsr SETLFS
 
@@ -751,6 +756,8 @@ run_sel_loaded:
 
     lda SETTING_DRIVE
     sta MOD_DRIVE
+    lda PROG_DRIVE
+    sta MOD_PROG_DRIVE
 
     lda #$FF
     sta MOD_STATUS

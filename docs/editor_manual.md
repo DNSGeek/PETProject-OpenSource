@@ -19,7 +19,7 @@
 
 - F1: Open the settings popup.
   - Change the colors
-  - Change the drive to use for data. The program disk always needs to be in drive 8.
+  - Change the drive to use for data. It starts as the drive PETProject was loaded from. The program disk must stay in that drive, since the modules load from it.
   - Toggle cursor blinking on or off.
 - F2: Page Up - Go up an entire page of source code
 - F3: Load - Load a file; BASIC, Assembly or compiled ML

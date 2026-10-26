@@ -49,7 +49,16 @@ matching handler; otherwise it passes the statement to BASIC unchanged.
 
 **Numeric arguments are single bytes (0–255), except `ONERR`.** `DRIVE` and
 `PAUSE` read their numeric argument with BASIC's GETBYT routine, so values
-above 255 will not work as expected. `ONERR` takes a full 16-bit line number.
+above 255 will not work as expected. `ONERR` takes a full 16-bit line number
+(any numeric expression, 0–65535; a string gives `?TYPE MISMATCH`, a value out
+of range `?ILLEGAL QUANTITY`).
+
+**Extended keywords work after `THEN`.** `IF EX=1 THEN DELETE "DEMO"` runs
+`DELETE` only when the condition is true. (BASIC's `IF` would otherwise hand
+the keyword straight to its own executor, bypassing the hook; the tokenizer
+quietly inserts a `:` after `THEN` so the keyword goes through the hook. The
+inserted `:` changes nothing else — a false `IF` still skips the rest of the
+line.)
 
 **String arguments are quoted.** Disk-name keywords expect a quoted string,
 e.g. `DELETE "OLDFILE"`. Two-name keywords use `TO` between the names, e.g.
@@ -247,15 +256,15 @@ How it works (and why it's safe): MODASM needs `$C000`–`$CFFF` for its symbol
 table and `$0801`–`$9FFF` for the source text — both regions a running script
 depends on. `ASSEMBLE` therefore stashes the script-runner handler to REU
 `$013000` and the entire script RAM to REU `$014000`, loads the source into
-the vacated space, loads MODASM (from **device 8**, where the PETProject
-modules live) to `$A000`, and runs it via a small trampoline in the cassette
+the vacated space, loads MODASM (from the drive the IDE booted from,
+where the PETProject modules live) to `$A000`, and runs it via a small trampoline in the cassette
 buffer. When the assembler finishes, both regions are restored byte-identically
 from the REU and the script resumes at the next statement.
 
 Notes and caveats:
 
 - **The source file is read from the current `DRIVE`**; MODASM itself always
-  loads from device 8. The **output PRG is written to the current `DRIVE`**.
+  loads from the drive the IDE booted from (device 8 if that is unknown). The **output PRG is written to the current `DRIVE`**.
 - Source files saved by the PETProject editor (PRG-typed raw text) and genuine
   SEQ files both work — the loader retries with `,S,R` automatically.
 - **The output file must not already exist.** MODASM writes with a bare name,

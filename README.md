@@ -89,7 +89,8 @@ typing to write some BASIC.
 | Cursor keys | Navigate                                           |
 | `INST/DEL`  | Delete the character left of the cursor            |
 
-> ℹ️ The **program disk must stay in drive 8**; the data drive is configurable in
+> ℹ️ The **program disk must stay in the drive you loaded it from** (modules load
+> from it); the data drive is configurable in
 > Settings (`F1`). If you try to do something destructive (new file, load, quit)
 > with unsaved changes, the IDE prompts you to save first. During long-running
 > tasks it flashes the top-left character so you know it's working, not frozen.
@@ -218,8 +219,8 @@ Security policy: [`SECURITY.md`](SECURITY.md).
 - On a C64, use a **fastloader cartridge** for a much snappier experience
   (a C128 with a 1571/1581 is already fast: burst-mode module loads, fast
   serial for file I/O, and the compute-only modules run at 2 MHz).
-- Keep the **program disk in drive 8**; point Settings (`F1`) at a separate data
-  drive if you have one.
+- Keep the **program disk in the drive you loaded it from**; point Settings (`F1`)
+  at a separate data drive if you have one.
 - The scripting engine needs an **REU** for script tokenization and IDE snapshots.
 
 ---

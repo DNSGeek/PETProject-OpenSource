@@ -15,6 +15,18 @@
 ;   MOD_NEW_END_LO/HI = end of output text
 ;   MOD_STATUS = $02 on success, $01 on error
 ;
+;   If the text would not fit in work_buf, the disassembly stops at a line
+;   boundary and ends with the comment line "; *** DISASSEMBLY TRUNCATED ***"
+;   (status is still $02 - the editor shows the partial listing; the notice
+;   is the user-visible signal). The output always leaves at least one free
+;   byte before work_buf_end (MOD_NEW_END < MOD_BUF_END), so the editor's
+;   gap is never empty.
+;
+;   A final instruction whose operand bytes would run past the end of the
+;   binary is shown as ".BYTE $XX" lines instead, one per leftover byte - its
+;   operands would otherwise be read from past the end, which is where the
+;   output text starts.
+;
 ; Source format per instruction (fits 40 cols):
 ;   "    MNEM OPERAND   ;XXXX:XX XX XX |ccc|\r"
 ;    ^4sp ^4   ^varies   ^comment      ^PETSCII hint (raw bytes, 3 chars)
@@ -105,6 +117,14 @@ MODE_IZX         = 10
 MODE_IZY         = 11
 MODE_REL         = 12
 
+; ---- Output line lengths (bytes, CR included) ----
+; Every instruction line is fixed width:
+;   4 indent + 3 mnemonic + 1 space + 7 operand field + 1 space + ';'
+;   + 4 PC + ':' + 8 raw-byte field + 1 space + 5 "|ccc|" + CR = 37
+; emit_illegal's ".BYTE $XX" line is padded to the same 37.
+DIS_LINE_MAX     = 37
+DIS_ORG_LEN      = 11           ; ".ORG $XXXX" + CR
+
 ; ============================================================================
 ; PRG load address comes from the linker config (MAIN start) and must
 ; agree with layout.inc, which the module loader in modules.asm uses.
@@ -185,6 +205,15 @@ disassemble:
     lda DIS_SRC_END_HI
     sta DST_PTR+1
 
+    lda #0
+    sta DIS_TAIL
+
+    ; Room for the .org line and, after it, the truncation notice?
+    lda #DIS_ORG_LEN + DIS_TRUNC_LEN
+    jsr check_room
+    bcc :+
+    jmp @done_overflow
+:
     ; Emit ".org $XXXX\r" as the first output line, using the PRG load address
     ; stored in DIS_PC_LO/HI.  This is essential: without it MODASM reassembles
     ; from PC=$0801, making every branch target wrong and out-of-range.
@@ -219,18 +248,21 @@ disassemble:
     lda SRC_PTR+1
     cmp DIS_SRC_END_HI
     bcc @not_end
-    bne @done                   ; hi byte: src > end
+    bne @at_end                 ; hi byte: src > end
     lda SRC_PTR
     cmp DIS_SRC_END_LO
-    bcs @done                   ; lo byte: src >= end
+    bcc @not_end                ; lo byte: src < end
+@at_end:
+    jmp @done
 @not_end:
 
-    ; Check: DST_PTR >= work_buf_end? (output buffer full)
-    ; Also catch wrap-around: if TMP3 < DIS_BUF_HI, we've wrapped.
-    lda DST_PTR+1
-    cmp DIS_BUF_HI          ; TMP3 < work_buf hi → wrapped (impossible normally)
-    bcc @done_overflow
-    cmp DIS_BUF_END_HI      ; TMP3 >= work_buf_end hi → overflow
+    ; Output buffer full? Stop at this line boundary unless there is room
+    ; for the longest possible line plus the truncation notice after it
+    ; (with one byte to spare - see check_room). An 8-bit page compare here
+    ; used to let the last line run into the BUF_END page, where emit_dst
+    ; drops bytes, so it was cut mid-line with no CR and no notice.
+    lda #DIS_LINE_MAX + DIS_TRUNC_LEN
+    jsr check_room
     bcs @done_overflow
 
     ; Activity spinner — toggle the status-bar corner color every 16 instructions
@@ -243,6 +275,10 @@ disassemble:
     sta DIS_SPIN_IDX
     sta SPIN_CELL
 @no_spin:
+
+    ; Past the last whole instruction: the leftover bytes go out as .BYTE
+    lda DIS_TAIL
+    bne @illegal
 
     ; Fetch opcode
     ldy #0
@@ -261,16 +297,35 @@ disassemble:
     ; actually occur here. Left in as a guard rail.)
     lda TMP+1
     cmp #$FF
-    bne :+
+    bne @legal
+@illegal:
     ; Illegal: emit as .BYTE $XX
     jsr emit_illegal
     jsr inc_src_ptr
     jmp @dis_loop
-:
+@legal:
     ; Get instruction size from mode
     ldx TMP2+1                  ; mode
     lda size_tab,x
     sta TMP3+1                  ; TMP3+1 = size (1,2,3) - TMP3 is DST hi, TMP3+1 is separate
+
+    ; Does the whole instruction lie inside the binary? If fewer than
+    ; size bytes remain (SRC_END - SRC_PTR), its operands would be read
+    ; from past the end - from the output text that starts there, so a
+    ; PRG ending in a lone $20 came out as "JSR $4F2E". Show the opcode
+    ; and every byte after it as .BYTE instead.
+    sec
+    lda DIS_SRC_END_LO
+    sbc SRC_PTR
+    tax                         ; remaining lo
+    lda DIS_SRC_END_HI
+    sbc SRC_PTR+1
+    bne @whole                  ; >= 256 bytes remain
+    cpx TMP3+1
+    bcs @whole                  ; remaining >= size
+    inc DIS_TAIL                ; 0 -> 1: the rest of the binary is .BYTE
+    bne @illegal                ; always
+@whole:
 
     ; Emit the line
     jsr emit_line
@@ -294,16 +349,13 @@ disassemble:
     jmp @dis_loop
 
 @done_overflow:
-    ; DST_PTR hit the limit. If it's still below gap_start (shouldn't
-    ; normally happen), reset to gap_start so MOD_NEW_END is at least
-    ; valid (empty output) after relocate_output runs.
-    lda DST_PTR+1
-    cmp DIS_SRC_END_HI
-    bcs @done                   ; DST_PTR hi >= gap_start hi -> valid, use as-is
-    lda DIS_SRC_END_LO
-    sta DST_PTR
-    lda DIS_SRC_END_HI
-    sta DST_PTR+1
+    ; Out of room: end with the truncation notice. The checks above always
+    ; reserve room for it; check again only for a buffer too small to hold
+    ; even the .org line, where it is skipped rather than overrun the end.
+    lda #DIS_TRUNC_LEN
+    jsr check_room
+    bcs @done
+    jsr emit_trunc_notice
 
 @done:
     ; Restore status-bar corner color before returning
@@ -628,8 +680,9 @@ emit_spaces:
     rts
 
 ; ============================================================================
-; emit_illegal - emit ".BYTE $XX" for an unrecognised opcode (defensive
-; fallback only - see comment at the illegal-opcode check in @dis_loop)
+; emit_illegal - emit ".BYTE $XX" for one byte: each byte of a final
+; instruction cut short by the end of the binary (DIS_TAIL), or an
+; unrecognised opcode (defensive only - see the check in @dis_loop)
 ; ============================================================================
 
 emit_illegal:
@@ -677,8 +730,9 @@ emit_illegal:
     inc DIS_PC_LO
     bne :+
     inc DIS_PC_HI
-:   ; pad "XX" (2 chars) to the fixed 8-char field width, same as emit_line
-    ldx #6
+:   ; pad "XX" (2 chars) to the fixed 8-char field width, plus the space
+    ; before the hint - same as emit_line, so the line is DIS_LINE_MAX long
+    ldx #7
     jsr emit_spaces
     jsr emit_petscii_hint
     lda #$0D
@@ -705,7 +759,33 @@ trunc_msg:
     .byte $3B,$20,$2A,$2A,$2A,$20
     .byte $44,$49,$53,$41,$53,$53,$45,$4D,$42,$4C,$59,$20  ; DISASSEMBLY
     .byte $54,$52,$55,$4E,$43,$41,$54,$45,$44,$20           ; TRUNCATED
-    .byte $2A,$2A,$2A,$0D,$00
+    .byte $2A,$2A,$2A,$0D
+trunc_msg_end:
+    .byte $00
+DIS_TRUNC_LEN = trunc_msg_end - trunc_msg
+
+; ============================================================================
+; check_room - is there room to write A more bytes and still leave at least
+; one byte free before work_buf_end (DST_PTR + A < DIS_BUF_END)? The free
+; byte keeps MOD_NEW_END < MOD_BUF_END, so the editor's gap is never empty.
+;
+; In:  A = byte count
+; Out: C clear = room, C set = no room
+; Clobbers: A, X
+; ============================================================================
+
+check_room:
+    clc
+    adc DST_PTR
+    tax                         ; X = lo of DST_PTR + A
+    lda DST_PTR+1
+    adc #0
+    bcs @out                    ; ran past $FFFF
+    cmp DIS_BUF_END_HI
+    bne @out                    ; C set: hi > end hi (full), clear: below (room)
+    cpx DIS_BUF_END_LO          ; same page: C set if lo >= end lo (full)
+@out:
+    rts
 
 ; ============================================================================
 ; relocate_output - copy the finished disassembly text from the gap region
@@ -812,16 +892,16 @@ emit_hex_nib:
 ; ============================================================================
 ; emit_dst - write byte A to the output at DST_PTR, advance pointer
 ; Preserves A and X; clobbers Y
+;
+; No bounds check here: every write is covered by a check_room call made
+; before the line it belongs to (the .org line, each instruction line, the
+; truncation notice), which reserves room for the whole line. The page
+; guard that used to sit here dropped every byte in BUF_END's page - so a
+; buffer end that wasn't page-aligned lost up to 255 bytes of room, and the
+; line in progress was cut off with no CR.
 ; ============================================================================
 
 emit_dst:
-    ; Guard: only write if TMP3 is within work_buf range.
-    ; Prevents runaway writes if overflow check fires one iteration late.
-    ldy DST_PTR+1
-    cpy DIS_BUF_HI
-    bcc @emit_discard           ; TMP3 < work_buf hi → below buffer (wrapped)
-    cpy DIS_BUF_END_HI
-    bcs @emit_discard           ; TMP3 >= work_buf_end hi → past end
     pha
     ldy #0
     buf_sta DST_PTR
@@ -829,8 +909,6 @@ emit_dst:
     bne :+
     inc DST_PTR+1
 :   pla
-    rts
-@emit_discard:
     rts
 
 ; ============================================================================
@@ -1016,3 +1094,4 @@ DIS_BUF_END_LO:   .res 1          ; work_buf_end lo
 DIS_BUF_END_HI:   .res 1          ; work_buf_end hi
 DIS_SPINNER:      .res 1          ; 8-bit up-counter; low nibble 0 -> color flip
 DIS_SPIN_IDX:     .res 1          ; current color: $01=white $00=black (toggles)
+DIS_TAIL:         .res 1          ; nonzero: rest of binary emitted as .BYTE

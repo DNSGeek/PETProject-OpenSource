@@ -273,6 +273,8 @@ tokenize:
     sta IN_STRING
     sta AFTER_REM
     sta after_data
+    lda #$FF
+    sta at_stmt                 ; a line starts with a statement
 
 ; ============================================================================
 ; @token_loop
@@ -284,17 +286,14 @@ tokenize:
     bne :+
     jmp @eof_line               ; source ended mid-line — close the line first
 :   cmp #$0D
-.ifdef TARGET_C128
-    bne :+                      ; far-access JSRs push @end_line out of branch range
+    bne :+                      ; @end_line is out of branch range
     jmp @end_line
 :
-.else
-    beq @end_line
-.endif
 
     lda AFTER_REM
-    bne @literal
-
+    beq :+
+    jmp @literal
+:
     ldy #0
     buf_lda SRC_PTR
     cmp #$22
@@ -302,6 +301,8 @@ tokenize:
     lda IN_STRING
     eor #$FF
     sta IN_STRING
+    lda #0
+    sta at_stmt
     lda #$22
     jsr inc_src_ptr
     jsr emit_byte
@@ -333,6 +334,8 @@ tokenize:
     cmp #'?'
     bne @not_qmark
     jsr inc_src_ptr
+    lda #0
+    sta at_stmt
     lda #$99                    ; PRINT token
     jsr emit_byte
     jsr inc_basic_addr
@@ -351,13 +354,29 @@ tokenize:
     bne :+
     ldx #$FF
     stx after_data
-:   jsr emit_byte
+:   ldx #0                      ; a statement follows THEN, nothing else
+    cmp #$A7
+    bne :+
+    dex
+:   stx at_stmt
+    jsr emit_byte
     jsr inc_basic_addr
     jmp @token_loop
 
 @literal:
     ldy #0
     buf_lda SRC_PTR
+    ldx at_stmt
+    cmp #' '
+    beq @lit_emit               ; spaces don't change it
+    ldx #0
+    cmp #':'
+    bne @lit_emit
+    bit IN_STRING
+    bmi @lit_emit               ; a ':' inside a string
+    dex                         ; X = $FF: a statement starts after ':'
+@lit_emit:
+    stx at_stmt
     jsr inc_src_ptr
     jsr emit_byte
     jsr inc_basic_addr
@@ -523,7 +542,7 @@ try_keyword:
     eor (TMP16),y               ; $00 = match; $80 = match on final char
     asl                         ; C = final-char flag, A = difference << 1
     bne @kw_cand_next           ; real difference → next candidate
-    bcs @kw_full_match          ; matched the entry's final char
+    bcs @kw_hit                 ; matched the entry's final char
     ; Exact match. If that was the entry's final char (bit 7 set), the
     ; source has a SHIFTED letter equal to it — "T<shift-O>" against TO.
     ; That is not this keyword (a shifted letter only ends an abbreviation
@@ -541,6 +560,28 @@ try_keyword:
 @kw_no_match:
     clc
     rts
+
+@kw_hit:
+    ; PETProject's own keywords ($CC-$D8) are statements the script runner
+    ; dispatches only at the start of a statement. Anywhere else, or as an
+    ; assignment target, the same letters are an ordinary variable name, as
+    ; on a stock C64: PRINT STATUS, DRIVE=8 and A=COPY+1 must not become
+    ; tokens a C64 can't run. (DRIVE 9 or RUNPROG "X" still tokenize.)
+    lda KW_TOKEN
+    cmp #$CC
+    bcc @kw_full_match          ; a BASIC 2.0 keyword: always
+    lda at_stmt
+    beq @kw_cand_next
+    sty kw_len
+@kw_peek:                       ; next non-space source char after it
+    buf_lda SRC_PTR
+    iny
+    cmp #' '
+    beq @kw_peek
+    ldy kw_len
+    cmp #'='
+    beq @kw_cand_next
+    bne @kw_full_match          ; always
 
 @op_hit:
     lda kw_op_tokens,x
@@ -637,6 +678,13 @@ inc_src_ptr:
 
 ; after_data — $FF while inside a DATA statement (module RAM; ZP is full)
 after_data:
+    .byte 0
+
+; at_stmt — $FF where a statement may start (line start, after an unquoted
+; ':' or THEN, spaces aside); kw_len — try_keyword scratch
+at_stmt:
+    .byte 0
+kw_len:
     .byte 0
 
 ; reloc — start of the relocated source text at the top of work_buf

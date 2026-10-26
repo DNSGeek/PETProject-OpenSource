@@ -7,8 +7,11 @@ parameter block at $0212, editor gap pointers in zero page $02-$05.
 
 Covers MODTOK/MODDET (tokenize + detokenize round trip, REM/DATA literals,
 overflow restore), MODREN (ON...GOTO lists, a split gap, the in-place
-overtake guard) and MODSFR (find / find next / replace / delete, case
-folding, the gap-full guard), driven by a scripted GETIN key queue.
+overtake guard), MODSFR (find / find next / replace / delete, case
+folding, the gap-full guard), driven by a scripted GETIN key queue,
+MODSCT (the script tokenizer; REU DMA emulated on writes to $DF01), and
+MODDIS (a final instruction cut short by the end of the binary, output
+truncated at a line boundary when it outgrows the buffer).
 
 Usage:
     bash make_petproject.sh      # produces build/*.prg
@@ -33,13 +36,39 @@ JIFFY_LO = 0xA2
 KEY_STOP = 0x03
 
 
+def reu_dma(mem, reu):
+    """Perform the transfer just started by a write to the REU command
+    register $DF01 (stash/fetch only, both addresses incrementing)."""
+    cmd = mem[0xDF01]
+    c64 = mem[0xDF02] | (mem[0xDF03] << 8)
+    ext = mem[0xDF04] | (mem[0xDF05] << 8) | (mem[0xDF06] << 16)
+    n = (mem[0xDF07] | (mem[0xDF08] << 8)) or 0x10000
+    for i in range(n):
+        a, r = (c64 + i) & 0xFFFF, (ext + i) % len(reu)
+        if cmd & 3 == 0:
+            reu[r] = mem[a]
+        elif cmd & 3 == 1:
+            mem[a] = reu[r]
+        else:
+            raise AssertionError(f"REU command ${cmd:02x} not emulated")
+    mem[0xDF01] = cmd & 0x7F  # transfer done: execute bit clears
+
+
 def run_module(
-    name, pre, post=b"", buf_end=BUF_END, max_steps=50_000_000, keys=None, fill=None
+    name,
+    pre,
+    post=b"",
+    buf_end=BUF_END,
+    max_steps=50_000_000,
+    keys=None,
+    fill=None,
+    reu=None,
 ):
     """Run module `name` on the gap buffer [pre | gap | post].
 
     With `keys`, GETIN ($FFE4) returns those PETSCII codes one per call,
     then STOP; the jiffy clock at $A2 ticks so timed waits finish. With
+    `reu` (a bytearray), a write to $DF01 runs that DMA against it. With
     `fill`, the module's 4 K region is pre-filled with that byte, standing
     in for whatever a previously loaded module left past the image.
 
@@ -98,6 +127,8 @@ def run_module(
                 m.pc = ret + 1
                 continue
         m.step()
+        if reu is not None and mem[0xDF01] & 0x80:
+            reu_dma(mem, reu)
     else:
         raise AssertionError(f"{name}: runaway at ${m.pc:04x}")
 
@@ -250,6 +281,26 @@ def test_every_keyword():
     print("ok: every keyword tokenizes to its token and back")
 
 
+def test_extended_keywords_only_as_statements():
+    def ext(out):
+        return [b for b in body(out) if 0xCC <= b <= 0xD8]
+
+    # as variables, PETProject's keywords stay letters a stock C64 can run
+    st, out, _ = run_module("modtok", b"10 DRIVE=8:PRINT STATUS:A=COPY+1\r")
+    check(st == 0x02 and ext(out) == [], "extended keywords as variables stay text")
+    # as statements (line start, after ':' and THEN) they still tokenize
+    st, out, _ = run_module("modtok", b'10 DRIVE 9: STATUS:RUNPROG"X"\r')
+    check(
+        st == 0x02 and ext(out) == [0xD4, 0xD3, 0xCE],
+        "extended keywords as statements tokenize",
+    )
+    st, out, _ = run_module("modtok", b'10 IF X THEN DELETE"A":PRINT":DRIVE"\r')
+    check(
+        st == 0x02 and ext(out) == [0xD0] and body(out)[4:7] == b"\xa7 \xd0",
+        "after THEN, not after a ':' inside a string",
+    )
+
+
 def test_shifted_abbreviations():
     # A shifted letter ends an abbreviation; the first entry in the
     # longest-first table that it fits wins (G<shift-O> is GOSUB, not GOTO).
@@ -293,6 +344,53 @@ def test_tokenize_page_boundaries():
         st, _, mem = run_module("modtok", src, buf_end=end)
         assert st == 0x01 and bytes(mem[BUF : BUF + n]) == src, f"len {n}: restore"
     print("ok: tokenize/restore across page boundaries")
+
+
+def run_sct(src):
+    """Tokenize script `src` with MODSCT; return the tokenized program
+    from the REU script slot ($000000, length from the metadata block)."""
+    reu = bytearray(0x20000)
+    st, _, _ = run_module("modsct", src, reu=reu)
+    assert st == 0x05, f"modsct status ${st:02x} for {src!r}"
+    meta = reu[0x8100 : 0x8100 + 6]
+    assert meta[:2] == b"SC", f"metadata {bytes(meta)!r}"
+    return bytes(reu[: meta[2] | (meta[3] << 8)])
+
+
+def test_script_then_extended_keyword():
+    # After THEN, BASIC's IF jumps straight to $A7ED, bypassing IGONE, and
+    # $A7ED raises ?SYNTAX ERROR for the extended tokens: MODSCT puts a ':'
+    # in front so NEWSTT dispatches the token through IGONE instead.
+    st_src = b'10 EXISTS "DEMO"\r20 IF EX=1 THEN DELETE "DEMO"\r30 END\r'
+    out = run_sct(st_src)
+    check(b'\xa7 :\xd0 "DEMO"' in out, "THEN <extended keyword> gets a ':'")
+    # line links still chain to the end marker with the extra byte
+    a, n = 0x0801, 0
+    while True:
+        link = out[a - 0x0801] | (out[a - 0x0800] << 8)
+        if link == 0:
+            break
+        a, n = link, n + 1
+    check(n == 3 and a - 0x0801 == len(out) - 2, "link words count the ':'")
+    # modsct keeps spaces and writes no load address: a one-line body is
+    # out[4:-3] (link, line number / terminator, end marker)
+    cases = [
+        (b"10 IF X THEN ONERR 100\r", b"\x8b X \xa7 :\xd5 100"),
+        (b"10 IFXTHENDIR\r", b"\x8bX\xa7:\xd8"),  # no spaces either
+        (b"10 IF X THEN IF Y THEN DIR\r", b"\x8b X \xa7 \x8b Y \xa7 :\xd8"),
+        (b"10 IF X THEN 100\r", b"\x8b X \xa7 100"),  # line number
+        (b"10 IF X GOTO 100\r", b"\x8b X \x89 100"),  # no THEN
+        (b"10 IF X THEN PRINT\r", b"\x8b X \xa7 \x99"),  # stock keyword
+        (b"10 IF X THEN X=1:DIR\r", b"\x8b X \xa7 X\xb21:\xd8"),
+        (b"10 REM THEN DIR\r", b"\x8f THEN DIR"),  # REM stays literal
+        (b'10 PRINT "THEN DIR"\r', b'\x99 "THEN DIR"'),
+        (b"10 DATA THEN DIR\r", b"\x83 THEN DIR"),
+        (b"10 X=1:DIR\r", b"X\xb21:\xd8"),
+    ]
+    for src, want in cases:
+        out = run_sct(src)
+        assert out[4:-3] == want, f"{src!r}: {out!r}"
+    print("ok: only an extended keyword right after THEN gets a ':'")
 
 
 def test_renumber():
@@ -394,18 +492,81 @@ def test_search_replace():
     )
 
 
+DIS_NOTICE = b"; *** DISASSEMBLY TRUNCATED ***\r"
+
+
+def test_disassemble_short_tail():
+    # A PRG ending in a lone JSR opcode: its operand bytes would lie past
+    # the end of the binary, where the output text starts.
+    st, out, _ = run_module("moddis", bytes([0x01, 0x08, 0xA9, 0x41, 0x20]))
+    lines = out.split(b"\r")
+    check(
+        st == 0x02
+        and lines[0] == b".ORG $0801"
+        and lines[1].startswith(b"    LDA #$41    ;0801:A9 41")
+        and lines[2].startswith(b"    .BYTE $20   ;0803:20 ")
+        and len(lines[1]) == len(lines[2])
+        and lines[3:] == [b""],
+        "dis: lone final $20 shown as .BYTE $20, not JSR",
+    )
+    # LDA abs with one operand byte left: both leftovers become .BYTE
+    st, out, _ = run_module("moddis", bytes([0x00, 0xC0, 0xEA, 0xAD, 0x34]))
+    lines = out.split(b"\r")
+    check(
+        st == 0x02
+        and lines[1].startswith(b"    NOP         ;C000:EA")
+        and lines[2].startswith(b"    .BYTE $AD   ;C001:AD ")
+        and lines[3].startswith(b"    .BYTE $34   ;C002:34 ")
+        and lines[4:] == [b""],
+        "dis: every byte of a cut-short instruction shown as .BYTE",
+    )
+
+
+def test_disassemble_truncates_at_line():
+    # 4 K of code makes ~150 K of text; the 24 K buffer holds a few hundred
+    # lines, so the listing must stop on a whole line and say so.
+    body = bytes([0xAD, 0x34, 0x12, 0xEA] * 1024)
+    pre = bytes([0x00, 0x10]) + body
+    st, out, mem = run_module("moddis", pre)
+    new_end = mem[0x021F] | (mem[0x0220] << 8)
+    lines = out.split(b"\r")[:-1]
+    check(
+        st == 0x02
+        and out.endswith(DIS_NOTICE)
+        and out.count(DIS_NOTICE) == 1
+        and new_end < BUF_END
+        and len(lines) > 100
+        and all(len(x) == 36 for x in lines[1:-1]),
+        "dis: oversized listing ends on a whole line with the truncation notice",
+    )
+    # the notice is a comment line, so the partial listing still assembles
+    check(lines[-1].startswith(b";"), "dis: truncation notice is a ';' comment")
+    # an end that isn't page-aligned: no bytes lost before it, one byte free
+    for end in (BUF_END - 0x41, BUF_END - 0xC3):
+        st, out, mem = run_module("moddis", pre, buf_end=end)
+        new_end = mem[0x021F] | (mem[0x0220] << 8)
+        room = end - BUF - len(pre)
+        assert st == 0x02 and out.endswith(DIS_NOTICE) and new_end < end
+        assert len(out) + 37 >= room, f"stopped early: {len(out)} of {room}"
+    print("ok: dis: unaligned buffer ends used to the last whole line")
+
+
 def main():
-    for name in ("modtok", "moddet", "modren", "modsfr"):
+    for name in ("modtok", "moddet", "modren", "modsfr", "modsct", "moddis"):
         if not (BUILD / f"{name}.prg").exists():
             sys.exit(f"build/{name}.prg not found — run: bash make_petproject.sh")
     test_tokenize_round_trip()
     test_tokenize_overflow_restores_text()
     test_every_keyword()
+    test_extended_keywords_only_as_statements()
     test_shifted_abbreviations()
     test_tokenize_page_boundaries()
+    test_script_then_extended_keyword()
     test_renumber()
     test_renumber_overtake_guard()
     test_search_replace()
+    test_disassemble_short_tail()
+    test_disassemble_truncates_at_line()
     print("\nall module tests passed")
 
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""End-to-end tests for MODASM's .include directive.
+"""End-to-end tests for MODASM: the .include directive, plus parser and
+output regressions (labels, @locals, expressions, .org gaps, the manual's
+complete example).
 
 Runs the real assembled module (build/modasm.prg) on an emulated 6502
 (py65), with the Kernal channel-I/O entry points stubbed by a fake IEC
@@ -480,9 +482,6 @@ def main():
 
     # 13. Bigger combined program: data directives + code across 3 files,
     #     verified against the flattened equivalent.
-    # NOTE: labels go on their own line — this assembler doesn't support
-    # a directive after a label on the same line (see the manual's .text
-    # example), which is unrelated to .include.
     files = {
         "DATA": petscii(
             'MSG:\n        .text "HI"\n        .byte $00\n'
@@ -547,6 +546,174 @@ def main():
     m = assemble(src, {"OUT": b"stale"})
     expect_output(m, bytes.fromhex("00c060"), "replace existing output")
     print("ok: disk full reported, existing output replaced")
+
+    # 17. A directive after a label on the same line: the label names the
+    #     data, and a label on an origin line names the NEW address.
+    src = (
+        "        *= $C000\n"
+        "        LDA TABLE+1\n"
+        "        LDX MSG\n"
+        "TABLE:  .byte 1,2,3\n"
+        'MSG:    .text "HI"\n'
+        "WORDS:  .word TABLE,WORDS\n"
+    )
+    expect_output(
+        assemble(src),
+        bytes.fromhex("00c0 ad07c0 ae09c0 010203 4849 06c0 0bc0"),
+        "label + directive",
+    )
+    m = assemble("START:  *= $C000\n        JMP START\n")
+    expect_output(m, bytes.fromhex("00c04c00c0"), "label + *=")
+    m = assemble("        NOP\nHERE:   .org $0810\n        JMP HERE\n")
+    expected = bytes.fromhex("0108 ea") + bytes(14) + bytes.fromhex("4c1008")
+    expect_output(m, expected, "label + mid-source .org")
+    print("ok: label followed by a directive or origin on the same line")
+
+    # 18. @local labels are scoped to the preceding global label: the same
+    #     @name can be reused under each global, forward and backward
+    #     references both work, and a local is invisible from another scope.
+    src = (
+        "        *= $C000\n"
+        "FIRST:  LDX #2\n"
+        "@loop:  DEX\n"
+        "        BNE @Loop\n"  # names are case-insensitive
+        "        BEQ @done\n"  # forward reference to a local
+        "        NOP\n"
+        "@done:  RTS\n"
+        "SECOND: LDY #3\n"
+        "@loop:  DEY\n"
+        "        BNE @loop\n"
+        "@done:  RTS\n"
+    )
+    expect_output(
+        assemble(src),
+        bytes.fromhex("00c0 a202 ca d0fd f001 ea 60 a003 88 d0fd 60"),
+        "@local scopes",
+    )
+    m = assemble("        *= $C000\n@top:   NOP\n        JMP @top\n")
+    expect_output(m, bytes.fromhex("00c0ea4c00c0"), "@local before any global")
+    m = assemble("        *= $C000\nA1:\n@x:     NOP\nB1:     JMP @x\n")
+    expect_error(m, "BAD OPERAND", "@local from another scope", line=4)
+    m = assemble("        *= $C000\nA1:\n@x:     NOP\n@x:     NOP\n")
+    expect_error(m, "SYMBOL ERROR", "duplicate @local in one scope", line=4)
+    print("ok: @local labels scoped to the preceding global label")
+
+    # 19. '<' / '>' take the lo / hi byte of the whole sum after them, with
+    #     or without parentheses; offsets may be chained and spaced.
+    src = (
+        "        *= $C000\n"
+        "        LDA #<(TABLE+10)\n"
+        "        LDX #>(TABLE+$F5)\n"
+        "        LDY #<MSG+1\n"  # <(MSG+1), not (<MSG)+1
+        "        LDA #>TABLE+$F0\n"  # >(TABLE+$F0) carries into the hi byte
+        "        .byte <TABLE-1, >( TABLE + 2 )\n"
+        "        LDA TABLE + 2\n"
+        "        LDA TABLE+1+1\n"
+        "TABLE:  .byte 0\n"
+        "MSG:    .byte 1\n"
+    )
+    expect_output(
+        assemble(src),
+        bytes.fromhex("00c0 a91a a2c1 a012 a9c1 0fc0 ad12c0 ad12c0 00 01"),
+        "lo/hi of expressions",
+    )
+    m = assemble("        *= $C000\n        LDA #<(MSG+1\nMSG:    RTS\n")
+    expect_error(m, "BAD OPERAND", "unclosed parenthesis", line=2)
+    print("ok: < and > apply to a whole offset expression")
+
+    # 20. Leftover text after an operand, a directive's values or a
+    #     mnemonic is an error, not silently dropped; comments still work
+    #     right after a statement, with or without a space.
+    src = (
+        "        *= $C000\n"
+        "        RTS;done\n"
+        "        LDA #1;c\n"
+        "        .byte 1 , 2 ; c\n"
+        '        .text "A,B" ; c\n'
+        "        .word $1234;c\n"
+        "        ASL A ; c\n"
+        "        LDA ($10),Y  ; c\n"
+    )
+    expect_output(
+        assemble(src),
+        bytes.fromhex("00c0 60 a901 0102 412c42 3412 0a b110"),
+        "statements followed by comments",
+    )
+    bad = [
+        ("        LDA #1 2", "SYNTAX ERROR"),
+        ("        LDA ($10),Y X", "SYNTAX ERROR"),
+        ("        STA1 $D020", "BAD MNEMONIC"),
+        ("        .byte 1 2", "SYNTAX ERROR"),
+        ("        .word 1 X", "SYNTAX ERROR"),
+        ('        .text "HI" X', "SYNTAX ERROR"),
+        ("        .org $C000 X", "SYNTAX ERROR"),
+        ("        *= $C000 X", "SYNTAX ERROR"),
+        ("        .byte1", "SYNTAX ERROR"),
+        ('        .include "TW" X', "SYNTAX ERROR"),
+    ]
+    files = {"TW": petscii("        NOP\n")}
+    for line, msg in bad:
+        m = assemble("        *= $C000\n" + line + "\n        RTS\n", files)
+        expect_error(m, msg, f"trailing text: {line.strip()!r}", line=2)
+    print("ok: trailing text after a statement is an error")
+
+    # 21. The output is one contiguous image from the first output byte:
+    #     a forward .org after code is padded with $00 so data loads where
+    #     its label says, a backward one is an error (in pass 1, so no
+    #     file is written), and code before the first .org loads at its
+    #     own address.
+    src = (
+        "        *= $C000\n"
+        "        RTS\n"
+        "        .org $C004\n"
+        "DATA:   .byte 1\n"
+        "        LDA DATA\n"
+    )
+    expect_output(assemble(src), bytes.fromhex("00c0 60 000000 01 ad04c0"), "org gap")
+    m = assemble("        *= $C000\n        RTS\n        .org $BFFF\n        RTS\n")
+    expect_error(m, "ORG BACKWARDS", "backward org", line=3)
+    assert m.output is None, "backward org must not write a file"
+    m = assemble("        NOP\n        .org $0810\n        RTS\n")
+    expected = bytes.fromhex("0108 ea") + bytes(14) + b"\x60"
+    expect_output(m, expected, "code before the first .org")
+    m = assemble("        .org $C000\nLBL:\n        .org $1000\n        RTS\n")
+    expect_output(m, bytes.fromhex("0010 60"), "orgs before any output")
+    m = assemble("LBL:\n")
+    expect_output(m, bytes.fromhex("0108"), "no output bytes")
+    print("ok: .org gaps padded, backward .org rejected, load address")
+
+    # 22. PHASE ERROR: a forward reference sized ABS in pass 1 that
+    #     resolves to zero page in pass 2 shifts every later label.  The
+    #     first label after the divergence reports it, even when a later
+    #     .org re-synchronises the PC (which hid it from the end-of-pass
+    #     check); with no label in between, the .org padding absorbs it.
+    src = "        *= $0080\n        LDA ZPV\nMID:    RTS\nZPV:    .byte 0\n"
+    expect_error(assemble(src), "PHASE ERROR", "phase, no org", line=3)
+    src = (
+        "        *= $0080\n        LDA ZPV\nMID:    RTS\n"
+        "        .org $0090\nZPV:    .byte 0\n"
+    )
+    expect_error(assemble(src), "PHASE ERROR", "phase hidden by .org", line=3)
+    src = "        *= $0080\n        LDA ZPV\n        .org $0090\nZPV:    .byte 7\n"
+    expected = bytes.fromhex("8000 a590") + bytes(14) + b"\x07"
+    expect_output(assemble(src), expected, "divergence absorbed by .org")
+    print("ok: phase errors caught per label")
+
+    # 23. The manual's complete example (section 13) assembles, taken
+    #     verbatim from docs/assembler_manual.md, to the expected bytes:
+    #     BASIC stub "2024 SYS 2061", then main at $080D.
+    manual = (REPO / "docs" / "assembler_manual.md").read_text(encoding="utf-8")
+    example = manual.split("## 13. A Complete Example", 1)[1]
+    example = example.split("```\n", 2)[1]
+    expected = bytes.fromhex(
+        "0108"  # load address $0801
+        "0b08 e807 9e 32303631 00 0000"  # BASIC stub
+        "a227"  # main: ldx #39
+        "a920 9d0004 a90e 9d00d8 ca 10f3"  # @loop ... bpl @loop
+        "60"  # rts
+    )
+    expect_output(assemble(example), expected, "manual section 13 example")
+    print("ok: the manual's complete example")
 
     print("\nall include tests passed")
 

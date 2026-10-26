@@ -781,6 +781,16 @@ dirty_prompt:
 ; ============================================================================
 
 init_settings:
+    ; Remember the drive we were loaded from (still in FA: nothing has done
+    ; I/O since): the modules live on the program disk, wherever it is.
+    lda FA
+    cmp #8
+    bcc @fa_bad
+    cmp #31
+    bcc :+
+@fa_bad:
+    lda #8                         ; tape, screen, or garbage: assume drive 8
+:   sta PROG_DRIVE
     lda #DEFAULT_BORDER_COLOR
     sta SETTING_BORDER
     lda #DEFAULT_BG_COLOR
@@ -789,8 +799,11 @@ init_settings:
     sta SETTING_FG
     lda #1                         ; cursor blink on by default
     sta SETTING_BLINK
-    lda #8                         ; default drive = 8
-    sta SETTING_DRIVE
+    lda PROG_DRIVE                 ; data drive defaults to the program drive,
+    cmp #12                        ; if Settings can show it (8-11)
+    bcc :+
+    lda #8
+:   sta SETTING_DRIVE
     lda #0
     sta FNAME_LEN
     sta IS_BASIC
@@ -3313,6 +3326,7 @@ screen_lookup:   .res 256
 ; implementation notes — keep them stable or update both together.
 
 SETTING_DRIVE:  .res 1             ; device number for file I/O (default 8, range 8–11)
+PROG_DRIVE:     .res 1             ; drive the editor was loaded from; modules load from it
 SETTING_BORDER: .res 1             ; border color (C64 color index 0–15)
 SETTING_BG:     .res 1             ; background color (C64 color index 0–15)
 SETTING_FG:     .res 1             ; foreground / text color (C64 color index 0–15)

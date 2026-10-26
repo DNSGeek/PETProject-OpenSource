@@ -477,6 +477,7 @@ tok_main_script:
     sta IN_STRING
     sta AFTER_REM
     sta tok_after_data
+    sta tok_after_then
 
 ; ---- @token_loop ----
 @token_loop:
@@ -488,8 +489,9 @@ tok_main_script:
     jmp @end_line
 :
     lda AFTER_REM
-    bne @literal
-
+    beq :+
+    jmp @literal
+:
     ; Track quote toggle
     jsr tok_src_peek
     cmp #$22
@@ -497,6 +499,8 @@ tok_main_script:
     lda IN_STRING
     eor #$FF
     sta IN_STRING
+    lda #0
+    sta tok_after_then          ; a string after THEN: not a statement
     lda #$22
     jsr tok_src_advance
     jsr emit_byte
@@ -525,6 +529,8 @@ tok_main_script:
     cmp #'?'
     bne @not_qmark
     jsr tok_src_advance
+    lda #0
+    sta tok_after_then
     lda #$99                    ; PRINT token
     jsr emit_byte
     jsr inc_basic_addr
@@ -547,7 +553,9 @@ tok_main_script:
     bne :+
     ldx #$FF
     stx tok_after_data
-:   jsr emit_byte
+:
+    jsr tok_then_colon    ; IF ... THEN <extended keyword> fix-up
+    jsr emit_byte
     jsr inc_basic_addr
     jmp @token_loop
 
@@ -561,7 +569,11 @@ tok_main_script:
 
 @literal:
     jsr tok_src_peek
-    jsr tok_src_advance
+    cmp #' '              ; spaces between THEN and a keyword keep
+    beq :+                ; tok_after_then; anything else clears it
+    ldx #0
+    stx tok_after_then
+:   jsr tok_src_advance
     jsr emit_byte
     jsr inc_basic_addr
     jmp @token_loop
@@ -1353,6 +1365,42 @@ kw_op_chars:  .byte $2A,$2B,$2D,$2F,$3C,$3D,$3E,$5E   ; * + - / < = > ^
 kw_op_tokens: .byte $AC,$AA,$AB,$AD,$B3,$B2,$B1,$AE
 
 ; ============================================================================
+; tok_then_colon — called with A = the keyword token about to be emitted.
+;
+; IF ... THEN <extended keyword>: after THEN, BASIC's IF ($A940-$A948) does
+; JMP $A7ED (GONE's execute-statement) directly, not through the IGONE
+; vector ($0308), and $A7ED raises ?SYNTAX ERROR for tokens $CC-$D8.  So
+; when an extended token directly follows THEN (spaces ignored), emit ':'
+; first: $A7ED returns on ':' (BEQ $A82B), NEWSTT ($A7BE-$A809) then sees
+; ':' and dispatches the next statement through IGONE, where the resident
+; handler picks up the extended token.  A false IF still skips to end of
+; LINE (REMN, $A93B -> $A909), so the ':' does not change IF's meaning.
+; THEN <line number> and IF ... GOTO are untouched.
+;
+; Also updates tok_after_then for the token.  Preserves A; clobbers X, Y.
+; ============================================================================
+
+tok_then_colon:
+    ldx tok_after_then
+    beq @set
+    cmp #$CC
+    bcc @set
+    cmp #$D8+1
+    bcs @set
+    pha
+    lda #':'
+    jsr emit_byte         ; counts toward BASIC_ADDR and the overflow
+    jsr inc_basic_addr    ; check exactly like any other output byte
+    pla
+@set:
+    ldx #0
+    cmp #$A7              ; THEN token
+    bne :+
+    dex                   ; X = $FF: the next token follows THEN
+:   stx tok_after_then
+    rts
+
+; ============================================================================
 ; Helpers
 ; ============================================================================
 
@@ -1448,6 +1496,10 @@ msg_incl:
 
 ; tok_after_data — $FF while inside a DATA statement
 tok_after_data:
+    .byte 0
+
+; tok_after_then — $FF while the last non-space output byte was THEN ($A7)
+tok_after_then:
     .byte 0
 
 ; ============================================================================

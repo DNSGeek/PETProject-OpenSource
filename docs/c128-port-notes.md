@@ -568,14 +568,14 @@ at those addresses in BASIC 7.0:
 | `$A7E7` | `GONE_ORIG`             | `modscrh.asm:48`                     |
 | `$B08B` | `PTRGET`                | `modscrh.asm:73`                     |
 | `$B79E` | `GETBYT`                | `modscrh.asm:50`                     |
-| `$AD9E` | `FRMNUM`                | `modscrh.asm:535`                    |
-| `$B1AA` | `AYINT`                 | `modscrh.asm:536`                    |
+| `$AD8A` | `FRMNUM`                | `modscrh.asm:559`                    |
+| `$B7F7` | `GETADR`                | `modscrh.asm:560`                    |
 | `$E544` | `CLRSCR` (KERNAL)       | `modscr.asm:82`                      |
 | `$E394` | BASIC cold start        | `editor.asm:542`                     |
 
 Plus the BASIC 2.0 zero-page ABI: `$2B`/`$2D` (TXTTAB/VARTAB), `$37` (MEMSIZ),
-`$47` (VARPNT), `$7A`/`$7B` (TXTPTR), and `$14`/`$15` as AYINT's big-endian
-output (`modscrh.asm:540`). It also stages into `$B000` (`modscr.asm:96`,
+`$47` (VARPNT), `$7A`/`$7B` (TXTPTR), and `$14`/`$15` (LINNUM) as GETADR's
+lo/hi output (`modscrh.asm:564`). It also stages into `$B000` (`modscr.asm:96`,
 `modsct.asm:149`), which is BASIC HI ROM territory on the C128.
 
 **Recommendation: cut the script runner from the first C128 release.** The
@@ -651,7 +651,7 @@ BASIC is never called does not hold for them, `modsct` because it exists only
 to feed them.
 
 BASIC/KERNAL ABI addresses (`TXTTAB`, `VARTAB`, `MEMSIZ`, `VARPNT`, `TXTPTR`,
-AYINT's `$14`/`$15`, `JIFFY_LO`, `FA`) were deliberately **left as literals**.
+GETADR's `$14`/`$15`, `JIFFY_LO`, `FA`) were deliberately **left as literals**.
 They are fixed by the ROM being called, not ours to relocate, and folding them
 into the pool would have obscured that distinction.
 
@@ -762,7 +762,7 @@ beyond the ROM entry points already listed under
   is the design decision that does not exist on the C64.
 - **The ROM ABI.** `CHRGET` is in common RAM on the C128 (`$0380`) rather
   than zero page, and every BASIC 2.0 entry the handler calls (`PTRGET`,
-  `GETBYT`, `FRMNUM`, `AYINT`, `RELINK`, `CLR`, `NEWSTT`) has a BASIC 7.0
+  `GETBYT`, `FRMNUM`, `GETADR`, `RELINK`, `CLR`, `NEWSTT`) has a BASIC 7.0
   counterpart to be located in the 318018/318019 images — the same way the
   boot routine was located for Phase 3. The `IGONE`/`IERROR`/`IMAIN`
   vectors keep their `$0300-$030B` addresses.

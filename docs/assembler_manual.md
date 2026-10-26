@@ -66,6 +66,13 @@ Every part is optional except that you need _something_ on a line for it to do a
 - **Operand** — what the instruction acts on (a number, address, or expression).
 - **Comment** — anything after a `;` is ignored.
 
+Nothing else may follow the statement: after the operand (or a directive's
+values) only spaces and an optional comment are allowed, and the mnemonic
+must be followed by a space, a comment or the end of the line. Leftover
+text such as `LDA #1 2` or `.byte 1 2` is a `SYNTAX ERROR`, and a typo like
+`STA1 $D020` is a `BAD MNEMONIC` — never silently assembled as something
+else.
+
 Both uppercase and lowercase letters are accepted everywhere. Labels and mnemonics are internally converted to uppercase, so `lda`, `LDA`, and `Lda` are all the same.
 
 **Examples of valid lines:**
@@ -76,6 +83,7 @@ loop:   STA $0400,Y     ; store A to screen, Y offset
         DEY             ; decrement Y
         BNE loop        ; loop until Y wraps to 0
         RTS             ; return
+table:  .byte 1, 2, 3   ; a label can be followed by a directive, too
 ```
 
 ---
@@ -110,7 +118,7 @@ You can then use that name anywhere an address is expected:
 ### Label Rules
 
 - Labels can be up to **8 characters** long. Characters beyond 8 are ignored.
-- Valid characters are: letters (`A`–`Z`, `a`–`z`), digits (`0`–`9`), and underscore (`_`).
+- Valid characters are: letters (`A`–`Z`, `a`–`z`), digits (`0`–`9`), and underscore (`_`). A leading `@` makes a [local label](#local-labels-name).
 - Labels are **case-insensitive**: `Loop`, `LOOP`, and `loop` all refer to the same label.
 - The colon (`:`) must immediately follow the name — no space before it.
 - Labels on their own line (with no instruction following) are perfectly valid, and the label simply points to the next instruction that follows.
@@ -119,7 +127,38 @@ You can then use that name anywhere an address is expected:
 
 **Valid label names:** `loop`, `start`, `irq_handler`, `MY_DATA`, `v1`, `loop2`
 
-**Invalid label names:** `my label` (space), `2fast` (starts with digit), `toolonglabel` (over 8 chars — will be silently truncated to `toolongla`)
+**Invalid label names:** `my label` (space), `2fast` (starts with digit), `toolonglabel` (over 8 chars — will be silently truncated to `toolongl`)
+
+### Local Labels (`@name`)
+
+A label whose name starts with `@` is **local**: it belongs to the most
+recent ordinary (global) label above it, and is only visible until the next
+global label. This lets every routine have its own `@loop` or `@done`
+without inventing a new name each time:
+
+```
+clear:  LDX #0
+@loop:  STA $0400,X     ; clear's @loop
+        INX
+        BNE @loop
+        RTS
+
+fill:   LDY #39
+@loop:  STA $D800,Y     ; fill's @loop — a different label
+        DEY
+        BPL @loop
+        RTS
+```
+
+- References work forwards and backwards within the scope (`BEQ @done`
+  before `@done:` is fine).
+- A local can't be reached from another scope: `JMP @loop` under `fill`
+  always means `fill`'s `@loop`; if `fill` has none, it is an error
+  (`BAD OPERAND`).
+- Local labels defined before the first global label share one scope.
+- Only the first **5 characters after the `@`** are significant
+  (`@loop1` and `@loop12` are the same label).
+- Each local label takes one entry in the symbol table, like a global one.
 
 ---
 
@@ -174,13 +213,14 @@ Use a label name directly as a value. Its address is substituted automatically.
 
 ### Offset Arithmetic
 
-Add or subtract a **literal number** from a label's address (or another value). The offset must be a plain number, not another label.
+Add or subtract a **literal number** from a label's address (or another value). The offset must be a plain number, not another label. Several offsets may follow each other, and spaces around `+` and `-` are allowed.
 
 ```
 table:  .byte 1, 2, 3, 4, 5
 
         LDA table+2     ; loads the byte at table's address + 2 (value = 3)
-        LDA table+4     ; loads the byte at table's address + 4 (value = 5)
+        LDA table + 4   ; loads the byte at table's address + 4 (value = 5)
+        LDA table+4-1   ; same as table+3
 ```
 
 ### Lo and Hi Byte Extraction
@@ -194,11 +234,18 @@ When a 16-bit address needs to be split into its two component bytes (common whe
         STA $FC
 ```
 
-These can be combined with offsets:
+`<` and `>` apply to the **whole** expression after them, offsets
+included, so `<table+10` means "the lo byte of `table+10`". Parentheses
+make that explicit and are also accepted:
 
 ```
         LDA #<(table+10)    ; lo byte of table+10
+        LDA #<table+10      ; the same thing
+        LDA #>(table+$F0)   ; hi byte of table+$F0 (carries into the hi byte)
 ```
+
+Parentheses are only allowed directly after `<` or `>`; elsewhere `(`
+starts an indirect addressing mode (see [Addressing Modes](#9-addressing-modes)).
 
 ---
 
@@ -210,7 +257,7 @@ Directives are assembler commands that don't produce machine code instructions d
 
 ### `.org` — Set the Program Counter
 
-Tells the assembler that the code that follows should start at a specific address. This determines the **load address** of the output PRG file. Use it once, at the very start of your source.
+Tells the assembler that the code that follows should start at a specific address. Used at the start of your source, it determines the **load address** of the output PRG file.
 
 ```
         .org $C000      ; code will load at $C000
@@ -224,7 +271,32 @@ Tells the assembler that the code that follows should start at a specific addres
 
 If you don't use `.org` or `*=`, the default load address is **$0801** (the start of the BASIC area).
 
-You can also use `.org` mid-source to skip ahead in memory (for example, to place data at a known fixed address), but this will leave a gap of uninitialised bytes in the output file. Usually it is simpler to just define your data at a convenient offset from your code.
+More precisely, the load address is the address of the **first byte your
+program emits** (an instruction, `.byte`, `.word` or `.text`). Any number of
+`.org` lines may come before it; only the address in effect at the first
+emitted byte counts. Code written before the first `.org` therefore loads
+at `$0801`, where its labels say it is.
+
+A label on the same line as `.org` or `*=` names the **new** address, so
+`start: *= $C000` defines `start` as `$C000`.
+
+You can also use `.org` mid-source to skip ahead in memory (for example, to
+place data at a known fixed address). A PRG file is one contiguous block, so
+the assembler fills the gap with `$00` bytes: everything after the `.org`
+loads exactly where its labels say. A big jump makes a big file (and
+overwrites the memory in between when loaded), so usually it is simpler to
+just define your data at a convenient offset from your code.
+
+```
+        .org $C000
+        RTS
+        .org $C100      ; $C001-$C0FF are filled with $00
+data:   .byte 1         ; loads at $C100
+```
+
+Once code or data has been emitted, `.org` can only move **forward**: an
+address below the current position stops assembly with `ORG BACKWARDS`
+(before any file is written).
 
 ---
 
@@ -293,9 +365,8 @@ Details worth knowing:
   and vice versa (forward references work as usual).
 - **Nesting** is allowed up to 7 levels deep; an 8th level stops assembly
   with `INCLUDE TOO DEEP`.
-- **Anything after the closing quote is ignored** — the rest of the line is
-  treated as a comment. Put code for the directive's line in the included
-  file instead.
+- **Only a comment may follow the closing quote** (`.include "x" ; why`);
+  anything else is a `SYNTAX ERROR`.
 - **Line numbers in error messages are per-file.** An error on the second
   line of an included file is reported as line 2, not as a position in the
   main source. (The editor's jump-to-error will still move within the main
@@ -422,7 +493,7 @@ Used exclusively by the eight branch instructions (`BCC`, `BCS`, `BEQ`, `BMI`, `
         BNE @loop       ; branch back to @loop if X ≠ 0
 ```
 
-> **Range Limit:** Branches can only reach targets within **−128 to +127 bytes** of the instruction following the branch. If your target is too far away, you will get a `BAD ADDR MODE` error. The fix is to branch to a nearby `JMP` instruction that jumps to the real target.
+> **Range Limit:** Branches can only reach targets within **−128 to +127 bytes** of the instruction following the branch. If your target is too far away, you will get a `BRANCH RANGE` error. The fix is to branch to a nearby `JMP` instruction that jumps to the real target.
 
 ---
 
@@ -566,13 +637,16 @@ When an error occurs, assembly stops at the first error found. The status bar sh
 
 | Message            | Meaning                                                                                                                          |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| `SYNTAX ERROR`     | The line couldn't be parsed — check for typos, missing colons, or bad `*=` syntax.                                               |
+| `SYNTAX ERROR`     | The line couldn't be parsed — check for typos, missing colons, bad `*=` syntax, or leftover text after a statement.              |
 | `VALUE ERROR`      | A number or expression couldn't be evaluated — invalid hex digits, empty expression, etc.                                        |
 | `SYMBOL ERROR`     | A label was defined more than once, or the symbol table is full (see [Limits](#12-limits-and-constraints)).                      |
-| `BAD MNEMONIC`     | The 3-letter instruction name couldn't be read — check your spelling and spacing.                                                |
+| `BAD MNEMONIC`     | The 3-letter instruction name couldn't be read — check your spelling and spacing (`STA1` is not `STA`).                          |
 | `UNKNWN OP`        | The mnemonic is not a known 6502 instruction.                                                                                    |
 | `BAD OPERAND`      | The operand syntax is wrong — mismatched parentheses, missing `X`/`Y`, etc.                                                      |
-| `BAD ADDR MODE`    | The instruction doesn't support the addressing mode you used, or a branch target is out of range.                                |
+| `BAD ADDR MODE`    | The instruction doesn't support the addressing mode you used.                                                                    |
+| `BRANCH RANGE`     | A branch target is more than −128/+127 bytes away (see [Relative](#relative-branch-instructions)).                              |
+| `ORG BACKWARDS`    | A `.org` / `*=` after emitted code or data moves to a lower address than the current one (see [`.org`](#org--set-the-program-counter)). |
+| `PHASE ERROR`      | The two passes disagreed about an instruction's size, so labels would point to the wrong place — typically a forward reference to a zero-page label. Define zero-page labels before using them. |
 | `I/O ERROR`        | A disk problem — the output file couldn't be written (disk full, write-protected), or an included file is missing or unreadable. |
 | `INCLUDE TOO DEEP` | `.include` files are nested more than 7 levels deep.                                                                             |
 | `LINE TOO LONG`    | A line in an included file is longer than 80 characters.                                                                         |
@@ -584,15 +658,16 @@ When an error occurs, assembly stops at the first error found. The status bar sh
 | Item                      | Limit                                                             |
 | ------------------------- | ----------------------------------------------------------------- |
 | Label name length         | 8 characters (extra characters are silently ignored)              |
-| Total labels              | 400                                                               |
+| Local label name length   | `@` plus 5 characters (extra characters are silently ignored)     |
+| Total labels              | 400 (global and local together)                                   |
 | Output filename length    | 16 characters                                                     |
 | `.include` filename       | 16 characters (including any DOS type suffix)                     |
 | `.include` nesting depth  | 7 levels                                                          |
 | Line length in includes   | 80 characters                                                     |
 | Branch range              | ±127 bytes from the instruction after the branch                  |
 | String content in `.text` | No escape sequences; no embedded double quotes                    |
-| Expression arithmetic     | Addition and subtraction of a single numeric offset only          |
-| Expression nesting        | `<` and `>` apply to a single base expression; no complex nesting |
+| Expression arithmetic     | A value plus/minus numeric offsets only (no label as an offset)   |
+| Expression nesting        | `<` / `>` apply to the whole expression; one `( )` level after them |
 | Integer size              | 16-bit unsigned values (`$0000`–`$FFFF`)                          |
 | Source encoding           | PETSCII (the C64's native character set)                          |
 
@@ -605,17 +680,17 @@ Here is a small but complete program that draws a coloured bar across the top ro
 ```
 ; ============================================================
 ; colourbar.asm
-; Fills the top row of screen RAM ($0400) with '@' (screen
-; code $00) and sets the colour of each cell to light blue.
+; Fills the top row of screen RAM ($0400) with spaces (screen
+; code $20) and sets the colour of each cell to light blue.
 ; ============================================================
 
         .org $0801          ; standard BASIC load address
 
-; BASIC stub: SYS 2062 (calls our code at $080E)
+; BASIC stub: SYS 2061 (calls our code at $080D)
         .word $080B         ; link to next BASIC line
         .word 2024          ; BASIC line number
         .byte $9E           ; BASIC token: SYS
-        .text "2062"        ; argument: address of 'main' in decimal
+        .text "2061"        ; argument: address of 'main' in decimal
         .byte $00           ; end of BASIC line
         .word $0000         ; end of BASIC program
 
@@ -636,7 +711,7 @@ main:
 ### What this does, line by line
 
 - `.org $0801` — tells the assembler the program loads at $0801, the standard start of BASIC RAM. The PRG file header will contain $01 $08.
-- The `.word` and `.byte`/`.text` directives lay down a 10-byte BASIC stub that makes BASIC automatically run the machine code via `SYS 2062` when you `RUN` the program.
+- The `.word` and `.byte`/`.text` directives lay down a 12-byte BASIC stub — one 10-byte BASIC line, `2024 SYS 2061`, plus the 2-byte end-of-program marker — that makes BASIC run the machine code when you `RUN` the program. `main` follows the stub at $0801 + 12 = $080D = 2061.
 - `LDX #39` — loads 39 into X. We'll use X as a countdown from 39 to 0, covering all 40 screen columns.
 - `LDA #$20` / `STA $0400,X` — puts a space character into screen RAM at column X of row 0.
 - `LDA #14` / `STA $D800,X` — sets the colour of that cell to light blue.

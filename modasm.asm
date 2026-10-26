@@ -657,6 +657,10 @@ parse_line:
     bcc :+
     jmp @err_val
     :
+    jsr at_eol                  ; nothing may follow but a comment
+    bcc :+
+    jmp @err_syntax
+    :
     jsr set_org
     jmp @done
 
@@ -689,6 +693,10 @@ parse_line:
     ; Parse operand → ASM_MODE, ASM_VAL_LO/HI
     jsr parse_operand           ; C=1 on error
     bcs @err_operand
+    ; The operand must end the statement: "LDA #1 2" or "LDA (P),Y Z"
+    ; is an error, not "LDA #1" / "LDA (P),Y" with the rest ignored.
+    jsr at_eol
+    bcs @err_trail
 
     ; Restore opcode table pointer after parse_operand may have clobbered TMP2
     lda ASM_OPC_PTR_LO
@@ -726,6 +734,7 @@ parse_line:
     inc ASM_PC_HI
     jmp @done
 
+@err_trail:
 @err_syntax:
     jsr set_err_syntax
     jmp @done
@@ -860,8 +869,8 @@ parse_mnemonic:
     iny
     cpy #3
     bne @loop
-    clc
-    rts
+    ; The mnemonic must end here: "STA1 $D020" is not "STA $01..."
+    jmp at_delim                ; C=1 if a 4th character follows
 @err:
     sec
     rts
@@ -1058,16 +1067,8 @@ find_opcode:
 
 parse_operand:
     ; Check for end of line ? IMP
-    jsr src_peek
-    bne :+
-    jmp @imp
-    :
-    cmp #$0D
-    bne :+
-    jmp @imp
-    :
-    cmp #';'
-    bne :+
+    jsr at_eol                  ; C=0 at CR / NUL / ';'
+    bcs :+
     jmp @imp
     :
 
@@ -1563,31 +1564,36 @@ parse_label_ref:
 parse_directive:
     jsr src_advance             ; consume '.'
 
-    ; Read directive name (up to 4 chars) into ASM_MNEM, normalized to uppercase
-    ldy #0
+    ; Read the directive name's letters (first 4 kept) into ASM_MNEM,
+    ; normalized to uppercase and zero-padded, so a short name can't
+    ; match on stale bytes of an earlier one.
+    ldy #3
+    lda #0
+@clr:
+    sta ASM_MNEM,y
+    dey
+    bpl @clr
+    iny                         ; Y = 0
 @rd:
     jsr src_peek
-    cmp #' '
-    beq @rd_done
-    cmp #$0D
-    beq @rd_done
-    ; Upcase
-    cmp #$61
-    bcc @rd_store
-    cmp #$7B
-    bcs @rd_store
-    sec
-    sbc #$20
-@rd_store:
+    jsr upcase_a
+    cmp #'A'
+    bcc @rd_done
+    cmp #'Z'+1
+    bcs @rd_done
     cpy #4
     bcs @rd_skip
     sta ASM_MNEM,y
 @rd_skip:
     jsr src_advance
     iny
-    jmp @rd
+    bne @rd                     ; (a 256-letter name just ends there)
 @rd_done:
-
+    ; The name must end at a space or the end of the statement.
+    jsr at_delim
+    bcc :+
+    jmp @err
+:
     jsr skip_spaces
 
     ; Compare against known directives
@@ -1602,6 +1608,10 @@ parse_directive:
     cmp #'G'
     bne @try_byte
     jsr parse_value
+    bcc :+
+    jmp @err
+    :
+    jsr at_eol                  ; nothing may follow but a comment
     bcc :+
     jmp @err
     :
@@ -1637,14 +1647,12 @@ parse_directive:
     bne @byte_next
     inc ASM_PC_HI
 @byte_next:
-    jsr src_peek
+    jsr skip_spaces
     cmp #','
-    bne @byte_done
+    bne @values_done
     jsr src_advance
     jsr skip_spaces
     jmp @byte_loop
-@byte_done:
-    rts
 
 @try_word:
     lda ASM_MNEM+0
@@ -1683,14 +1691,20 @@ parse_directive:
     bcc @word_next
     inc ASM_PC_HI
 @word_next:
-    jsr src_peek
+    jsr skip_spaces
     cmp #','
-    bne @word_done
+    bne @values_done
     jsr src_advance
     jsr skip_spaces
     jmp @word_loop
-@word_done:
-    rts
+
+; End of a .byte / .word value list (or of a .text string): the statement
+; must end here.  "1 2" is an error, not 1 with the "2" ignored.
+@values_done:
+    jsr at_eol
+    bcc :+
+    jmp @err
+:   rts
 
 @try_text:
     lda ASM_MNEM+0
@@ -1731,7 +1745,7 @@ parse_directive:
     jmp @text_loop
 @text_done:
     jsr src_advance             ; consume closing '"'
-    rts
+    jmp @values_done
 
 ; Local trampoline: .text section error targets can't reach the bottom @err
 @dir_err_near:
@@ -1779,6 +1793,10 @@ parse_directive:
     jsr src_advance             ; consume closing '"'
     cpx #0
     beq @inc_bad_syn            ; empty filename = syntax error
+    ; Only a comment may follow.  Checked before the file is opened:
+    ; once SRC_DEPTH moves, src_peek no longer reads this line.
+    jsr at_eol                  ; (preserves X = filename length)
+    bcs @inc_bad_syn
     ; Depth check: frame 0 is the editor buffer, so the stack holds at
     ; most SRC_MAX_DEPTH-1 file frames.  The new frame goes at index
     ; SRC_DEPTH+1, which must stay below SRC_MAX_DEPTH.
@@ -2352,6 +2370,15 @@ skip_spaces:
     jsr src_advance
     jmp @loop
 @done:
+    rts
+
+; at_delim  -  C=0 if the char at SRC_PTR ends a word (a space, or the
+; end of the statement as at_eol defines it), else C=1.  A = that char.
+at_delim:
+    jsr src_peek
+    cmp #' '
+    bne at_eol                  ; not a space: at_eol has none to skip
+    clc
     rts
 
 ; at_eol  -  skip spaces, then C=0 if the statement has ended (CR, NUL =

@@ -66,6 +66,13 @@ Every part is optional except that you need _something_ on a line for it to do a
 - **Operand** — what the instruction acts on (a number, address, or expression).
 - **Comment** — anything after a `;` is ignored.
 
+Nothing else may follow the statement: after the operand (or a directive's
+values) only spaces and an optional comment are allowed, and the mnemonic
+must be followed by a space, a comment or the end of the line. Leftover
+text such as `LDA #1 2` or `.byte 1 2` is a `SYNTAX ERROR`, and a typo like
+`STA1 $D020` is a `BAD MNEMONIC` — never silently assembled as something
+else.
+
 Both uppercase and lowercase letters are accepted everywhere. Labels and mnemonics are internally converted to uppercase, so `lda`, `LDA`, and `Lda` are all the same.
 
 **Examples of valid lines:**
@@ -336,9 +343,8 @@ Details worth knowing:
   and vice versa (forward references work as usual).
 - **Nesting** is allowed up to 7 levels deep; an 8th level stops assembly
   with `INCLUDE TOO DEEP`.
-- **Anything after the closing quote is ignored** — the rest of the line is
-  treated as a comment. Put code for the directive's line in the included
-  file instead.
+- **Only a comment may follow the closing quote** (`.include "x" ; why`);
+  anything else is a `SYNTAX ERROR`.
 - **Line numbers in error messages are per-file.** An error on the second
   line of an included file is reported as line 2, not as a position in the
   main source. (The editor's jump-to-error will still move within the main
@@ -609,10 +615,10 @@ When an error occurs, assembly stops at the first error found. The status bar sh
 
 | Message            | Meaning                                                                                                                          |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| `SYNTAX ERROR`     | The line couldn't be parsed — check for typos, missing colons, or bad `*=` syntax.                                               |
+| `SYNTAX ERROR`     | The line couldn't be parsed — check for typos, missing colons, bad `*=` syntax, or leftover text after a statement.              |
 | `VALUE ERROR`      | A number or expression couldn't be evaluated — invalid hex digits, empty expression, etc.                                        |
 | `SYMBOL ERROR`     | A label was defined more than once, or the symbol table is full (see [Limits](#12-limits-and-constraints)).                      |
-| `BAD MNEMONIC`     | The 3-letter instruction name couldn't be read — check your spelling and spacing.                                                |
+| `BAD MNEMONIC`     | The 3-letter instruction name couldn't be read — check your spelling and spacing (`STA1` is not `STA`).                          |
 | `UNKNWN OP`        | The mnemonic is not a known 6502 instruction.                                                                                    |
 | `BAD OPERAND`      | The operand syntax is wrong — mismatched parentheses, missing `X`/`Y`, etc.                                                      |
 | `BAD ADDR MODE`    | The instruction doesn't support the addressing mode you used, or a branch target is out of range.                                |

@@ -619,6 +619,42 @@ def main():
     expect_error(m, "BAD OPERAND", "unclosed parenthesis", line=2)
     print("ok: < and > apply to a whole offset expression")
 
+    # 20. Leftover text after an operand, a directive's values or a
+    #     mnemonic is an error, not silently dropped; comments still work
+    #     right after a statement, with or without a space.
+    src = (
+        "        *= $C000\n"
+        "        RTS;done\n"
+        "        LDA #1;c\n"
+        "        .byte 1 , 2 ; c\n"
+        '        .text "A,B" ; c\n'
+        "        .word $1234;c\n"
+        "        ASL A ; c\n"
+        "        LDA ($10),Y  ; c\n"
+    )
+    expect_output(
+        assemble(src),
+        bytes.fromhex("00c0 60 a901 0102 412c42 3412 0a b110"),
+        "statements followed by comments",
+    )
+    bad = [
+        ("        LDA #1 2", "SYNTAX ERROR"),
+        ("        LDA ($10),Y X", "SYNTAX ERROR"),
+        ("        STA1 $D020", "BAD MNEMONIC"),
+        ("        .byte 1 2", "SYNTAX ERROR"),
+        ("        .word 1 X", "SYNTAX ERROR"),
+        ('        .text "HI" X', "SYNTAX ERROR"),
+        ("        .org $C000 X", "SYNTAX ERROR"),
+        ("        *= $C000 X", "SYNTAX ERROR"),
+        ("        .byte1", "SYNTAX ERROR"),
+        ('        .include "TW" X', "SYNTAX ERROR"),
+    ]
+    files = {"TW": petscii("        NOP\n")}
+    for line, msg in bad:
+        m = assemble("        *= $C000\n" + line + "\n        RTS\n", files)
+        expect_error(m, msg, f"trailing text: {line.strip()!r}", line=2)
+    print("ok: trailing text after a statement is an error")
+
     print("\nall include tests passed")
 
 

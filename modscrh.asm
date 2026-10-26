@@ -139,7 +139,7 @@ VEC_IGONE   = $0308
 
 ; ZP scratch — address comes from zp.inc (see docs/c128-port-notes.md).
 ; NOTE: the BASIC ABI locations this module also uses (TXTTAB, VARTAB,
-; VARPNT, BASIC_TXTPTR, and AYINT's $14/$15 output) are fixed by the ROM and
+; VARPNT, BASIC_TXTPTR, and GETADR's $14/$15 LINNUM output) are fixed by the ROM and
 ; are deliberately NOT part of the relocatable pool.
 ;
 ; This module runs INSIDE the BASIC interpreter loop, so it is only valid on
@@ -549,17 +549,21 @@ hnd_scratch:
     jmp BASIC_NEWSTT
 
 ; ---- ONERR line — set error-handler line number (16-bit) ----
-; FRMNUM ($AD9E) evaluates the numeric expression into FAC1.
-; AYINT ($B1AA) converts FAC1 to a signed 16-bit integer stored
-; big-endian in $14 (hi) and $15 (lo). Range: 0-32767.
-BASIC_FRMNUM    = $AD9E     ; evaluate numeric expression → FAC1
-BASIC_AYINT     = $B1AA     ; convert FAC1 → 16-bit int: $14=hi, $15=lo
+; FRMNUM ($AD8A) evaluates an expression into FAC1 and type-checks it
+; (JSR FRMEVL $AD9E, then CHKNUM: a string raises ?TYPE MISMATCH).
+; GETADR ($B7F7) converts FAC1 to an unsigned 16-bit integer and stores it
+; in LINNUM: $14 = lo, $15 = hi (STY $14 / STA $15 at $B808). Range
+; 0-65535; negative or larger raises ?ILLEGAL QUANTITY. (The old code
+; used FRMEVL + AYINT $B1AA, which returns the value in A/Y and never
+; writes $14/$15 — it stored whatever stale line number LINNUM held.)
+BASIC_FRMNUM    = $AD8A     ; evaluate numeric expression → FAC1 (checked)
+BASIC_GETADR    = $B7F7     ; FAC1 → unsigned 16-bit: $14=lo, $15=hi
 hnd_onerr:
     jsr BASIC_FRMNUM        ; evaluate argument into FAC1
-    jsr BASIC_AYINT         ; convert to integer: $14=hi, $15=lo
-    lda $15
-    sta hnd_onerr_lo
+    jsr BASIC_GETADR        ; convert to integer: $14=lo, $15=hi
     lda $14
+    sta hnd_onerr_lo
+    lda $15
     sta hnd_onerr_hi
     jmp BASIC_NEWSTT
 

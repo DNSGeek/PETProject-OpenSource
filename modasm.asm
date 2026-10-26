@@ -1258,109 +1258,113 @@ parse_operand:
 ; TMP via parse_value; instruction operands consume ASM_VAL.  The two must
 ; never diverge, or ".byte >label" and ".word label+2" silently emit the
 ; wrong bytes while instructions look fine.
-; Supports: $hex, decimal, label, <expr, >expr, expr+N, expr-N
-; C=1 on error.
+; Supports: $hex, decimal, label, each optionally followed by +N / -N
+; offsets (spaces around the operator allowed), and <sum, >sum, <(sum),
+; >(sum) for the lo / hi byte of the whole sum.  C=1 on error.
 ; ============================================================================
 
 parse_expr:
-    lda #0
-    sta TMP
-    sta TMP+1
-
     jsr src_peek
 
-    ; '<' ? lo byte of following expression
+    ; '<' / '>': lo / hi byte of the WHOLE following sum, "<table+10"
+    ; meaning <(table+10).  Parentheses are allowed: "<(table+10)".
     cmp #'<'
-    bne @not_lo
-    jsr src_advance
-    jsr parse_expr_base
-    bcc :+
-    jmp @err
-    :
-    lda TMP                     ; lo byte only
-    sta ASM_VAL_LO
-    lda #0
-    sta ASM_VAL_HI
-    sta TMP+1                   ; TMP = result too (see contract above)
-    clc
-    rts
-
-@not_lo:
-    ; '>' ? hi byte of following expression
+    beq @lohi
     cmp #'>'
-    bne @not_hi
+    bne @plain
+@lohi:
+    pha                         ; remember which operator
     jsr src_advance
-    jsr parse_expr_base
-    bcs @err
-    lda TMP+1                   ; hi byte ? becomes lo byte of result
-    sta ASM_VAL_LO
-    sta TMP                     ; TMP = result too (see contract above)
-    lda #0
-    sta ASM_VAL_HI
-    sta TMP+1
-    clc
-    rts
-
-@not_hi:
-    jsr parse_expr_base
-    bcs @err
-    ; Check for +/- offset
     jsr src_peek
-    cmp #'+'
-    beq @add
-    cmp #'-'
-    beq @sub
-    lda TMP
-    sta ASM_VAL_LO
-    lda TMP+1
-    sta ASM_VAL_HI
-    clc
-    rts
-
-@add:
-    jsr src_advance
-    ; Save base value.  parse_number/parse_decimal must NOT touch TMP2 —
-    ; parse_decimal uses ASM_MUL for its ×10 scratch for exactly this reason.
-    lda TMP
-    sta TMP2
-    lda TMP+1
-    sta TMP2+1
-    jsr parse_number            ; parse literal offset into TMP/TMP+1
-    bcs @err
-    lda TMP2
-    clc
-    adc TMP
-    sta ASM_VAL_LO
-    sta TMP                     ; TMP = result too (see contract above)
-    lda TMP2+1
-    adc TMP+1
-    sta ASM_VAL_HI
+    cmp #'('
+    bne @bare
+    jsr src_advance             ; consume '('
+    jsr skip_spaces
+    jsr parse_sum               ; (skips spaces after the sum)
+    bcs @err_pla
+    cmp #')'                    ; A = next char, from parse_sum
+    bne @err_pla
+    jsr src_advance             ; consume ')'
+    jmp @apply
+@bare:
+    jsr parse_sum
+    bcs @err_pla
+@apply:
+    pla
+    cmp #'<'
+    beq @lo
+    lda TMP+1                   ; '>': hi byte becomes the result
+    sta TMP
+@lo:
+    lda #0
     sta TMP+1
-    clc
-    rts
+    beq @store                  ; (always)
 
-@sub:
-    jsr src_advance
-    lda TMP
-    sta TMP2
-    lda TMP+1
-    sta TMP2+1
-    jsr parse_number
+@plain:
+    jsr parse_sum
     bcs @err
-    lda TMP2
-    sec
-    sbc TMP
+@store:
+    lda TMP                     ; ASM_VAL = TMP (see contract above)
     sta ASM_VAL_LO
-    sta TMP                     ; TMP = result too (see contract above)
-    lda TMP2+1
-    sbc TMP+1
+    lda TMP+1
     sta ASM_VAL_HI
-    sta TMP+1
     clc
     rts
 
+@err_pla:
+    pla
 @err:
     sec
+    rts
+
+; parse_sum: base { [spaces] +|- [spaces] number } [spaces] -> TMP/TMP+1.
+; Offsets are numeric literals; any number of them may follow the base.
+; Returns with the spaces after the sum skipped and A = the next char.
+; C=1 on error.
+parse_sum:
+    jsr parse_expr_base
+    bcs @done
+@loop:
+    jsr skip_spaces             ; A = next char
+    cmp #'+'
+    beq @op
+    cmp #'-'
+    bne @ok
+@op:
+    pha                         ; remember the operator
+    jsr src_advance
+    jsr skip_spaces
+    ; Save the running value.  parse_number/parse_decimal must NOT touch
+    ; TMP2 — parse_decimal uses ASM_MUL for its x10 scratch for exactly
+    ; this reason.
+    lda TMP
+    sta TMP2
+    lda TMP+1
+    sta TMP2+1
+    jsr parse_number            ; literal offset -> TMP/TMP+1
+    pla                         ; (PLA leaves C alone)
+    bcs @done
+    cmp #'-'
+    beq @sub                    ; C=1 from the equal compare
+    clc
+    lda TMP2
+    adc TMP
+    sta TMP
+    lda TMP2+1
+    adc TMP+1
+    sta TMP+1
+    jmp @loop
+@sub:
+    lda TMP2
+    sbc TMP
+    sta TMP
+    lda TMP2+1
+    sbc TMP+1
+    sta TMP+1
+    jmp @loop
+@ok:
+    clc
+@done:
     rts
 
 ; parse_expr_base: $hex, decimal, or label ? TMP/TMP+1

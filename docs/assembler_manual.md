@@ -206,13 +206,14 @@ Use a label name directly as a value. Its address is substituted automatically.
 
 ### Offset Arithmetic
 
-Add or subtract a **literal number** from a label's address (or another value). The offset must be a plain number, not another label.
+Add or subtract a **literal number** from a label's address (or another value). The offset must be a plain number, not another label. Several offsets may follow each other, and spaces around `+` and `-` are allowed.
 
 ```
 table:  .byte 1, 2, 3, 4, 5
 
         LDA table+2     ; loads the byte at table's address + 2 (value = 3)
-        LDA table+4     ; loads the byte at table's address + 4 (value = 5)
+        LDA table + 4   ; loads the byte at table's address + 4 (value = 5)
+        LDA table+4-1   ; same as table+3
 ```
 
 ### Lo and Hi Byte Extraction
@@ -226,11 +227,18 @@ When a 16-bit address needs to be split into its two component bytes (common whe
         STA $FC
 ```
 
-These can be combined with offsets:
+`<` and `>` apply to the **whole** expression after them, offsets
+included, so `<table+10` means "the lo byte of `table+10`". Parentheses
+make that explicit and are also accepted:
 
 ```
         LDA #<(table+10)    ; lo byte of table+10
+        LDA #<table+10      ; the same thing
+        LDA #>(table+$F0)   ; hi byte of table+$F0 (carries into the hi byte)
 ```
+
+Parentheses are only allowed directly after `<` or `>`; elsewhere `(`
+starts an indirect addressing mode (see [Addressing Modes](#9-addressing-modes)).
 
 ---
 
@@ -627,8 +635,8 @@ When an error occurs, assembly stops at the first error found. The status bar sh
 | Line length in includes   | 80 characters                                                     |
 | Branch range              | ±127 bytes from the instruction after the branch                  |
 | String content in `.text` | No escape sequences; no embedded double quotes                    |
-| Expression arithmetic     | Addition and subtraction of a single numeric offset only          |
-| Expression nesting        | `<` and `>` apply to a single base expression; no complex nesting |
+| Expression arithmetic     | A value plus/minus numeric offsets only (no label as an offset)   |
+| Expression nesting        | `<` / `>` apply to the whole expression; one `( )` level after them |
 | Integer size              | 16-bit unsigned values (`$0000`–`$FFFF`)                          |
 | Source encoding           | PETSCII (the C64's native character set)                          |
 

@@ -596,6 +596,29 @@ def main():
     expect_error(m, "SYMBOL ERROR", "duplicate @local in one scope", line=4)
     print("ok: @local labels scoped to the preceding global label")
 
+    # 19. '<' / '>' take the lo / hi byte of the whole sum after them, with
+    #     or without parentheses; offsets may be chained and spaced.
+    src = (
+        "        *= $C000\n"
+        "        LDA #<(TABLE+10)\n"
+        "        LDX #>(TABLE+$F5)\n"
+        "        LDY #<MSG+1\n"  # <(MSG+1), not (<MSG)+1
+        "        LDA #>TABLE+$F0\n"  # >(TABLE+$F0) carries into the hi byte
+        "        .byte <TABLE-1, >( TABLE + 2 )\n"
+        "        LDA TABLE + 2\n"
+        "        LDA TABLE+1+1\n"
+        "TABLE:  .byte 0\n"
+        "MSG:    .byte 1\n"
+    )
+    expect_output(
+        assemble(src),
+        bytes.fromhex("00c0 a91a a2c1 a012 a9c1 0fc0 ad12c0 ad12c0 00 01"),
+        "lo/hi of expressions",
+    )
+    m = assemble("        *= $C000\n        LDA #<(MSG+1\nMSG:    RTS\n")
+    expect_error(m, "BAD OPERAND", "unclosed parenthesis", line=2)
+    print("ok: < and > apply to a whole offset expression")
+
     print("\nall include tests passed")
 
 

@@ -680,17 +680,17 @@ Here is a small but complete program that draws a coloured bar across the top ro
 ```
 ; ============================================================
 ; colourbar.asm
-; Fills the top row of screen RAM ($0400) with '@' (screen
-; code $00) and sets the colour of each cell to light blue.
+; Fills the top row of screen RAM ($0400) with spaces (screen
+; code $20) and sets the colour of each cell to light blue.
 ; ============================================================
 
         .org $0801          ; standard BASIC load address
 
-; BASIC stub: SYS 2062 (calls our code at $080E)
+; BASIC stub: SYS 2061 (calls our code at $080D)
         .word $080B         ; link to next BASIC line
         .word 2024          ; BASIC line number
         .byte $9E           ; BASIC token: SYS
-        .text "2062"        ; argument: address of 'main' in decimal
+        .text "2061"        ; argument: address of 'main' in decimal
         .byte $00           ; end of BASIC line
         .word $0000         ; end of BASIC program
 
@@ -711,7 +711,7 @@ main:
 ### What this does, line by line
 
 - `.org $0801` — tells the assembler the program loads at $0801, the standard start of BASIC RAM. The PRG file header will contain $01 $08.
-- The `.word` and `.byte`/`.text` directives lay down a 10-byte BASIC stub that makes BASIC automatically run the machine code via `SYS 2062` when you `RUN` the program.
+- The `.word` and `.byte`/`.text` directives lay down a 12-byte BASIC stub — one 10-byte BASIC line, `2024 SYS 2061`, plus the 2-byte end-of-program marker — that makes BASIC run the machine code when you `RUN` the program. `main` follows the stub at $0801 + 12 = $080D = 2061.
 - `LDX #39` — loads 39 into X. We'll use X as a countdown from 39 to 0, covering all 40 screen columns.
 - `LDA #$20` / `STA $0400,X` — puts a space character into screen RAM at column X of row 0.
 - `LDA #14` / `STA $D800,X` — sets the colour of that cell to light blue.

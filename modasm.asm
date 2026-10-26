@@ -7,11 +7,14 @@
 ; Entry: JSR $A000 (first 3 bytes = JMP assemble)
 ;
 ; Input:  Plain text in editor gap buffer (via MOD_BUF/GAP params).
-;         Source lines: [label:] MNEMONIC [operand] [;comment] CR
+;         Source lines: [label:] MNEMONIC|directive [operand] [;comment] CR
+;                       (anything else left on the line is a SYNTAX ERROR)
 ;         Labels: up to 8 chars, alphanumeric + underscore, end with ':'
-;         Mnemonics: uppercase, all official 6502
+;                 @name = local to the preceding global label (see read_name)
+;         Mnemonics: upper/lowercase, all official 6502
 ;         Operands: #val  val  val,X  val,Y  (val)  (val,X)  (val),Y  A
-;         Values: $xx/$xxxx hex, decimal, label, label+N, label-N, <expr, >expr
+;         Values: $xx/$xxxx hex, decimal, label, each +N / -N any number of
+;                 times; <expr, >expr, <(expr), >(expr) = lo/hi of the whole
 ;         Directives: .org / *= addr    .byte val[,val...]    .word val[,val...]
 ;                     .text "string"    .include "filename"
 ;

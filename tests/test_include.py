@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""End-to-end tests for MODASM's .include directive.
+"""End-to-end tests for MODASM: the .include directive, plus parser and
+output regressions (labels, @locals, expressions, .org gaps, the manual's
+complete example).
 
 Runs the real assembled module (build/modasm.prg) on an emulated 6502
 (py65), with the Kernal channel-I/O entry points stubbed by a fake IEC
@@ -696,6 +698,22 @@ def main():
     expected = bytes.fromhex("8000 a590") + bytes(14) + b"\x07"
     expect_output(assemble(src), expected, "divergence absorbed by .org")
     print("ok: phase errors caught per label")
+
+    # 23. The manual's complete example (section 13) assembles, taken
+    #     verbatim from docs/assembler_manual.md, to the expected bytes:
+    #     BASIC stub "2024 SYS 2061", then main at $080D.
+    manual = (REPO / "docs" / "assembler_manual.md").read_text(encoding="utf-8")
+    example = manual.split("## 13. A Complete Example", 1)[1]
+    example = example.split("```\n", 2)[1]
+    expected = bytes.fromhex(
+        "0108"  # load address $0801
+        "0b08 e807 9e 32303631 00 0000"  # BASIC stub
+        "a227"  # main: ldx #39
+        "a920 9d0004 a90e 9d00d8 ca 10f3"  # @loop ... bpl @loop
+        "60"  # rts
+    )
+    expect_output(assemble(example), expected, "manual section 13 example")
+    print("ok: the manual's complete example")
 
     print("\nall include tests passed")
 

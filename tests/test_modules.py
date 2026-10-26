@@ -250,6 +250,26 @@ def test_every_keyword():
     print("ok: every keyword tokenizes to its token and back")
 
 
+def test_extended_keywords_only_as_statements():
+    def ext(out):
+        return [b for b in body(out) if 0xCC <= b <= 0xD8]
+
+    # as variables, PETProject's keywords stay letters a stock C64 can run
+    st, out, _ = run_module("modtok", b"10 DRIVE=8:PRINT STATUS:A=COPY+1\r")
+    check(st == 0x02 and ext(out) == [], "extended keywords as variables stay text")
+    # as statements (line start, after ':' and THEN) they still tokenize
+    st, out, _ = run_module("modtok", b'10 DRIVE 9: STATUS:RUNPROG"X"\r')
+    check(
+        st == 0x02 and ext(out) == [0xD4, 0xD3, 0xCE],
+        "extended keywords as statements tokenize",
+    )
+    st, out, _ = run_module("modtok", b'10 IF X THEN DELETE"A":PRINT":DRIVE"\r')
+    check(
+        st == 0x02 and ext(out) == [0xD0] and body(out)[4:7] == b"\xa7 \xd0",
+        "after THEN, not after a ':' inside a string",
+    )
+
+
 def test_shifted_abbreviations():
     # A shifted letter ends an abbreviation; the first entry in the
     # longest-first table that it fits wins (G<shift-O> is GOSUB, not GOTO).
@@ -401,6 +421,7 @@ def main():
     test_tokenize_round_trip()
     test_tokenize_overflow_restores_text()
     test_every_keyword()
+    test_extended_keywords_only_as_statements()
     test_shifted_abbreviations()
     test_tokenize_page_boundaries()
     test_renumber()

@@ -582,7 +582,17 @@ run_selected_module:
     jsr do_run_script
     rts
 @normal:
-    ldx MOD_SEL_ROW
+    ; MODDIS reads the binary from work_buf up to GAP_START, so with the
+    ; cursor mid-buffer everything after it was left out (and then lost,
+    ; since the disassembly replaces the buffer). Close the gap first.
+    lda MOD_SEL_ROW
+    cmp #1                      ; DISASSEMBLE
+    bne :+
+    jsr compact_gap             ; TXT_PTR = end of the now-linear content
+    ldx TXT_PTR
+    lda TXT_PTR+1
+    jsr gap_at_xa
+:   ldx MOD_SEL_ROW
     jsr run_module_by_index
 
     ; run_module_by_index has ALREADY handled the gap/viewport for $02 (buffer

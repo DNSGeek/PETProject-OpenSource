@@ -6,7 +6,8 @@
 ; Survives the IDE stash (which covers only $0801-$9FFF).
 ;
 ; Layout at $C000:
-;   $C000 execute stub (7 bytes) ← module loader calls here; just marks $00 and returns
+;   $C000 execute stub (7 bytes) ← module loader calls here; records the
+;                                   home drive, marks $00 and returns
 ;   $C007 JMP hnd_dispatch    ← $0308 (IGONE) points here
 ;   $C00A JMP hnd_end_script  ← $0302 (IMAIN) points here
 ;   $C00D JMP hnd_error       ← $0300 (IERROR) points here
@@ -172,6 +173,8 @@ MOD_GAP_END_HI   = $0219
 MOD_BUF_END_LO   = $021A
 MOD_BUF_END_HI   = $021B
 MOD_DRIVE        = $021C
+MOD_PROG_DRIVE   = $022B   ; drive the editor booted from (module home);
+                           ; set by the editor on every module run
 
 ; ============================================================================
 
@@ -187,13 +190,13 @@ MOD_DRIVE        = $021C
 
 ; ============================================================================
 ; EXECUTE STUB — $C000, called by module loader. 7 bytes.
-; Marks success so MODSCRH stays resident; does not run handler logic.
+; Marks success so MODSCRH stays resident; does not run handler logic
+; beyond hnd_install (below).
 ; ============================================================================
 
-    cli                          ; re-enable interrupts
-    lda #$00
-    sta MOD_STATUS               ; $00 = success
-    rts
+    jmp hnd_install
+    .res 4, $EA                  ; pad: the fixed entries start at $C007
+    .assert * = __MAIN_START__ + 7, lderror, "modscrh: execute stub must be 7 bytes"
 
 ; ============================================================================
 ; FIXED ENTRY POINTS — $C007 (matches modscr.asm HND_* consts)
@@ -214,6 +217,7 @@ hnd_orig_ierror: .word 0      ; $C015: original $0300 (IERROR)
 
 ; ---- Handler working state ----
 hnd_cur_drive:   .byte 8      ; current drive for disk operations
+hnd_home_drive:  .byte 8      ; drive MODASM is loaded from (module home)
 hnd_onerr_lo:    .byte 0      ; ONERR target line number lo ($00 = no handler)
 hnd_onerr_hi:    .byte 0
 hnd_jmp_lo:      .byte 0      ; dispatch target lo (ZP-style temp)
@@ -225,6 +229,29 @@ hnd_cmd_buf:     .res 64      ; command channel string buffer
 hnd_status_buf:  .res 40      ; drive status string
 hnd_arg1_len:    .byte 0      ; length of first string arg (RENAME/COPY/ASSEMBLE)
 hnd_retry:       .byte 0      ; source-open retry flag (bare name -> ",S,R")
+
+; ============================================================================
+; hnd_install — the execute stub's body, run by the module loader while the
+; editor still owns the machine. The editor puts the drive it booted from
+; (where the modules live) in MOD_PROG_DRIVE; page 2 is overwritten once
+; BASIC runs the script, so copy it now for ASSEMBLE's MODASM load.
+; Anything outside 8-30 falls back to drive 8.
+; ============================================================================
+
+hnd_install:
+    cli                          ; re-enable interrupts
+    lda MOD_PROG_DRIVE
+    cmp #8
+    bcc @dflt
+    cmp #31
+    bcc @set
+@dflt:
+    lda #8
+@set:
+    sta hnd_home_drive
+    lda #$00
+    sta MOD_STATUS               ; $00 = success
+    rts
 
 ; ============================================================================
 ; hnd_dispatch — IGONE handler.
@@ -977,7 +1004,8 @@ hnd_print_u16:
 ;   3. Load the source file from the current drive to $0801 (bare name
 ;      first — editor-saved sources are PRG-typed raw text — then retry
 ;      with ",S,R" for genuine SEQ files). Append a final CR if missing.
-;   4. Load MODASM from device 8 to $A000 (writes land in RAM under ROM).
+;   4. Load MODASM from the module home drive (hnd_home_drive, recorded
+;      by hnd_install) to $A000 (writes land in RAM under ROM).
 ;   5. Copy a trampoline to the cassette buffer and jump to it. It banks
 ;      to $36, calls MODASM, captures the error info from $C007-$C009,
 ;      FETCHes both REU stashes back, banks to $37, and jumps to
@@ -1064,9 +1092,9 @@ hnd_assemble:
     lda #$FF
     sta MOD_STATUS
 
-    ; ---- Load MODASM from device 8 (module home) to $A000 ----
+    ; ---- Load MODASM from the module home drive to $A000 ----
     lda #2
-    ldx #8
+    ldx hnd_home_drive
     ldy #1                      ; SA=1: honor PRG header load address ($A000)
     jsr KERNAL_SETLFS
     lda #6

@@ -256,15 +256,15 @@ How it works (and why it's safe): MODASM needs `$C000`–`$CFFF` for its symbol
 table and `$0801`–`$9FFF` for the source text — both regions a running script
 depends on. `ASSEMBLE` therefore stashes the script-runner handler to REU
 `$013000` and the entire script RAM to REU `$014000`, loads the source into
-the vacated space, loads MODASM (from **device 8**, where the PETProject
-modules live) to `$A000`, and runs it via a small trampoline in the cassette
+the vacated space, loads MODASM (from the drive the IDE booted from,
+where the PETProject modules live) to `$A000`, and runs it via a small trampoline in the cassette
 buffer. When the assembler finishes, both regions are restored byte-identically
 from the REU and the script resumes at the next statement.
 
 Notes and caveats:
 
 - **The source file is read from the current `DRIVE`**; MODASM itself always
-  loads from device 8. The **output PRG is written to the current `DRIVE`**.
+  loads from the drive the IDE booted from (device 8 if that is unknown). The **output PRG is written to the current `DRIVE`**.
 - Source files saved by the PETProject editor (PRG-typed raw text) and genuine
   SEQ files both work — the loader retries with `,S,R` automatically.
 - **The output file must not already exist.** MODASM writes with a bare name,

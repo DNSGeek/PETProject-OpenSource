@@ -635,41 +635,41 @@ All branches use REL mode. Write a label as the target.
 
 When an error occurs, assembly stops at the first error found. The status bar shows a red message and the line number. Fix the problem and reassemble.
 
-| Message            | Meaning                                                                                                                          |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| `SYNTAX ERROR`     | The line couldn't be parsed — check for typos, missing colons, bad `*=` syntax, or leftover text after a statement.              |
-| `VALUE ERROR`      | A number or expression couldn't be evaluated — invalid hex digits, empty expression, etc.                                        |
-| `SYMBOL ERROR`     | A label was defined more than once, or the symbol table is full (see [Limits](#12-limits-and-constraints)).                      |
-| `BAD MNEMONIC`     | The 3-letter instruction name couldn't be read — check your spelling and spacing (`STA1` is not `STA`).                          |
-| `UNKNWN OP`        | The mnemonic is not a known 6502 instruction.                                                                                    |
-| `BAD OPERAND`      | The operand syntax is wrong — mismatched parentheses, missing `X`/`Y`, etc.                                                      |
-| `BAD ADDR MODE`    | The instruction doesn't support the addressing mode you used.                                                                    |
-| `BRANCH RANGE`     | A branch target is more than −128/+127 bytes away (see [Relative](#relative-branch-instructions)).                              |
-| `ORG BACKWARDS`    | A `.org` / `*=` after emitted code or data moves to a lower address than the current one (see [`.org`](#org--set-the-program-counter)). |
+| Message            | Meaning                                                                                                                                                                                         |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SYNTAX ERROR`     | The line couldn't be parsed — check for typos, missing colons, bad `*=` syntax, or leftover text after a statement.                                                                             |
+| `VALUE ERROR`      | A number or expression couldn't be evaluated — invalid hex digits, empty expression, etc.                                                                                                       |
+| `SYMBOL ERROR`     | A label was defined more than once, or the symbol table is full (see [Limits](#12-limits-and-constraints)).                                                                                     |
+| `BAD MNEMONIC`     | The 3-letter instruction name couldn't be read — check your spelling and spacing (`STA1` is not `STA`).                                                                                         |
+| `UNKNWN OP`        | The mnemonic is not a known 6502 instruction.                                                                                                                                                   |
+| `BAD OPERAND`      | The operand syntax is wrong — mismatched parentheses, missing `X`/`Y`, etc.                                                                                                                     |
+| `BAD ADDR MODE`    | The instruction doesn't support the addressing mode you used.                                                                                                                                   |
+| `BRANCH RANGE`     | A branch target is more than −128/+127 bytes away (see [Relative](#relative-branch-instructions)).                                                                                              |
+| `ORG BACKWARDS`    | A `.org` / `*=` after emitted code or data moves to a lower address than the current one (see [`.org`](#org--set-the-program-counter)).                                                         |
 | `PHASE ERROR`      | The two passes disagreed about an instruction's size, so labels would point to the wrong place — typically a forward reference to a zero-page label. Define zero-page labels before using them. |
-| `I/O ERROR`        | A disk problem — the output file couldn't be written (disk full, write-protected), or an included file is missing or unreadable. |
-| `INCLUDE TOO DEEP` | `.include` files are nested more than 7 levels deep.                                                                             |
-| `LINE TOO LONG`    | A line in an included file is longer than 80 characters.                                                                         |
+| `I/O ERROR`        | A disk problem — the output file couldn't be written (disk full, write-protected), or an included file is missing or unreadable.                                                                |
+| `INCLUDE TOO DEEP` | `.include` files are nested more than 7 levels deep.                                                                                                                                            |
+| `LINE TOO LONG`    | A line in an included file is longer than 80 characters.                                                                                                                                        |
 
 ---
 
 ## 12. Limits and Constraints
 
-| Item                      | Limit                                                             |
-| ------------------------- | ----------------------------------------------------------------- |
-| Label name length         | 8 characters (extra characters are silently ignored)              |
-| Local label name length   | `@` plus 5 characters (extra characters are silently ignored)     |
-| Total labels              | 400 (global and local together)                                   |
-| Output filename length    | 16 characters                                                     |
-| `.include` filename       | 16 characters (including any DOS type suffix)                     |
-| `.include` nesting depth  | 7 levels                                                          |
-| Line length in includes   | 80 characters                                                     |
-| Branch range              | ±127 bytes from the instruction after the branch                  |
-| String content in `.text` | No escape sequences; no embedded double quotes                    |
-| Expression arithmetic     | A value plus/minus numeric offsets only (no label as an offset)   |
+| Item                      | Limit                                                               |
+| ------------------------- | ------------------------------------------------------------------- |
+| Label name length         | 8 characters (extra characters are silently ignored)                |
+| Local label name length   | `@` plus 5 characters (extra characters are silently ignored)       |
+| Total labels              | 400 (global and local together)                                     |
+| Output filename length    | 16 characters                                                       |
+| `.include` filename       | 16 characters (including any DOS type suffix)                       |
+| `.include` nesting depth  | 7 levels                                                            |
+| Line length in includes   | 80 characters                                                       |
+| Branch range              | ±127 bytes from the instruction after the branch                    |
+| String content in `.text` | No escape sequences; no embedded double quotes                      |
+| Expression arithmetic     | A value plus/minus numeric offsets only (no label as an offset)     |
 | Expression nesting        | `<` / `>` apply to the whole expression; one `( )` level after them |
-| Integer size              | 16-bit unsigned values (`$0000`–`$FFFF`)                          |
-| Source encoding           | PETSCII (the C64's native character set)                          |
+| Integer size              | 16-bit unsigned values (`$0000`–`$FFFF`)                            |
+| Source encoding           | PETSCII (the C64's native character set)                            |
 
 ---
 

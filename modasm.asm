@@ -277,6 +277,13 @@ SYM_T0          = $BF34   ; sym_entry_addr scratch (2 bytes)
 .assert SYM_HASH + SYM_MAX <= SRC_DEPTH, error, "modasm: SYM_HASH overruns SRC_DEPTH"
 .assert LINE_BUF_END < SYM_HCUR && SYM_T0 + 2 <= LINE_BUF, error, "modasm: symbol scratch overlaps the include state"
 
+; ---- Per-line label state (the packed ASM_STATE block is full) ----
+; ASM_LBL_FLAG is cleared at the start of every line.  Pass 1 sets it to
+; $FF when the line defined a label, so that an origin directive on the
+; same line ("start: *= $C000") moves the label to the new PC.
+ASM_LBL_FLAG    = $BF36
+.assert ASM_LBL_FLAG + 1 <= LINE_BUF, error, "modasm: line state overlaps LINE_BUF"
+
 
 ; ============================================================================
 ; Module entry point
@@ -586,22 +593,37 @@ run_pass:
 ; ============================================================================
 
 parse_line:
-    ; Skip leading spaces/tabs
-    jsr skip_spaces
+    lda #0
+    sta ASM_LBL_FLAG            ; no label on this line (yet)
 
-    ; Peek at first char
-    jsr src_peek                ; A = current char (or 0 at end)
-    bne :+
+    ; Skip leading spaces; blank and comment-only lines are done
+    jsr at_eol
+    bcs :+
     jmp @done
-    :
-    cmp #$0D
-    bne :+
+:
+    ; A label, if any, comes first.  The statement after it (directive,
+    ; "*=", mnemonic) goes through the same dispatch as an unlabelled one.
+    jsr check_for_label         ; C=1 if label found, label in ASM_LABEL
+    bcc @stmt
+
+    ; Process label
+    lda ASM_PASS
+    bne @skip_label_def         ; pass 2: ignore label definitions
+    ; Pass 1: add label to symbol table with current PC
+    jsr sym_define
+    bcc :+
+    jmp @err_sym                ; symbol table full or duplicate
+:   lda #$FF
+    sta ASM_LBL_FLAG            ; an origin on this line re-points it
+@skip_label_def:
+
+    ; Label-only line?
+    jsr at_eol
+    bcs @stmt
     jmp @done
-    :
-    cmp #';'
-    bne :+
-    jmp @done
-    :
+
+@stmt:
+    jsr src_peek                ; A = first char of the statement
 
     ; Check for '*=' (origin set)
     cmp #'*'
@@ -618,55 +640,15 @@ parse_line:
     bcc :+
     jmp @err_val
     :
-    lda TMP
-    sta ASM_PC_LO
-    lda TMP+1
-    sta ASM_PC_HI
-    ; FIX (load address): capture load address from first *= seen
-    lda ASM_ORG_SET
-    bne :+
-    lda TMP
-    sta ASM_LOAD_LO
-    lda TMP+1
-    sta ASM_LOAD_HI
-:
-    lda #$FF
-    sta ASM_ORG_SET
+    jsr set_org
     jmp @done
 
 @not_star:
     ; Check for directive ('.')
     cmp #'.'
-    bne @not_directive
+    bne @no_label
     jsr parse_directive
     jmp @done
-
-@not_directive:
-    ; Check if this is a label (contains ':' before space/end)
-    jsr check_for_label         ; C=1 if label found, label in ASM_LABEL
-    bcc @no_label
-
-    ; Process label
-    lda ASM_PASS
-    bne @skip_label_def         ; pass 2: ignore label definitions
-    ; Pass 1: add label to symbol table with current PC
-    jsr sym_define
-    bcs @err_sym                ; symbol table full or duplicate
-@skip_label_def:
-
-    ; Skip spaces after label
-    jsr skip_spaces
-    ; Peek: might be end of line (label-only line)
-    jsr src_peek
-    bne :+
-    jmp @done
-:   cmp #$0D
-    bne :+
-    jmp @done
-:   cmp #';'
-    bne :+
-    jmp @done
-:
 
 @no_label:
     ; Parse mnemonic (3 uppercase chars)
@@ -1621,21 +1603,7 @@ parse_directive:
     bcc :+
     jmp @err
     :
-    lda TMP
-    sta ASM_PC_LO
-    lda TMP+1
-    sta ASM_PC_HI
-    ; FIX (load address): capture load address from first .org seen
-    lda ASM_ORG_SET
-    bne :+
-    lda TMP
-    sta ASM_LOAD_LO
-    lda TMP+1
-    sta ASM_LOAD_HI
-:
-    lda #$FF
-    sta ASM_ORG_SET
-    rts
+    jmp set_org
 
 @try_byte:
     lda ASM_MNEM+0
@@ -1914,6 +1882,48 @@ parse_directive:
 @unknown_dir:
 @err:
     jsr set_err_syntax
+    rts
+
+; ============================================================================
+; set_org  -  ".org" / "*=": set the PC to TMP/TMP+1.
+; The first origin seen in pass 1 also fixes the PRG load address.
+; A label defined on the same line ("start: *= $C000") names the new
+; address: pass 1 just appended it to the symbol table, so its entry is the
+; last one — re-point it here.
+; ============================================================================
+
+set_org:
+    lda TMP
+    sta ASM_PC_LO
+    lda TMP+1
+    sta ASM_PC_HI
+    ; FIX (load address): capture load address from first origin seen
+    lda ASM_ORG_SET
+    bne :+
+    lda TMP
+    sta ASM_LOAD_LO
+    lda TMP+1
+    sta ASM_LOAD_HI
+:
+    lda #$FF
+    sta ASM_ORG_SET
+    bit ASM_LBL_FLAG            ; set only in pass 1, after a sym_define
+    bpl @done
+    lda ASM_SYM_LO
+    sec
+    sbc #1
+    sta TMP2
+    lda ASM_SYM_HI
+    sbc #0
+    sta TMP2+1                  ; TMP2 = index of the last symbol
+    jsr sym_entry_addr
+    ldy #8                      ; value field
+    lda ASM_PC_LO
+    sta (TMP2),y
+    iny
+    lda ASM_PC_HI
+    sta (TMP2),y
+@done:
     rts
 
 ; ============================================================================
@@ -2340,6 +2350,21 @@ skip_spaces:
     jsr src_advance
     jmp @loop
 @done:
+    rts
+
+; at_eol  -  skip spaces, then C=0 if the statement has ended (CR, NUL =
+; end of source, or a ';' comment), C=1 if anything else follows.
+; A = that next character either way.
+at_eol:
+    jsr skip_spaces
+    cmp #$0D
+    beq @eol
+    cmp #';'
+    beq @eol
+    cmp #1                      ; NUL: C=0; any other char: C=1
+    rts
+@eol:
+    clc
     rts
 
 ; skip_to_next_line  -  advance SRC_PTR past the current line's CR.

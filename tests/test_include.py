@@ -480,9 +480,6 @@ def main():
 
     # 13. Bigger combined program: data directives + code across 3 files,
     #     verified against the flattened equivalent.
-    # NOTE: labels go on their own line — this assembler doesn't support
-    # a directive after a label on the same line (see the manual's .text
-    # example), which is unrelated to .include.
     files = {
         "DATA": petscii(
             'MSG:\n        .text "HI"\n        .byte $00\n'
@@ -547,6 +544,28 @@ def main():
     m = assemble(src, {"OUT": b"stale"})
     expect_output(m, bytes.fromhex("00c060"), "replace existing output")
     print("ok: disk full reported, existing output replaced")
+
+    # 17. A directive after a label on the same line: the label names the
+    #     data, and a label on an origin line names the NEW address.
+    src = (
+        "        *= $C000\n"
+        "        LDA TABLE+1\n"
+        "        LDX MSG\n"
+        "TABLE:  .byte 1,2,3\n"
+        'MSG:    .text "HI"\n'
+        "WORDS:  .word TABLE,WORDS\n"
+    )
+    expect_output(
+        assemble(src),
+        bytes.fromhex("00c0 ad07c0 ae09c0 010203 4849 06c0 0bc0"),
+        "label + directive",
+    )
+    m = assemble("START:  *= $C000\n        JMP START\n")
+    expect_output(m, bytes.fromhex("00c04c00c0"), "label + *=")
+    m = assemble("        NOP\nHERE:   .org $0900\n        JMP HERE\n")
+    assert m.status == 0, m.err_msg
+    assert m.output.endswith(bytes.fromhex("4c0009")), m.output.hex(" ")
+    print("ok: label followed by a directive or origin on the same line")
 
     print("\nall include tests passed")
 

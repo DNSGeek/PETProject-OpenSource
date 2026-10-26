@@ -76,6 +76,7 @@ loop:   STA $0400,Y     ; store A to screen, Y offset
         DEY             ; decrement Y
         BNE loop        ; loop until Y wraps to 0
         RTS             ; return
+table:  .byte 1, 2, 3   ; a label can be followed by a directive, too
 ```
 
 ---
@@ -223,6 +224,9 @@ Tells the assembler that the code that follows should start at a specific addres
 ```
 
 If you don't use `.org` or `*=`, the default load address is **$0801** (the start of the BASIC area).
+
+A label on the same line as `.org` or `*=` names the **new** address, so
+`start: *= $C000` defines `start` as `$C000`.
 
 You can also use `.org` mid-source to skip ahead in memory (for example, to place data at a known fixed address), but this will leave a gap of uninitialised bytes in the output file. Usually it is simpler to just define your data at a convenient offset from your code.
 

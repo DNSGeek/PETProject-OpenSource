@@ -111,7 +111,7 @@ You can then use that name anywhere an address is expected:
 ### Label Rules
 
 - Labels can be up to **8 characters** long. Characters beyond 8 are ignored.
-- Valid characters are: letters (`A`–`Z`, `a`–`z`), digits (`0`–`9`), and underscore (`_`).
+- Valid characters are: letters (`A`–`Z`, `a`–`z`), digits (`0`–`9`), and underscore (`_`). A leading `@` makes a [local label](#local-labels-name).
 - Labels are **case-insensitive**: `Loop`, `LOOP`, and `loop` all refer to the same label.
 - The colon (`:`) must immediately follow the name — no space before it.
 - Labels on their own line (with no instruction following) are perfectly valid, and the label simply points to the next instruction that follows.
@@ -120,7 +120,38 @@ You can then use that name anywhere an address is expected:
 
 **Valid label names:** `loop`, `start`, `irq_handler`, `MY_DATA`, `v1`, `loop2`
 
-**Invalid label names:** `my label` (space), `2fast` (starts with digit), `toolonglabel` (over 8 chars — will be silently truncated to `toolongla`)
+**Invalid label names:** `my label` (space), `2fast` (starts with digit), `toolonglabel` (over 8 chars — will be silently truncated to `toolongl`)
+
+### Local Labels (`@name`)
+
+A label whose name starts with `@` is **local**: it belongs to the most
+recent ordinary (global) label above it, and is only visible until the next
+global label. This lets every routine have its own `@loop` or `@done`
+without inventing a new name each time:
+
+```
+clear:  LDX #0
+@loop:  STA $0400,X     ; clear's @loop
+        INX
+        BNE @loop
+        RTS
+
+fill:   LDY #39
+@loop:  STA $D800,Y     ; fill's @loop — a different label
+        DEY
+        BPL @loop
+        RTS
+```
+
+- References work forwards and backwards within the scope (`BEQ @done`
+  before `@done:` is fine).
+- A local can't be reached from another scope: `JMP @loop` under `fill`
+  always means `fill`'s `@loop`; if `fill` has none, it is an error
+  (`BAD OPERAND`).
+- Local labels defined before the first global label share one scope.
+- Only the first **5 characters after the `@`** are significant
+  (`@loop1` and `@loop12` are the same label).
+- Each local label takes one entry in the symbol table, like a global one.
 
 ---
 
@@ -588,7 +619,8 @@ When an error occurs, assembly stops at the first error found. The status bar sh
 | Item                      | Limit                                                             |
 | ------------------------- | ----------------------------------------------------------------- |
 | Label name length         | 8 characters (extra characters are silently ignored)              |
-| Total labels              | 400                                                               |
+| Local label name length   | `@` plus 5 characters (extra characters are silently ignored)     |
+| Total labels              | 400 (global and local together)                                   |
 | Output filename length    | 16 characters                                                     |
 | `.include` filename       | 16 characters (including any DOS type suffix)                     |
 | `.include` nesting depth  | 7 levels                                                          |

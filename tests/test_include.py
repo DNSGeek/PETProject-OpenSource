@@ -567,6 +567,35 @@ def main():
     assert m.output.endswith(bytes.fromhex("4c0009")), m.output.hex(" ")
     print("ok: label followed by a directive or origin on the same line")
 
+    # 18. @local labels are scoped to the preceding global label: the same
+    #     @name can be reused under each global, forward and backward
+    #     references both work, and a local is invisible from another scope.
+    src = (
+        "        *= $C000\n"
+        "FIRST:  LDX #2\n"
+        "@loop:  DEX\n"
+        "        BNE @Loop\n"  # names are case-insensitive
+        "        BEQ @done\n"  # forward reference to a local
+        "        NOP\n"
+        "@done:  RTS\n"
+        "SECOND: LDY #3\n"
+        "@loop:  DEY\n"
+        "        BNE @loop\n"
+        "@done:  RTS\n"
+    )
+    expect_output(
+        assemble(src),
+        bytes.fromhex("00c0 a202 ca d0fd f001 ea 60 a003 88 d0fd 60"),
+        "@local scopes",
+    )
+    m = assemble("        *= $C000\n@top:   NOP\n        JMP @top\n")
+    expect_output(m, bytes.fromhex("00c0ea4c00c0"), "@local before any global")
+    m = assemble("        *= $C000\nA1:\n@x:     NOP\nB1:     JMP @x\n")
+    expect_error(m, "BAD OPERAND", "@local from another scope", line=4)
+    m = assemble("        *= $C000\nA1:\n@x:     NOP\n@x:     NOP\n")
+    expect_error(m, "SYMBOL ERROR", "duplicate @local in one scope", line=4)
+    print("ok: @local labels scoped to the preceding global label")
+
     print("\nall include tests passed")
 
 

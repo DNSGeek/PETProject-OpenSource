@@ -282,7 +282,14 @@ SYM_T0          = $BF34   ; sym_entry_addr scratch (2 bytes)
 ; $FF when the line defined a label, so that an origin directive on the
 ; same line ("start: *= $C000") moves the label to the new PC.
 ASM_LBL_FLAG    = $BF36
-.assert ASM_LBL_FLAG + 1 <= LINE_BUF, error, "modasm: line state overlaps LINE_BUF"
+; @local label scope: the number of global (non-@) labels seen so far in
+; this pass.  read_name stores a local "@name" as '@', SCOPE lo, SCOPE hi,
+; then the first 5 name characters, so the same @name under different
+; global labels is a different symbol.  Globals cannot start with '@', and
+; two locals in different scopes differ in the SCOPE bytes: no collisions.
+ASM_SCOPE_LO    = $BF37
+ASM_SCOPE_HI    = $BF38
+.assert ASM_SCOPE_HI + 1 <= LINE_BUF, error, "modasm: line state overlaps LINE_BUF"
 
 
 ; ============================================================================
@@ -521,6 +528,8 @@ run_pass:
     ; Frame 0 is never popped; the SRC/LINE fields are unused for it.
     ; This lays the groundwork for .include without changing behaviour.
     lda #0
+    sta ASM_SCOPE_LO            ; @local scopes are numbered from 0 each pass
+    sta ASM_SCOPE_HI
     sta SRC_DEPTH
     sta SRC_STACK + SRC_FRAME_LFN
     sta SRC_STACK + SRC_FRAME_SLO
@@ -606,7 +615,15 @@ parse_line:
     jsr check_for_label         ; C=1 if label found, label in ASM_LABEL
     bcc @stmt
 
-    ; Process label
+    ; Process label.  A global one opens a new @local scope (in both
+    ; passes, so the scope numbers agree).
+    lda ASM_LABEL
+    cmp #'@'
+    beq @local
+    inc ASM_SCOPE_LO
+    bne @local
+    inc ASM_SCOPE_HI
+@local:
     lda ASM_PASS
     bne @skip_label_def         ; pass 2: ignore label definitions
     ; Pass 1: add label to symbol table with current PC
@@ -748,46 +765,11 @@ check_for_label:
     lda SRC_PTR+1
     sta TMP2+1
 
-    ; Init ASM_LABEL to spaces
-    ldy #0
-@pad:
-    lda #' '
-    sta ASM_LABEL,y
-    iny
-    cpy #8
-    bne @pad
-
-    ; Read up to 8 chars, stop at non-alphanumeric/underscore
-    ldy #0
-@read:
+    jsr read_name               ; Z=1: no name characters
+    beq @no_label
     jsr src_peek
-    beq @no_label
     cmp #':'
-    beq @found_label
-    cmp #' '
-    beq @no_label
-    cmp #$0D
-    beq @no_label
-    ; Check valid label char: A-Z, a-z, 0-9, _
-    jsr is_alnum_or_under       ; C=1 if valid
-    bcc @no_label
-    ; Normalize to uppercase
-    cmp #$61
-    bcc @store
-    cmp #$7B
-    bcs @store
-    sec
-    sbc #$20
-@store:
-    cpy #8
-    bcs @skip_char              ; >8 chars: keep scanning but don't store
-    sta ASM_LABEL,y
-    iny
-@skip_char:
-    jsr src_advance
-    jmp @read
-
-@found_label:
+    bne @no_label
     jsr src_advance             ; consume ':'
     sec
     rts
@@ -799,6 +781,52 @@ check_for_label:
     lda TMP2+1
     sta SRC_PTR+1
     clc
+    rts
+
+; ============================================================================
+; read_name  -  read a label name at SRC_PTR into ASM_LABEL: upcased,
+; space-padded to 8 bytes, characters past the 8th consumed but ignored.
+; Name characters are A-Z, a-z, 0-9 and _.  A leading '@' makes the name
+; local to the current global label: it is stored as '@', ASM_SCOPE lo/hi,
+; then up to 5 name characters (see ASM_SCOPE_LO).
+; Returns X = number of name characters read (not counting '@'), with
+; Z=1 if there were none.  Clobbers A, Y.  Does not touch TMP/TMP2.
+; ============================================================================
+
+read_name:
+    ldy #7
+    lda #' '
+@pad:
+    sta ASM_LABEL,y
+    dey
+    bpl @pad
+    iny                         ; Y = 0: store index
+    ldx #0                      ; X = name characters read
+    jsr src_peek
+    cmp #'@'
+    bne @read
+    sta ASM_LABEL+0
+    lda ASM_SCOPE_LO
+    sta ASM_LABEL+1
+    lda ASM_SCOPE_HI
+    sta ASM_LABEL+2
+    ldy #3
+    jsr src_advance             ; consume '@'
+@read:
+    jsr src_peek
+    jsr is_alnum_or_under       ; C=1 if a name character
+    bcc @done
+    jsr upcase_a
+    cpy #8
+    bcs @skip                   ; past 8 bytes: keep scanning, don't store
+    sta ASM_LABEL,y
+    iny
+@skip:
+    jsr src_advance
+    inx
+    bne @read                   ; (a 256-char name just ends there)
+@done:
+    cpx #0
     rts
 
 ; ============================================================================
@@ -1495,37 +1523,7 @@ parse_decimal:
 ; ============================================================================
 
 parse_label_ref:
-    ; Read label name into ASM_LABEL (space-padded, 8 chars)
-    ldy #0
-@pad:
-    lda #' '
-    sta ASM_LABEL,y
-    iny
-    cpy #8
-    bne @pad
-
-    ldy #0
-@read:
-    jsr src_peek
-    jsr is_alnum_or_under
-    bcc @done_read
-    ; Normalize to uppercase
-    cmp #$61
-    bcc @store
-    cmp #$7B
-    bcs @store
-    sec
-    sbc #$20
-@store:
-    cpy #8
-    bcs @skip
-    sta ASM_LABEL,y
-@skip:
-    jsr src_advance
-    iny
-    jmp @read
-@done_read:
-    cpy #0
+    jsr read_name               ; name (or scoped @local) into ASM_LABEL
     beq @err                    ; empty label
 
     ; Search symbol table

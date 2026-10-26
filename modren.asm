@@ -39,6 +39,7 @@ PET_0            = $30
 PET_9            = $39
 PET_SPACE        = $20
 PET_QUOTE        = $22
+PET_COMMA        = $2C
 CONTENT_ROWS     = 24           ; sentinel CRs written after output
 
 REN_MAX_HI       = $FA          ; new number overflows when hi >= $FA (>= 64000)
@@ -120,6 +121,7 @@ modren_entry:
     sta REN_COUNT_LO
     sta REN_COUNT_HI
     sta REN_SPINNER
+    sta REN_UNSORTED
     lda #SPIN_COLOR_A
     sta REN_SPIN_IDX
 
@@ -230,6 +232,16 @@ pass1:
     jmp @loop
 
 @done:
+    ; REN_TBL_END = byte offset one past the last entry (COUNT x 4), the
+    ; upper bound find_mapping's binary search starts from.
+    lda REN_COUNT_LO
+    asl
+    sta REN_TBL_END
+    lda REN_COUNT_HI
+    rol
+    asl REN_TBL_END
+    rol
+    sta REN_TBL_END+1
     clc
     rts
 @overflow:
@@ -255,23 +267,26 @@ pass2:
     lda REN_GAP_END_HI
     sta REN_GAP_HI
 
-    ; DST_PTR = work_buf
-    lda REN_BUF_LO
-    sta DST_PTR
-    lda REN_BUF_HI
-    sta DST_PTR+1
-
-@line_loop:
-    lda SRC_PTR+1
-    cmp REN_END_HI
-    bne @do_line
-    lda SRC_PTR
-    cmp REN_END_LO
-    beq @all_done
-@do_line:
-    jsr process_line
-    jmp @line_loop
-
+    ; The rewrite runs in place: output from BUF up, input from the staging
+    ; area, which starts only gap_size bytes higher. Numbers that grow eat
+    ; into that head start, and with a nearly full buffer the output would
+    ; overtake input it has not read yet. So rehearse first: a dry run
+    ; walks the same path without writing and checks every output byte
+    ; against the read position. Only if it never catches up is the buffer
+    ; rewritten for real.
+    lda #$FF
+    sta REN_DRY
+    lda #0
+    sta REN_OVF
+    jsr rewrite
+    lda REN_OVF
+    beq @fits
+    jsr unstage                 ; put the editor's gap layout back
+    jmp @error
+@fits:
+    lda #0
+    sta REN_DRY
+    jsr rewrite
 @all_done:
     ; Output complete. DST_PTR is the true end of renumbered text. Do NOT
     ; write sentinel CRs here or advance past them: MOD_NEW_END must point at
@@ -283,6 +298,70 @@ pass2:
     rts
 @error:
     sec
+    rts
+
+; ============================================================================
+; rewrite — one pass over the staged source, SRC→DST (writes unless REN_DRY).
+; ============================================================================
+rewrite:
+    lda REN_STAG_LO
+    sta SRC_PTR
+    lda REN_STAG_HI
+    sta SRC_PTR+1
+    lda REN_BUF_LO
+    sta DST_PTR
+    lda REN_BUF_HI
+    sta DST_PTR+1
+@line_loop:
+    lda SRC_PTR+1
+    cmp REN_END_HI
+    bne @do_line
+    lda SRC_PTR
+    cmp REN_END_LO
+    beq @done
+@do_line:
+    jsr process_line
+    jmp @line_loop
+@done:
+    rts
+
+; ============================================================================
+; unstage — undo setup_staging: move the pre-gap back down to BUF, so the
+; buffer again matches the editor's GAP_START/GAP_END. Ascending is safe:
+; the destination is below the source.
+; ============================================================================
+unstage:
+    lda REN_STAG_LO
+    sta SRC_PTR
+    lda REN_STAG_HI
+    sta SRC_PTR+1
+    lda REN_BUF_LO
+    sta DST_PTR
+    lda REN_BUF_HI
+    sta DST_PTR+1
+    lda REN_PREGAP_LO
+    sta TMP2
+    lda REN_PREGAP_HI
+    sta TMP2+1
+    ldy #0
+@copy:
+    lda TMP2
+    ora TMP2+1
+    beq @done
+    buf_lda SRC_PTR
+    buf_sta DST_PTR
+    inc SRC_PTR
+    bne :+
+    inc SRC_PTR+1
+:   inc DST_PTR
+    bne :+
+    inc DST_PTR+1
+:   lda TMP2
+    bne :+
+    dec TMP2+1
+:   dec TMP2
+    jmp @copy
+@done:
     rts
 
 ; ============================================================================
@@ -636,7 +715,32 @@ renumber_ref:
     jsr parse_line_number
     jsr find_mapping
     jsr write_number
+    ; ON X GOTO/GOSUB a,b,c — a ',' continues the list of targets.
+@after:
+    jsr at_ref_end
+    bcs @done
+    ldy #0
+    buf_lda SRC_PTR
+    cmp #PET_SPACE
+    bne :+
+    jsr emit_src_char
+    jmp @after
+:   cmp #PET_COMMA
+    bne @done
+    jsr emit_src_char
+    jmp @sp
 @done:
+    rts
+
+; at_ref_end — C=1 when SRC_PTR has reached REN_END.
+at_ref_end:
+    lda SRC_PTR+1
+    cmp REN_END_HI
+    bne :+
+    lda SRC_PTR
+    cmp REN_END_LO
+    rts
+:   clc
     rts
 
 ; ============================================================================
@@ -645,16 +749,8 @@ renumber_ref:
 copy_kw_only:
     tax
 @lp:
-    ldy #0
-    buf_lda SRC_PTR
-    buf_sta DST_PTR
-    inc SRC_PTR
-    bne :+
-    inc SRC_PTR+1
-:   inc DST_PTR
-    bne :+
-    inc DST_PTR+1
-:   dex
+    jsr emit_src_char
+    dex
     bne @lp
     rts
 
@@ -664,24 +760,62 @@ copy_kw_only:
 emit_src_char:
     ldy #0
     buf_lda SRC_PTR
-    buf_sta DST_PTR
-    inc SRC_PTR
-    bne :+
+    inc SRC_PTR                 ; consumed before the write, so put_dst's
+    bne :+                      ; overtake check sees the true read position
     inc SRC_PTR+1
-:   inc DST_PTR
+:   ; fall through
+
+; ============================================================================
+; put_dst — write A at (DST_PTR) and advance it. In a dry run (REN_DRY set)
+; nothing is written; instead REN_OVF is set if the write would land at or
+; past SRC_PTR, the next byte still to be read. Preserves X. Y = 0 on exit.
+; ============================================================================
+put_dst:
+    ldy #0
+    bit REN_DRY
+    bpl @write
+    pha
+    lda DST_PTR
+    cmp SRC_PTR
+    lda DST_PTR+1
+    sbc SRC_PTR+1
+    bcc :+                      ; DST < SRC — safe
+    lda #$FF
+    sta REN_OVF
+:   pla
+    jmp @adv
+@write:
+    buf_sta DST_PTR
+@adv:
+    inc DST_PTR
     bne :+
     inc DST_PTR+1
 :   rts
 
 ; ============================================================================
-; find_mapping — linear search: TMP2+1:TMP2 → new number.
+; find_mapping — TMP2+1:TMP2 (old number) → new number.
 ; C=0 found (TMP2+1:TMP2 updated); C=1 not found (unchanged).
-; Honors the full 16-bit entry count: the table legitimately holds up to
-; REN_TABLE_MAX (512) entries, so an 8-bit count would search count mod 256
-; entries and silently leave stale line references on programs with 256+
-; lines.  Counter: X = count lo, REN_FM_HI = count hi.
+; Clobbers A, X, Y, TMP, TMP3.
+;
+; Pass 2 looks up every line header and every GOTO/GOSUB/THEN target, and it
+; runs twice (rehearsal + rewrite), so a linear scan of a 400-entry table is
+; most of the module's run time. The table is built in source order, so when
+; the program's line numbers are strictly ascending (pass 1 leaves
+; REN_UNSORTED clear) it is sorted by old number with no duplicates, and a
+; binary search finds the one and only match. Otherwise fall back to the
+; linear scan, which returns the FIRST entry with that old number — the
+; binary search would agree on that only when numbers are unique.
 ; ============================================================================
 find_mapping:
+    bit REN_UNSORTED
+    bpl fm_binary
+
+; Linear scan, first match wins. Honors the full 16-bit entry count: the
+; table legitimately holds up to REN_TABLE_MAX (512) entries, so an 8-bit
+; count would search count mod 256 entries and silently leave stale line
+; references on programs with 256+ lines.
+; Counter: X = count lo, REN_FM_HI = count hi.
+fm_linear:
     lda #<REN_TABLE
     sta TMP3
     lda #>REN_TABLE
@@ -692,7 +826,7 @@ find_mapping:
 @lp:
     txa
     ora REN_FM_HI
-    beq @nf                     ; 16-bit count exhausted
+    beq fm_nf                   ; 16-bit count exhausted
     ldy #0
     lda (TMP3),y
     cmp TMP2
@@ -700,17 +834,7 @@ find_mapping:
     iny
     lda (TMP3),y
     cmp TMP2+1
-    bne @nx
-    iny
-    lda (TMP3),y                ; new_lo
-    pha
-    iny
-    lda (TMP3),y                ; new_hi
-    sta TMP2+1
-    pla
-    sta TMP2
-    clc
-    rts
+    beq fm_hit
 @nx:
     lda TMP3
     clc
@@ -724,9 +848,80 @@ find_mapping:
     dec REN_FM_HI
 :   dex
     jmp @lp
-@nf:
+
+; TMP3 → matching entry: load its new number.
+fm_hit:
+    ldy #3
+    lda (TMP3),y                ; new_hi
+    tax
+    dey
+    lda (TMP3),y                ; new_lo
+    sta TMP2
+    stx TMP2+1
+    clc
+    rts
+fm_nf:
     sec
     rts
+
+fm_binary:
+    ; Binary search over byte offsets [REN_BS_LO, REN_BS_HI), always
+    ; multiples of 4. mid = ((lo + hi) / 2) & ~3 is then the offset of entry
+    ; floor((lo/4 + hi/4) / 2) — no shifts to turn indices into offsets.
+    lda #0
+    sta REN_BS_LO
+    sta REN_BS_LO+1
+    lda REN_TBL_END
+    sta REN_BS_HI
+    lda REN_TBL_END+1
+    sta REN_BS_HI+1
+@lp:
+    lda REN_BS_LO               ; lo >= hi → not found
+    cmp REN_BS_HI
+    lda REN_BS_LO+1
+    sbc REN_BS_HI+1
+    bcs fm_nf
+    lda REN_BS_LO               ; TMP = mid (sum <= 4096: no carry out)
+    clc
+    adc REN_BS_HI
+    sta TMP
+    lda REN_BS_LO+1
+    adc REN_BS_HI+1
+    lsr
+    sta TMP+1
+    ror TMP
+    lda TMP
+    and #$FC
+    sta TMP
+    clc                         ; TMP3 = &REN_TABLE[mid]
+    adc #<REN_TABLE
+    sta TMP3
+    lda TMP+1
+    adc #>REN_TABLE
+    sta TMP3+1
+    ldy #1                      ; compare key with entry's old number
+    lda TMP2+1
+    cmp (TMP3),y
+    bne @ne
+    dey
+    lda TMP2
+    cmp (TMP3),y
+    beq fm_hit
+@ne:
+    bcc @lower                  ; key < entry
+    lda TMP                     ; lo = mid + 4  (C=1, so +3 adds 4)
+    adc #3
+    sta REN_BS_LO
+    lda TMP+1
+    adc #0
+    sta REN_BS_LO+1
+    jmp @lp
+@lower:
+    lda TMP                     ; hi = mid
+    sta REN_BS_HI
+    lda TMP+1
+    sta REN_BS_HI+1
+    jmp @lp
 
 ; ============================================================================
 ; write_number — write TMP2+1:TMP2 as decimal to (DST_PTR), leading zeros
@@ -775,12 +970,7 @@ write_number:
     lda REN_DIGIT
     ora #$30
 @wr:
-    ldy #0
-    buf_sta DST_PTR
-    inc DST_PTR
-    bne :+
-    inc DST_PTR+1
-:
+    jsr put_dst
 @skip:
     inx
     cpx #4
@@ -789,12 +979,7 @@ write_number:
     ; Units digit — always emit
     lda TMP2
     ora #$30
-    ldy #0
-    buf_sta DST_PTR
-    inc DST_PTR
-    bne :+
-    inc DST_PTR+1
-:   rts
+    jmp put_dst
 
 wn_div_lo: .byte <10000, <1000, <100, <10
 wn_div_hi: .byte >10000, >1000, >100, >10
@@ -1112,10 +1297,23 @@ store_entry:
     sec
     rts
 @ok:
+    ; Track whether old numbers stay strictly ascending; one that doesn't
+    ; (out of order, or a duplicate) sends find_mapping to the linear scan.
+    lda REN_COUNT_LO
+    ora REN_COUNT_HI
+    beq @first
+    lda REN_LAST_LO             ; last - new: no borrow → last >= new
+    cmp TMP2
+    lda REN_LAST_HI
+    sbc TMP2+1
+    bcc @first
+    lda #$FF
+    sta REN_UNSORTED
+@first:
     lda TMP2
-    pha
+    sta REN_LAST_LO
     lda TMP2+1
-    pha
+    sta REN_LAST_HI
     ; offset = COUNT × 4 into TMP/TMP+1
     lda REN_COUNT_LO
     asl
@@ -1132,10 +1330,6 @@ store_entry:
     lda TMP+1
     adc #>REN_TABLE
     sta TMP+1
-    pla
-    sta TMP2+1
-    pla
-    sta TMP2
     ldy #0
     lda TMP2
     sta (TMP),y
@@ -1156,8 +1350,9 @@ store_entry:
 
 ; ============================================================================
 ; BSS — allocated in module RAM after code, not stored in PRG.
-; Total: ~1350 bytes code + ~45 bytes state + 2048 bytes table ≈ 3443 bytes
-; (limit is $FFE = 4094 bytes per module.cfg).
+; Total: ~1960 bytes code + ~60 bytes state + 2048 bytes table; the C128
+; build (bigger: far-access calls) ends ~12 bytes short of its $1000 limit
+; (module_c128.cfg), the C64 build ~40 bytes short of $FFE (module.cfg).
 ; ============================================================================
 .segment "BSS"
 
@@ -1177,6 +1372,12 @@ REN_STEP_HI:     .res 1
 REN_COUNT_LO:    .res 1
 REN_COUNT_HI:    .res 1
 REN_FM_HI:       .res 1         ; find_mapping 16-bit counter, high byte
+REN_UNSORTED:    .res 1         ; $FF = old numbers not strictly ascending
+REN_LAST_LO:     .res 1         ; previous entry's old number (pass 1)
+REN_LAST_HI:     .res 1
+REN_TBL_END:     .res 2         ; COUNT x 4: table size in bytes
+REN_BS_LO:       .res 2         ; binary search bounds (byte offsets)
+REN_BS_HI:       .res 2
 REN_SPINNER:     .res 1
 REN_SPIN_IDX:    .res 1
 
@@ -1191,6 +1392,8 @@ REN_LEADING:     .res 1        ; 0 = suppressing leading zeros
 REN_DIV_LO:      .res 1        ; divisor lo for write_number
 REN_DIV_HI:      .res 1        ; divisor hi
 REN_DIGIT:       .res 1        ; digit accumulator for write_number
+REN_DRY:         .res 1        ; $FF = pass-2 rehearsal, nothing is written
+REN_OVF:         .res 1        ; $FF = rehearsal found output overtaking input
 LINENO_SAVE:     .res 2        ; SRC_PTR save for check_lineno_directive
 
 ; Mapping table: [old_lo, old_hi, new_lo, new_hi] × 512

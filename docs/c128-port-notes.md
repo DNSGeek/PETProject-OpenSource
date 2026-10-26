@@ -810,7 +810,10 @@ overload real keywords.
   hygiene rather than a correctness bug.
 - `moddet` (detokenize on load): indexes `kwtab` by `token - $80` up to
   `$D8`. Needs the list extended to `$FD`, and a branch for `$CE`/`$FE`
-  that reads the second byte and indexes the two escape lists. Bytes it
+  that reads the second byte and indexes the two escape lists. (`kw_off`,
+  the per-token offset table, is generated from the `dkw` list and grows
+  with it; its one-byte offsets reach 512 bytes of table, which the
+  assembler asserts.) Bytes it
   does not know are currently emitted raw, which is what happens to a real
   BASIC 7.0 program today.
 - `colorize`: matches the editor's text against `kw_strtab`/`kw_len_tab` in

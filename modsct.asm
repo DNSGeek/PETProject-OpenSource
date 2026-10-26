@@ -115,6 +115,7 @@ META_SIZE       = 6
 .endif
 ; Addresses come from zp.inc (see docs/c128-port-notes.md).
 .include "zp.inc"
+.include "kwtab.inc"
 
 LINENO      = ZP_SCRATCH+0  ; line number lo (hi=+1); = KW_TOKEN in try_keyword
 KW_TOKEN    = ZP_SCRATCH+0
@@ -317,38 +318,39 @@ tok_main_script:
     sbc sct_pre_hi
     sta sct_reloc_hi
 
-    lda sct_pre_lo
-    sta TMP16
-    lda sct_pre_hi
-    sta TMP16+1
-    lda MOD_GAP_START_LO
+    ; Descending (the destination is above the source and the regions
+    ; may overlap), page-wise with Y as the index: both pointers sit
+    ; pre_hi pages above their block's start; the partial top page
+    ; (pre_lo bytes) goes first, then each whole page below it, every
+    ; page from offset $FF down to $00.
+    lda MOD_BUF_LO
     sta SRC_PTR
-    lda MOD_GAP_START_HI
+    lda MOD_BUF_HI
+    clc
+    adc sct_pre_hi
     sta SRC_PTR+1
-    lda MOD_GAP_END_LO
+    lda sct_reloc_lo
     sta DST_PTR
-    lda MOD_GAP_END_HI
+    lda sct_reloc_hi
+    clc
+    adc sct_pre_hi
     sta DST_PTR+1
-@lin_loop:
-    lda TMP16
-    ora TMP16+1
-    beq @lin_done
-    lda SRC_PTR
-    bne :+
-    dec SRC_PTR+1
-:   dec SRC_PTR
-    lda DST_PTR
-    bne :+
-    dec DST_PTR+1
-:   dec DST_PTR
-    ldy #0
+    ldx sct_pre_hi              ; whole pages below the partial one
+    ldy sct_pre_lo              ; bytes in the partial top page
+    beq @lin_page
+@lin_byte:
+    dey
     lda (SRC_PTR),y
     sta (DST_PTR),y
-    lda TMP16
-    bne :+
-    dec TMP16+1
-:   dec TMP16
-    jmp @lin_loop
+    tya
+    bne @lin_byte
+@lin_page:
+    txa
+    beq @lin_done
+    dex
+    dec SRC_PTR+1
+    dec DST_PTR+1
+    jmp @lin_byte               ; Y = 0: the whole page, $FF down to $00
 @lin_done:
 
     ; Source walk is now contiguous [reloc..MOD_BUF_END).  Park the gap
@@ -480,7 +482,7 @@ tok_main_script:
 @token_loop:
     jsr tok_src_peek
     bne :+
-    jmp @all_done
+    jmp @eof_line               ; source ended mid-line — close the line first
 :   cmp #$0D
     bne :+
     jmp @end_line
@@ -570,15 +572,17 @@ tok_main_script:
     jsr emit_byte         ; null terminator
     jsr inc_basic_addr
 
-    ; Back-patch link word with current BASIC_ADDR
-    ldy #0
-    lda BASIC_ADDR
-    sta (LINK_PTR),y
-    iny
-    lda BASIC_ADDR+1
-    sta (LINK_PTR),y
-
+    jsr patch_link
     jmp @line_loop
+
+@eof_line:
+    ; No trailing CR: emit the terminator and back-patch the link as for any
+    ; other line, or the link stays at its $0000 placeholder — BASIC's
+    ; end-of-program marker — and the last line never runs.
+    lda #0
+    jsr emit_byte
+    jsr inc_basic_addr
+    jsr patch_link
 
 @all_done:
     lda #0
@@ -609,6 +613,21 @@ tok_main_script:
     rts
 :
     clc
+    rts
+
+; patch_link — back-patch the current line's link word with BASIC_ADDR.
+; Skipped after an overflow: emit_byte stops advancing DST_PTR then, so
+; LINK_PTR can point past the output into the user's text.
+patch_link:
+    lda OVFLAG
+    bne @skip
+    ldy #0
+    lda BASIC_ADDR
+    sta (LINK_PTR),y
+    iny
+    lda BASIC_ADDR+1
+    sta (LINK_PTR),y
+@skip:
     rts
 
 ; Gap-skipping source walker state (set up before tok_main_script)
@@ -1261,7 +1280,6 @@ try_keyword:
     ; Y-indexed walk with one pointer advance per entry.
     ldy #0
     lda (SRC_PTR),y
-    sta KW_XSAVE                ; cache first source char for entry rejects
     ldx #7
 @op_chk:
     cmp kw_op_chars,x
@@ -1273,60 +1291,40 @@ try_keyword:
     cmp #'Z'+1
     bcs @kw_no_match
 
-    lda #<kwtab
-    sta TMP16
-    lda #>kwtab
+    ; First-letter index (kwtab.inc) — see modtok's try_keyword: only
+    ; this letter's entries, in table order. A shifted letter equal to an
+    ; entry's final char does not match it ("T<shift-O>" is not TO): try
+    ; the next candidate.
+    tax
+    lda kw_first-'A',x
+    tax
+@kw_cand:
+    lda kw_idx_hi,x
+    beq @kw_no_match            ; end of this letter's list
     sta TMP16+1
-
-@kw_entry:
+    lda kw_idx_lo,x
+    sta TMP16
     ldy #0
-    lda (TMP16),y               ; token byte, $FF = sentinel
-    cmp #$FF
-    beq @kw_no_match
-    sta KW_TOKEN
-    ldy #1
     lda (TMP16),y
-    and #$7F
-    cmp KW_XSAVE
-    bne @kw_skip_entry
-
-@kw_match:
+    sta KW_TOKEN
+    ldy #2                      ; first char known equal
+@kw_cmp:
     dey
     lda (SRC_PTR),y             ; source char at (kw index - 1)
     iny
     eor (TMP16),y               ; $00 = match; $80 = match on final char
     asl                         ; C = final-char flag, A = difference << 1
-    bne @kw_skip_from_y
+    bne @kw_cand_next
     bcs @kw_full_match
+    lda (TMP16),y               ; exact match on the entry's final char?
+    bmi @kw_cand_next           ; yes: a shifted final letter — no match
     iny
-    bne @kw_match               ; always taken
-
-@kw_skip_entry:
-    ldy #1
-@kw_skip_from_y:
-    lda (TMP16),y
-    bmi @kw_advance_entry
-    iny
-    bne @kw_skip_from_y         ; always taken
-@kw_advance_entry:
-    iny                         ; Y = offset of the next entry's token byte
-    tya
+    bne @kw_cmp                 ; always taken
+@kw_cand_next:
+    inx
+    bne @kw_cand                ; always taken
+@kw_no_match:
     clc
-    adc TMP16
-    sta TMP16
-    bcc @kw_entry
-    inc TMP16+1
-    jmp @kw_entry
-
-@kw_full_match:
-    tya                         ; Y = keyword length
-    tax
-@kw_advance:
-    jsr tok_src_advance
-    dex
-    bne @kw_advance
-    lda KW_TOKEN
-    sec
     rts
 
 @op_hit:
@@ -1337,13 +1335,20 @@ try_keyword:
     sec
     rts
 
-@kw_no_match:
+@kw_full_match:
+    tya                         ; Y = keyword length (never 0)
     clc
+    adc SRC_PTR
+    sta SRC_PTR
+    bcc :+
+    inc SRC_PTR+1
+:   lda KW_TOKEN
+    sec
     rts
 
 ; Single-char operator dispatch — chars and their BASIC tokens (same
-; encodings as the kwtab's 1-char entries, which are now unreachable and
-; kept only as documentation).
+; encodings as the kwtab's 1-char entries, which are never matched as
+; entries).
 kw_op_chars:  .byte $2A,$2B,$2D,$2F,$3C,$3D,$3E,$5E   ; * + - / < = > ^
 kw_op_tokens: .byte $AC,$AA,$AB,$AD,$B3,$B2,$B1,$AE
 
@@ -1446,127 +1451,14 @@ tok_after_data:
     .byte 0
 
 ; ============================================================================
-; kwtab — extended keyword table, longest-first.
-; Format: [token][chars, last char has bit 7 set] ... $FF sentinel
+; Keyword table (kwtab.inc), longest-first, with its first-letter index.
+; Prefix conflicts are resolved by that order: RUNPROG (7) before RUN (3),
+; ONERR (5) before ON (2).
 ;
-; New keywords inserted at their correct length positions:
-;   8-char: ASSEMBLE — before all existing entries
-;   7-char: INCLUDE, RUNPROG, SCRATCH — before RESTORE
-;             RUNPROG before RUN (RUN is a prefix of RUNPROG)
-;   6-char: DELETE, EXISTS, RENAME, STATUS — before INPUT#
-;   5-char: DRIVE, ONERR, PAUSE — before CLOSE
-;             ONERR before ON (ON is a prefix of ONERR)
-;   4-char: COPY — before CHR$
-;   3-char: DIR — before ABS
 ; ============================================================================
 
-kwtab:
-    ; ---- 8-char ----
-    .byte $CC,$41,$53,$53,$45,$4D,$42,$4C,$C5   ; ASSEMBLE
-
-    ; ---- 7-char ----
-    .byte $CD,$49,$4E,$43,$4C,$55,$44,$C5       ; INCLUDE
-    .byte $CE,$52,$55,$4E,$50,$52,$4F,$C7       ; RUNPROG  (before RUN)
-    .byte $CF,$53,$43,$52,$41,$54,$43,$C8       ; SCRATCH
-    .byte $8C,$52,$45,$53,$54,$4F,$52,$C5       ; RESTORE
-
-    ; ---- 6-char ----
-    .byte $D0,$44,$45,$4C,$45,$54,$C5           ; DELETE
-    .byte $D1,$45,$58,$49,$53,$54,$D3           ; EXISTS
-    .byte $D2,$52,$45,$4E,$41,$4D,$C5           ; RENAME
-    .byte $D3,$53,$54,$41,$54,$55,$D3           ; STATUS
-    .byte $84,$49,$4E,$50,$55,$54,$A3           ; INPUT#
-    .byte $98,$50,$52,$49,$4E,$54,$A3           ; PRINT#
-    .byte $8E,$52,$45,$54,$55,$52,$CE           ; RETURN
-    .byte $C9,$52,$49,$47,$48,$54,$A4           ; RIGHT$
-    .byte $95,$56,$45,$52,$49,$46,$D9           ; VERIFY
-
-    ; ---- 5-char ----
-    .byte $D4,$44,$52,$49,$56,$C5               ; DRIVE
-    .byte $D5,$4F,$4E,$45,$52,$D2               ; ONERR  (before ON)
-    .byte $D6,$50,$41,$55,$53,$C5               ; PAUSE
-    .byte $A0,$43,$4C,$4F,$53,$C5               ; CLOSE
-    .byte $8D,$47,$4F,$53,$55,$C2               ; GOSUB
-    .byte $85,$49,$4E,$50,$55,$D4               ; INPUT
-    .byte $C8,$4C,$45,$46,$54,$A4               ; LEFT$
-    .byte $99,$50,$52,$49,$4E,$D4               ; PRINT
-
-    ; ---- 4-char ----
-    .byte $D7,$43,$4F,$50,$D9                   ; COPY
-    .byte $C7,$43,$48,$52,$A4                   ; CHR$
-    .byte $9A,$43,$4F,$4E,$D4                   ; CONT
-    .byte $83,$44,$41,$54,$C1                   ; DATA
-    .byte $89,$47,$4F,$54,$CF                   ; GOTO
-    .byte $9B,$4C,$49,$53,$D4                   ; LIST
-    .byte $93,$4C,$4F,$41,$C4                   ; LOAD
-    .byte $CA,$4D,$49,$44,$A4                   ; MID$
-    .byte $82,$4E,$45,$58,$D4                   ; NEXT
-    .byte $9F,$4F,$50,$45,$CE                   ; OPEN
-    .byte $C2,$50,$45,$45,$CB                   ; PEEK
-    .byte $97,$50,$4F,$4B,$C5                   ; POKE
-    .byte $87,$52,$45,$41,$C4                   ; READ
-    .byte $94,$53,$41,$56,$C5                   ; SAVE
-    .byte $A6,$53,$50,$43,$A8                   ; SPC(
-    .byte $A9,$53,$54,$45,$D0                   ; STEP
-    .byte $90,$53,$54,$4F,$D0                   ; STOP
-    .byte $C4,$53,$54,$52,$A4                   ; STR$
-    .byte $A3,$54,$41,$42,$A8                   ; TAB(
-    .byte $A7,$54,$48,$45,$CE                   ; THEN
-    .byte $92,$57,$41,$49,$D4                   ; WAIT
-
-    ; ---- 3-char ----
-    .byte $D8,$44,$49,$D2                       ; DIR
-    .byte $B6,$41,$42,$D3                       ; ABS
-    .byte $AF,$41,$4E,$C4                       ; AND
-    .byte $C6,$41,$53,$C3                       ; ASC
-    .byte $C1,$41,$54,$CE                       ; ATN
-    .byte $9C,$43,$4C,$D2                       ; CLR
-    .byte $9D,$43,$4D,$C4                       ; CMD
-    .byte $BE,$43,$4F,$D3                       ; COS
-    .byte $96,$44,$45,$C6                       ; DEF
-    .byte $86,$44,$49,$CD                       ; DIM
-    .byte $80,$45,$4E,$C4                       ; END
-    .byte $BD,$45,$58,$D0                       ; EXP
-    .byte $81,$46,$4F,$D2                       ; FOR
-    .byte $B8,$46,$52,$C5                       ; FRE
-    .byte $A1,$47,$45,$D4                       ; GET
-    .byte $B5,$49,$4E,$D4                       ; INT
-    .byte $C3,$4C,$45,$CE                       ; LEN
-    .byte $88,$4C,$45,$D4                       ; LET
-    .byte $BC,$4C,$4F,$C7                       ; LOG
-    .byte $A2,$4E,$45,$D7                       ; NEW
-    .byte $A8,$4E,$4F,$D4                       ; NOT
-    .byte $B9,$50,$4F,$D3                       ; POS
-    .byte $8F,$52,$45,$CD                       ; REM
-    .byte $BB,$52,$4E,$C4                       ; RND
-    .byte $8A,$52,$55,$CE                       ; RUN  (after RUNPROG)
-    .byte $B4,$53,$47,$CE                       ; SGN
-    .byte $BF,$53,$49,$CE                       ; SIN
-    .byte $BA,$53,$51,$D2                       ; SQR
-    .byte $9E,$53,$59,$D3                       ; SYS
-    .byte $C0,$54,$41,$CE                       ; TAN
-    .byte $B7,$55,$53,$D2                       ; USR
-    .byte $C5,$56,$41,$CC                       ; VAL
-
-    ; ---- 2-char ----
-    .byte $A5,$46,$CE                           ; FN
-    .byte $CB,$47,$CF                           ; GO
-    .byte $8B,$49,$C6                           ; IF
-    .byte $91,$4F,$CE                           ; ON  (after ONERR)
-    .byte $B0,$4F,$D2                           ; OR
-    .byte $A4,$54,$CF                           ; TO
-
-    ; ---- 1-char (operators) ----
-    .byte $AC,$AA                               ; *
-    .byte $AA,$AB                               ; +
-    .byte $AB,$AD                               ; -
-    .byte $AD,$AF                               ; /
-    .byte $B3,$BC                               ; <
-    .byte $B2,$BD                               ; =
-    .byte $B1,$BE                               ; >
-    .byte $AE,$DE                               ; ^
-
-    .byte $FF                                   ; sentinel
+    kw_index
+    kw_table
 
 ; ============================================================================
 ; Linker config (modsct.cfg):
@@ -1625,7 +1517,7 @@ meta_buf:     .res 6    ; 6-byte metadata block staged for the REU DMA
 ; never moved, and the gap pointers in the param block were never changed,
 ; so afterwards the caller's buffer is byte-for-byte as it was on entry.
 ; Safe to call on any exit path (no-op when sct_pre is zero).
-; Clobbers A, Y, SRC_PTR, DST_PTR, TMP16.
+; Clobbers A, Y, SRC_PTR, DST_PTR, TMP16+1.
 ; ============================================================================
 sct_restore:
     lda sct_pre_lo
@@ -1639,26 +1531,27 @@ sct_restore:
     sta DST_PTR
     lda MOD_BUF_HI
     sta DST_PTR+1
-    lda sct_pre_lo
-    sta TMP16
-    lda sct_pre_hi
-    sta TMP16+1
-@loop:
+    ; Page-wise with Y as the index: whole pages first, then the partial
+    ; top page, each from offset $00 up — strictly ascending throughout.
     ldy #0
+    lda sct_pre_hi
+    sta TMP16+1                 ; whole pages
+    beq @tail
+@page:
     lda (SRC_PTR),y
     sta (DST_PTR),y
-    inc SRC_PTR
-    bne :+
+    iny
+    bne @page
     inc SRC_PTR+1
-:   inc DST_PTR
-    bne :+
     inc DST_PTR+1
-:   lda TMP16
-    bne :+
     dec TMP16+1
-:   dec TMP16
-    lda TMP16
-    ora TMP16+1
-    bne @loop
+    bne @page
+@tail:
+    cpy sct_pre_lo
+    beq @done
+    lda (SRC_PTR),y
+    sta (DST_PTR),y
+    iny
+    bne @tail                   ; always taken (Y < pre_lo <= $FF)
 @done:
     rts

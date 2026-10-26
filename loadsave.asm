@@ -86,29 +86,25 @@ do_load_source_file:
 ; ----------------------------------------------------------------------------
 ; prompt_stash_fname / prompt_restore_fname — save and restore
 ; FNAME_BUF/FNAME_LEN around a filename prompt, so cancelling the prompt
-; doesn't lose the document's remembered filename.  IO_NAME_BUF is free
-; until a confirmed prompt builds a drive command in it, so the first
-; 17 bytes serve as the stash.
+; doesn't lose the document's remembered filename. The stash also has to
+; survive the load itself (a failed load restores it), so it has its own
+; buffer: IO_NAME_BUF is rebuilt for the F6 ",S,R" open.
 ; ----------------------------------------------------------------------------
 
 prompt_stash_fname:
-    ldy #15
-:   lda FNAME_BUF,y
-    sta IO_NAME_BUF,y
+    ldy #16
+:   lda FNAME_BUF,y             ; FNAME_LEN follows FNAME_BUF
+    sta FNAME_STASH,y
     dey
     bpl :-
-    lda FNAME_LEN
-    sta IO_NAME_BUF+16
     rts
 
 prompt_restore_fname:
-    ldy #15
-:   lda IO_NAME_BUF,y
+    ldy #16
+:   lda FNAME_STASH,y
     sta FNAME_BUF,y
     dey
     bpl :-
-    lda IO_NAME_BUF+16
-    sta FNAME_LEN
     rts
 
 ; ============================================================================
@@ -123,9 +119,8 @@ do_load_file_from_fname:
     lda #0
     sta LOAD_AS_SOURCE      ; module-driven loads use normal PRG behavior
 load_body:
-    lda #0
-    sta IS_BASIC            ; clear until we know otherwise
-    sta IS_NEW_FILE         ; file came from disk -- not new
+    ; IS_BASIC / IS_NEW_FILE are set by each success path below, never
+    ; before: a failed load must leave the current document's flags alone.
 
     ; ---- User file load via OPEN/CHRIN ----
     ; Our save path writes raw bytes via OPEN/CHKOUT/CHROUT with no PRG
@@ -140,6 +135,13 @@ load_body:
     ; source files are small (a few KB) so this is fine in practice.
     ; Module loads (which DO have proper PRG headers) still use LOAD and
     ; benefit from fastloader acceleration.
+
+    ; BUF_PTR = work_buf from the start: the error path tells "nothing
+    ; read yet" from "failed part-way" by it.
+    lda #<work_buf
+    sta BUF_PTR
+    lda #>work_buf
+    sta BUF_PTR+1
 
     ; ---- SETLFS: LA=IO_LA, device=SETTING_DRIVE, SA=2 (open SEQ-style) ----
     lda #IO_LA
@@ -184,16 +186,14 @@ load_body:
     bcc :+
     jmp @close_err
 :
-    ; ---- Read bytes into work_buf ----
-    lda #<work_buf
-    sta BUF_PTR
-    lda #>work_buf
-    sta BUF_PTR+1
-
-@read_loop:
+    ; ---- Read bytes into work_buf (BUF_PTR set above) ----
+    ; ST is checked once up front (an empty file / immediate EOF or error
+    ; reads nothing). The loop only comes back round when the READST after
+    ; CHRIN returned 0, and nothing in between touches ST, so re-reading it
+    ; at the top of each pass would always see 0.
     jsr READST
-    bne @read_done              ; EOF or error
-
+    bne @read_done              ; EOF or error before the first byte
+@read_loop:
     jsr CHRIN                   ; A = next byte
 
     ; Some drives set EOF on the byte that holds valid data, so check
@@ -245,26 +245,19 @@ load_body:
     jsr CLOSE
 
     ; BUF_PTR now one past the last loaded byte.
+    ; Every success path below starts as an existing, clean, plain-text
+    ; document with content = [work_buf..BUF_PTR), gap = [BUF_PTR..work_buf_end)
+    ; (MODDET reads the gap to find where the tokenized bytes end). Only the
+    ; BASIC path then flips IS_BASIC.
+    lda #0
+    sta IS_BASIC
+    sta IS_NEW_FILE         ; it's an existing file
+    sta IS_DIRTY            ; freshly loaded — not dirty
+    jsr gap_at_buf_ptr
 
     ; F6 source load: skip all PRG detection — the file is text by request.
     lda LOAD_AS_SOURCE
-    beq @basic_detect
-    ; ---- Set up as plain text (no detokenize, no disassemble) ----
-    lda #0
-    sta IS_BASIC
-    sta IS_NEW_FILE
-    sta IS_DIRTY
-    lda BUF_PTR
-    sta GAP_START
-    lda BUF_PTR+1
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
-    jmp @load_viewport
-
-@basic_detect:
+    bne @load_viewport
     ; Check first two bytes of work_buf for PRG load address $0801 ($01 $08).
     lda work_buf+0
     cmp #$01
@@ -276,37 +269,10 @@ load_body:
     ; It's a BASIC PRG. Set flag and run MODDET to detokenize into plain text.
     lda #$FF
     sta IS_BASIC
-    lda #0
-    sta IS_NEW_FILE         ; it's an existing file
-    sta IS_DIRTY            ; freshly loaded — not dirty
-    ; Set gap so MODDET knows where tokenized content ends in work_buf.
-    lda BUF_PTR
-    sta GAP_START
-    lda BUF_PTR+1
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
     jsr load_run_moddet     ; detokenizes work_buf in place; sets GAP from MOD_NEW_END
     jmp @load_viewport
 
 @not_basic:
-    lda #0
-    sta IS_BASIC
-    sta IS_NEW_FILE         ; it's an existing file
-    sta IS_DIRTY            ; freshly loaded — not dirty
-
-    ; Set up gap: content = [work_buf..BUF_PTR), gap = [BUF_PTR..work_buf_end)
-    lda BUF_PTR
-    sta GAP_START
-    lda BUF_PTR+1
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
-
     ; Detect binary PRG vs text: a text assembly source file always starts
     ; with a printable character (>= $20). A binary PRG's first byte is the
     ; lo byte of the load address — common values ($00, $01) are all < $20.
@@ -330,15 +296,41 @@ load_body:
     jmp @done
 
 @close_err:
+    jsr READST
+    sta IO_STATUS
     jsr CLRCHN
     lda #IO_LA
     jsr CLOSE
-    ; fall through to @io_err
-
-@io_err:
-    jsr READST
-    sta IO_STATUS
     jsr show_io_error
+    ; Nothing read yet (the usual case: a mistyped name fails on the first
+    ; byte): the document is untouched, so just give it its name back.
+    lda BUF_PTR
+    cmp #<work_buf
+    bne @partial
+    lda BUF_PTR+1
+    cmp #>work_buf
+    bne @partial
+    jsr prompt_restore_fname
+    jmp @done
+@partial:
+    ; The read failed part-way: the old text is already overwritten. Keep
+    ; what arrived as an unnamed, unsaved text document, so a save asks
+    ; for a name instead of writing a truncated copy over either file.
+    lda #0
+    sta IS_BASIC
+    sta FNAME_LEN
+    lda #$FF
+    sta IS_NEW_FILE
+    sta IS_DIRTY
+    jsr gap_at_buf_ptr
+    lda #<work_buf
+    sta TOP_LINE
+    lda #>work_buf
+    sta TOP_LINE+1
+    lda #0
+    sta LEFT_COL
+    sta CURSOR_ROW
+    sta CURSOR_COL
 
 @done:
     jsr render_status
@@ -378,27 +370,26 @@ do_save_file:
     lda (TMP),y                 ; read last byte — TMP untouched after this
     cmp #PET_CR
     beq @no_append_cr
-    lda #PET_CR
-    sta (TXT_PTR),y            ; Y is still 0
+    lda TXT_PTR+1               ; buffer exactly full: no room for the CR,
+    cmp #>work_buf_end          ; and writing it would land past the end
+    bne :+
+    lda TXT_PTR
+    cmp #<work_buf_end
+    beq @no_append_cr
+:   lda #PET_CR
+    ldy #0
+    sta (TXT_PTR),y
     inc TXT_PTR
     bne @no_append_cr
     inc TXT_PTR+1
 
 @no_append_cr:
-    lda TXT_PTR
-    sta IO_END_LO
+    ; Re-open gap at end of compacted content (IO_END = content end too)
+    ldx TXT_PTR
     lda TXT_PTR+1
+    stx IO_END_LO
     sta IO_END_HI
-
-    ; Re-open gap at end of compacted content
-    lda IO_END_LO
-    sta GAP_START
-    lda IO_END_HI
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
+    jsr gap_at_xa
 
     ; ---- If new file, ask BASIC or plain text? ----
     lda IS_NEW_FILE
@@ -516,6 +507,14 @@ do_save_file:
     lda #IO_LA
     jsr CLOSE
 
+    ; A serial drive reports write protect, disk full and the like only on
+    ; its error channel — OPEN, CHROUT and READST all look clean. Ask it
+    ; before calling the file saved.
+    jsr drive_error
+    bcc :+
+    jsr show_io_error
+    jmp @recover_text               ; IS_DIRTY stays set
+:
     lda #0
     sta IS_NEW_FILE
     sta IS_DIRTY
@@ -527,14 +526,9 @@ do_save_file:
 
 @restore_gap:
     ; Tokenize failed — restore gap pointers to plain-text content end
-    lda TXT_PTR
-    sta GAP_START
+    ldx TXT_PTR
     lda TXT_PTR+1
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
+    jsr gap_at_xa
     jmp @done
 
 @close_err:
@@ -608,27 +602,13 @@ load_run_moddet:
     bne @plain                      ; fall back to treating whole buf as text
 
     ; Set gap from detokenized content end
-    lda MOD_NEW_END_LO
-    sta GAP_START
+    ldx MOD_NEW_END_LO
     lda MOD_NEW_END_HI
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
-    rts
+    jmp gap_at_xa                   ; tail call
 
 @plain:
     ; Fallback: use BUF_PTR as content end (set by read loop)
-    lda BUF_PTR
-    sta GAP_START
-    lda BUF_PTR+1
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
-    rts
+    jmp gap_at_buf_ptr              ; tail call
 
 ; ============================================================================
 ; load_run_moddis — disassemble binary content in work_buf to assembly source.
@@ -636,8 +616,8 @@ load_run_moddet:
 ; Calls MODDIS (module index 1) which reads the PRG binary starting at
 ; work_buf, disassembles it, and writes assembly source text back.
 ; On success: GAP_START set from MOD_NEW_END, GAP_END = work_buf_end.
-; On failure: gap left as-is (caller's gap setup stays valid as raw text).
-; Clobbers: A, X, Y, LPTR, FNAME_BUF, FNAME_LEN, MOD_* params.
+; On failure: the raw bytes stay as text, gap at BUF_PTR.
+; Clobbers: A, X, Y, LPTR, MOD_* params.
 ; ============================================================================
 
 load_run_moddis:
@@ -647,43 +627,26 @@ load_run_moddis:
     cmp #$02
     bne @moddis_plain
 
-    ; Write CONTENT_ROWS sentinel CRs after output end so scrolling past
-    ; the last valid line shows blank rows instead of garbage.
-    lda MOD_NEW_END_LO
-    sta BUF_PTR
-    lda MOD_NEW_END_HI
-    sta BUF_PTR+1
-    lda #CONTENT_ROWS
-    sta TMP
-@sentinel:
-    lda BUF_PTR+1               ; stop if at or past work_buf_end
-    cmp #>work_buf_end
-    bcs @sent_done
-    lda #PET_CR
-    ldy #0
-    sta (BUF_PTR),y
-    inc BUF_PTR
-    bne :+
-    inc BUF_PTR+1
-:   dec TMP
-    bne @sentinel
-@sent_done:
-    ; Zero-size gap at work_buf → cursor at position 0.
-    ; ensure_cursor_visible finds cursor on first comparison: O(1).
-    lda #<work_buf
-    sta GAP_START
-    lda #>work_buf
-    sta GAP_START+1
-    lda #<work_buf
-    sta GAP_END
-    lda #>work_buf
-    sta GAP_END+1
+    ; run_module_by_index already put the gap at MOD_NEW_END..work_buf_end:
+    ; the disassembly is the whole document and the rest is free space, the
+    ; same as after a BASIC load.
     rts
 
 @moddis_plain:
-    lda BUF_PTR
-    sta GAP_START
+    ; Fallback: the raw bytes stay as text, gap at BUF_PTR.
+    ; fall through to gap_at_buf_ptr (tail call)
+
+; ============================================================================
+; gap_at_buf_ptr — GAP_START = BUF_PTR, GAP_END = work_buf_end.
+; gap_at_xa      — GAP_START = X (lo) / A (hi), GAP_END = work_buf_end.
+; Clobbers: A (and X for gap_at_buf_ptr).
+; ============================================================================
+
+gap_at_buf_ptr:
+    ldx BUF_PTR
     lda BUF_PTR+1
+gap_at_xa:
+    stx GAP_START
     sta GAP_START+1
     lda #<work_buf_end
     sta GAP_END
@@ -1026,6 +989,39 @@ show_io_error:
 
 io_error_text:
     .byte $09,$2F,$0F,$20,$05,$12,$12,$0F,$12,$20, 0
+
+; ============================================================================
+; drive_error — read the drive's error channel after a write.
+; Returns C=1 if the status code is 20 or above (an error), C=0 for 00-19.
+; A drive that can't be asked counts as OK: the write path already checked
+; ST for that. Clobbers A, X, Y, IO_SCRATCH.
+; ============================================================================
+
+DS_LA = 15                      ; logical file for the error channel
+
+drive_error:
+    lda #'0'
+    sta IO_SCRATCH
+    lda #0
+    jsr SETNAM                  ; no name: just open the channel
+    lda #DS_LA
+    ldx SETTING_DRIVE
+    ldy #15
+    jsr SETLFS
+    jsr OPEN
+    bcs @close
+    ldx #DS_LA
+    jsr CHKIN
+    bcs @close
+    jsr CHRIN                   ; tens digit of the status code
+    sta IO_SCRATCH
+@close:
+    jsr CLRCHN
+    lda #DS_LA
+    jsr CLOSE
+    lda IO_SCRATCH
+    cmp #'2'                    ; C=1 for codes 20-99
+    rts
 
 ; ============================================================================
 ; petscii_to_screen — clobbers A only. Y and X preserved.

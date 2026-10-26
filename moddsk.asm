@@ -172,9 +172,8 @@ DSK_ZP_SAVE:     .res 4     ; saved ZP_PTR2 / ZP_PTR3
 DSK_TMP:         .res 1     ; general scratch byte
 DSK_TMP2:        .res 1     ; second scratch byte
 DSK_NAMELEN_TMP: .res 1     ; scratch for rename/format input length
-DSK_INPUT_BUF:   .res 16    ; input buffer for prompts
+DSK_INPUT_BUF:   .res 18    ; prompt input: 16-char name, format puts the 2-char ID at +16/+17
 DSK_TRUNCATED:   .res 1     ; $FF if cache hit 100-entry cap
-DSK_ERROR_CODE:  .res 1     ; CBM error code from status channel
 DSK_CMD_BUF:     .res 32    ; raw command input buffer (@-key feature)
 DSK_CMD_LEN:     .res 1     ; length of raw command in DSK_CMD_BUF
 DSK_PAGE:        .res 1     ; current page number (0-based); each page = DSK_MAX_ENTRIES
@@ -837,65 +836,30 @@ dsk_chrin_safe:
 
 ; ============================================================================
 ; dsk_cache_ptr — set DSK_PTR to address of cache entry DSK_ENTRY_COUNT.
-; DSK_ENTRY_COUNT × 20 + DSK_CACHE.
-; Clobbers A, X. Result in DSK_PTR/$FC.
+; dsk_entry_ptr — set DSK_PTR to address of cache entry A.
+; DSK_PTR = DSK_CACHE + index × DSK_ENTRY_SIZE.
+; Clobbers A, X. Leaves DSK_TMP/DSK_TMP2 alone (dsk_read_entries keeps the
+; block count there across dsk_cache_ptr).
 ; ============================================================================
 
 dsk_cache_ptr:
-    lda #0
-    sta DSK_PTR
-    sta DSK_PTR+1
-    ldx DSK_ENTRY_COUNT
-    beq @done
-@mul:
-    ; add 20 to DSK_PTR
-    lda DSK_PTR
-    clc
-    adc #DSK_ENTRY_SIZE
-    sta DSK_PTR
-    bcc :+
-    inc DSK_PTR+1
-:   dex
-    bne @mul
-@done:
-    lda DSK_PTR
-    clc
-    adc #<DSK_CACHE
-    sta DSK_PTR
-    lda DSK_PTR+1
-    adc #>DSK_CACHE
-    sta DSK_PTR+1
-    rts
-
-; ============================================================================
-; dsk_entry_ptr — set DSK_PTR to address of cache entry in A.
-; Same math as dsk_cache_ptr but index comes from A, not DSK_ENTRY_COUNT.
-; ============================================================================
-
+    lda DSK_ENTRY_COUNT
 dsk_entry_ptr:
-    sta DSK_TMP                 ; save index
-    lda #0
-    sta DSK_PTR
+    tax
+    lda #>DSK_CACHE
     sta DSK_PTR+1
-    ldx DSK_TMP
+    lda #<DSK_CACHE
+    cpx #0
     beq @done
 @mul:
-    lda DSK_PTR
     clc
     adc #DSK_ENTRY_SIZE
-    sta DSK_PTR
     bcc :+
     inc DSK_PTR+1
 :   dex
     bne @mul
 @done:
-    lda DSK_PTR
-    clc
-    adc #<DSK_CACHE
     sta DSK_PTR
-    lda DSK_PTR+1
-    adc #>DSK_CACHE
-    sta DSK_PTR+1
     rts
 
 ; ============================================================================
@@ -1036,13 +1000,18 @@ dsk_draw_info:
     sta SCREEN+COLS+31
     rts
 @show_free:
-    ; Convert 16-bit block count to decimal (max 664 on 1541)
-    ; Simple: convert to 3 decimal digits
+    ; 16-bit block count, right-aligned to end at col 31 (field 27-31;
+    ; values below 1000 stay in 29-31 as before).
     lda DSK_FREE_LO
     sta DSK_TMP
     lda DSK_FREE_HI
     sta DSK_TMP2
-    jsr dsk_print_decimal       ; prints 4 digits into SCREEN+COLS+29
+    lda #<(SCREEN+COLS)
+    sta DSK_PTR2
+    lda #>(SCREEN+COLS)
+    sta DSK_PTR2+1
+    ldy #27
+    jsr dsk_print_u16
 
     ; Page indicator at cols 33-39: "PG:N" where N is DSK_PAGE+1.
     ; Always shown so user has a reference point even on page 1.
@@ -1214,94 +1183,50 @@ dsk_draw_entries:
 
 dsk_draw_one_entry:
     ; A = viewport row (0..19) on entry.
-    ; Entry index = A + DSK_VIEW_START. Stored in X throughout to survive
-    ; calls to dsk_color_row (which clobbers DSK_TMP/DSK_TMP2/$FB/$FC).
-    ; dsk_row_ptr and dsk_entry_ptr both clobber X, so we save/restore X
-    ; around those calls using DSK_ERROR_CODE as a 1-byte X spill
-    ; (safe: only written here during draw, never mid-ISR).
-
     pha                         ; save viewport row
+    clc
+    adc #DSK_VIEW_TOP
+    jsr dsk_row_ptr             ; DSK_PTR2 = screen RAM of this row
+    ; Colour RAM row = screen row + (COLOR - SCREEN); the difference is a
+    ; whole number of pages, so only the hi byte changes.
+    lda DSK_PTR2
+    sta DSK_PTR
+    lda DSK_PTR2+1
+    clc
+    adc #>(COLOR - SCREEN)
+    sta DSK_PTR+1
+    .assert <(COLOR - SCREEN) = 0, error, "moddsk: COLOR - SCREEN must be page-aligned"
 
-    ; Compute entry index and keep it in X
+    ; Entry index = viewport row + DSK_VIEW_START, kept in X
+    pla
     clc
     adc DSK_VIEW_START
-    tax                         ; X = entry index (survives dsk_color_row)
+    tax
 
-    ; Compute screen row = viewport_row + DSK_VIEW_TOP
-    pla
-    pha                         ; restore viewport row in A (keep on stack)
-    clc
-    adc #DSK_VIEW_TOP
-    stx DSK_ERROR_CODE          ; spill X (entry index) before dsk_row_ptr clobbers it
-    jsr dsk_row_ptr             ; DSK_PTR2 = screen RAM of this row
-    ldx DSK_ERROR_CODE          ; restore entry index to X
-
-    ; Determine highlight color
-    txa                         ; A = entry index
-    cmp DSK_SEL
-    beq @is_sel
+    ; Highlight colour
     lda #CLR_NORMAL
-    jmp @got_color
-@is_sel:
+    cpx DSK_SEL
+    bne :+
     lda #CLR_SEL
-@got_color:
-    sta DSK_TMP2                ; color byte for dsk_color_row
+:   sta DSK_TMP2
 
-    ; Clear screen row to spaces
-    ldy #0
-    lda #$20
+    ; Clear the screen row to spaces and paint its colour RAM row
+    ldy #COLS-1
 @clr:
+    lda #$20
     sta (DSK_PTR2),y
-    iny
-    cpy #COLS
-    bne @clr
-
-    ; Paint color RAM row — clobbers DSK_TMP, $FB/$FC, AND X.
-    pla
-    pha
-    clc
-    adc #DSK_VIEW_TOP
-    jsr dsk_color_row           ; X is now garbage
-
-    ; Restore entry index to X (dsk_color_row clobbered it)
-    ldx DSK_ERROR_CODE
-
-    ; Recompute DSK_PTR2 (dsk_color_row used $FB/$FC as scratch, clobbering DSK_PTR2)
-    pla
-    pha
-    clc
-    adc #DSK_VIEW_TOP
-    stx DSK_ERROR_CODE          ; spill restored X before dsk_row_ptr clobbers it
-    jsr dsk_row_ptr
-    ldx DSK_ERROR_CODE
+    lda DSK_TMP2
+    sta (DSK_PTR),y
+    dey
+    bpl @clr
 
     ; Bounds check: is entry X within the loaded directory?
-    pla                         ; done with viewport row
-    txa                         ; A = entry index
-    cmp DSK_ENTRY_COUNT
+    cpx DSK_ENTRY_COUNT
     bcs @blank                  ; entry index >= count: blank row, done
 
-    ; Load cache pointer for this entry
-    stx DSK_ERROR_CODE
-    jsr dsk_entry_ptr           ; DSK_PTR → cache entry (A = entry index)
-    ldx DSK_ERROR_CODE
-                                ; but we need DSK_PTR2 for screen, DSK_PTR for cache
-                                ; Problem: dsk_entry_ptr clobbers DSK_PTR which we
-                                ; need for screen! Use DSK_PTR2 for screen, DSK_PTR for cache.
-                                ; BUT dsk_row_ptr used DSK_PTR2... we need to recompute.
-                                ; Refactor: store screen row address in a fixed location first.
-
-    ; The above has a register collision. Reorganize:
-    ; Step 1: compute entry index into DSK_TMP (done above)
-    ; Step 2: get screen row pointer into DSK_PTR2 (done above via dsk_row_ptr)
-    ; Step 3: get cache entry pointer into DSK_PTR (via dsk_entry_ptr)
-    ; dsk_entry_ptr uses DSK_PTR. dsk_row_ptr result was in DSK_PTR2.
-    ; So we're OK as long as dsk_entry_ptr doesn't touch DSK_PTR2.
-    ; Let's make dsk_entry_ptr use DSK_PTR only and verify.
-    ; dsk_row_ptr: result → DSK_PTR2 (we'll write a separate version below)
-    ; The issue: earlier dsk_row_ptr wrote to DSK_PTR. Fix: make dsk_row_ptr
-    ; write to DSK_PTR2, and dsk_entry_ptr write to DSK_PTR.
-    ; See implementations below — this is settled there.
+    ; DSK_PTR → cache entry (DSK_PTR2 still → screen row)
+    txa
+    jsr dsk_entry_ptr
 
     ; Write filename (bytes 0-15 of entry), converting PETSCII to screen codes
     ldy #0
@@ -1320,16 +1245,16 @@ dsk_draw_one_entry:
     ldy #17
     sta (DSK_PTR2),y
 
-    ; Write block count at cols 20-23 (right side)
+    ; Block count, right-aligned to end at col 22 (field 18-22; values
+    ; below 1000 stay in 20-22 as before)
     ldy #17
     lda (DSK_PTR),y             ; blocks lo
-    sta DSK_TMP                 ; reuse DSK_TMP (entry index is stale now, ok)
-    ldy #18
+    sta DSK_TMP
+    iny
     lda (DSK_PTR),y             ; blocks hi
     sta DSK_TMP2
-    ; print decimal at screen col 20
-    jsr dsk_print_blk_count
-    rts
+    ldy #18
+    jmp dsk_print_u16           ; tail call
 
 @blank:
     rts
@@ -1370,69 +1295,20 @@ dsk_type_char:
 
 dsk_row_ptr:
     tax
-    lda #0
-    sta DSK_PTR2
+    lda #>SCREEN
     sta DSK_PTR2+1
+    lda #<SCREEN
     cpx #0
-    beq @base
+    beq @done
 @mul:
-    lda DSK_PTR2
     clc
     adc #COLS
-    sta DSK_PTR2
     bcc :+
     inc DSK_PTR2+1
 :   dex
     bne @mul
-@base:
-    lda #<SCREEN
-    clc
-    adc DSK_PTR2
+@done:
     sta DSK_PTR2
-    lda #>SCREEN
-    adc DSK_PTR2+1
-    sta DSK_PTR2+1
-    rts
-
-; ============================================================================
-; dsk_color_row — paint color RAM row A with color in DSK_TMP2.
-; Clobbers A, X, Y.
-; ============================================================================
-
-dsk_color_row:
-    ; Compute color RAM row address using DSK_PTR ($FB/$FC) as scratch.
-    ; Reads color from DSK_TMP2. Clobbers A, X, DSK_PTR/$FB/$FC.
-    ; Does NOT touch DSK_TMP ($CAF2) -- callers rely on DSK_TMP being preserved.
-    tax
-    lda #0
-    sta DSK_PTR
-    sta DSK_PTR+1
-    cpx #0
-    beq @base
-@mul:
-    lda DSK_PTR
-    clc
-    adc #COLS
-    sta DSK_PTR
-    bcc :+
-    inc DSK_PTR+1
-:   dex
-    bne @mul
-@base:
-    lda #<COLOR
-    clc
-    adc DSK_PTR
-    sta DSK_PTR
-    lda #>COLOR
-    adc DSK_PTR+1
-    sta DSK_PTR+1
-    ldy #0
-    lda DSK_TMP2
-@paint:
-    sta (DSK_PTR),y
-    iny
-    cpy #COLS
-    bne @paint
     rts
 
 ; ============================================================================
@@ -2270,132 +2146,53 @@ dsk_err_text:
     .byte $04,$09,$13,$0B,$20,$05,$12,$12,$0F,$12,$20,$20,$20,$20,$20,$20,$20,$20, 0
 
 ; ============================================================================
-; dsk_print_decimal — print DSK_TMP/DSK_TMP2 (16-bit) as decimal on row 1.
-; Writes up to 3 digits at SCREEN+COLS+29..+31.
-; 16-bit subtract: handles up to 664 blocks (1541 max).
-; Uses 16-bit subtraction of 100 and 10 via carry.
+; dsk_print_u16 — print DSK_TMP (lo) / DSK_TMP2 (hi) as unsigned decimal,
+; right-aligned in a 5-char field at (DSK_PTR2),Y .. (DSK_PTR2),Y+4,
+; leading zeros as spaces (0 prints as "    0"). Correct for 0-65535.
+; Clobbers A, X, Y, DSK_TMP, DSK_TMP2, DSK_NAMELEN_TMP.
 ; ============================================================================
 
-dsk_print_decimal:
-    lda #$20
-    sta SCREEN+COLS+29
-    sta SCREEN+COLS+30
-    sta SCREEN+COLS+31
-    ; Count hundreds via 16-bit subtraction of 100
-    lda #0
-    sta DSK_NAMELEN_TMP
-@h:
-    ; 16-bit compare DSK_TMP2:DSK_TMP >= 100
+dsk_print_u16:
+    ldx #0
+    stx DSK_NAMELEN_TMP         ; digit count; $30-based once a digit is shown
+@pow:
+    ; while value >= dsk_pow10[x]: value -= dsk_pow10[x], count++
+    lda DSK_TMP
+    cmp dsk_pow10_lo,x
     lda DSK_TMP2
-    bne @h_sub              ; hi byte non-zero means >= 256 >= 100
+    sbc dsk_pow10_hi,x
+    bcc @digit                  ; value < power
+    sta DSK_TMP2
     lda DSK_TMP
-    cmp #100
-    bcc @h_done
-@h_sub:
-    lda DSK_TMP
-    sec
-    sbc #100
+    sbc dsk_pow10_lo,x          ; C=1 here: plain subtract
     sta DSK_TMP
-    lda DSK_TMP2
-    sbc #0
-    sta DSK_TMP2
     inc DSK_NAMELEN_TMP
-    jmp @h
-@h_done:
+    bne @pow                    ; always
+@digit:
     lda DSK_NAMELEN_TMP
-    beq @no_hundreds
-    clc
-    adc #$30
-    sta SCREEN+COLS+29
-@no_hundreds:
-    ; Count tens (DSK_TMP2 must be 0 here, value < 100)
-    lda #0
+    bne @show                   ; 1-9 (first digit) or $30-$39 (later)
+    lda #$20                    ; leading zero
+    sta (DSK_PTR2),y
+    bne @next                   ; always
+@show:
+    ora #$30
+    sta (DSK_PTR2),y
+    lda #$30                    ; later zeros print as '0'
     sta DSK_NAMELEN_TMP
-    lda DSK_TMP
-@t:
-    cmp #10
-    bcc @t_done
-    sec
-    sbc #10
-    inc DSK_NAMELEN_TMP
-    jmp @t
-@t_done:
-    pha
-    lda DSK_NAMELEN_TMP
-    clc
-    adc #$30
-    sta SCREEN+COLS+30
-    pla
-    clc
-    adc #$30
-    sta SCREEN+COLS+31
+@next:
+    iny
+    inx
+    cpx #4
+    bne @pow
+    lda DSK_TMP                 ; units, always shown
+    ora #$30
+    sta (DSK_PTR2),y
     rts
 
-; ============================================================================
-; dsk_print_blk_count — print block count (DSK_TMP/DSK_TMP2) right-justified
-; in a 4-char field at screen column 33-36 of the current entry row.
-; Uses DSK_PTR2 as screen row base (set by dsk_draw_one_entry).
-; ============================================================================
-
-dsk_print_blk_count:
-    ; For 1541: max blocks per file is about 664.
-    ; Just print as 3-digit decimal at cols 20-22 of the entry row.
-    ldy #20
-    lda #$20
-    sta (DSK_PTR2),y
-    ldy #21
-    sta (DSK_PTR2),y
-    ldy #22
-    sta (DSK_PTR2),y
-
-    ; Hundreds
-    lda DSK_TMP
-    sta DSK_NAMELEN_TMP              ; save
-    lda #0
-    sta DSK_TMP2
-@bh:
-    lda DSK_NAMELEN_TMP
-    cmp #100
-    bcc @bh_done
-    sec
-    sbc #100
-    sta DSK_NAMELEN_TMP
-    inc DSK_TMP2
-    jmp @bh
-@bh_done:
-    lda DSK_TMP2
-    beq @bt
-    clc
-    adc #$30
-    ldy #20
-    sta (DSK_PTR2),y
-
-    ; Tens
-@bt:
-    lda #0
-    sta DSK_TMP2
-@bt_loop:
-    lda DSK_NAMELEN_TMP
-    cmp #10
-    bcc @bt_done
-    sec
-    sbc #10
-    sta DSK_NAMELEN_TMP
-    inc DSK_TMP2
-    jmp @bt_loop
-@bt_done:
-    lda DSK_TMP2
-    clc
-    adc #$30
-    ldy #21
-    sta (DSK_PTR2),y
-    ; Units
-    lda DSK_NAMELEN_TMP
-    clc
-    adc #$30
-    ldy #22
-    sta (DSK_PTR2),y
-    rts
+dsk_pow10_lo:
+    .lobytes 10000, 1000, 100, 10
+dsk_pow10_hi:
+    .hibytes 10000, 1000, 100, 10
 
 ; ============================================================================
 ; dsk_petscii_to_sc — convert PETSCII byte in A to screen code.

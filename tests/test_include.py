@@ -79,6 +79,8 @@ class FakeDrive:
         self.pend_lfn = self.pend_dev = self.pend_sa = 0
         self.pend_name = ""
         self.bus_violations = []
+        self.status = b"00, OK,00,00\r"  # error channel (SA 15) text
+        self.full = False  # True: writes end in 72, DISK FULL
 
     def _bus_command(self, what):
         # OPEN/CLOSE/CHKIN all put commands on the serial bus under ATN,
@@ -109,8 +111,18 @@ class FakeDrive:
             "missing": False,
             "data": None,
         }
-        if self.pend_sa == 1:  # write channel
+        if self.pend_sa == 15:  # error channel: reads the current status
+            entry["data"] = self.status
+        elif self.pend_sa == 1:  # write channel
+            name = self.pend_name
+            replace = name.startswith("@")
+            if replace:
+                name = name.split(":", 1)[1]
+            entry["name"] = name
             entry["data"] = bytearray()
+            # like DOS: an existing name without "@0:" fails (63 FILE
+            # EXISTS) and only the error channel says so
+            entry["failed"] = name in self.files and not replace
         else:  # read channel: serial OPEN succeeds even if file is absent
             if self.pend_name in self.files:
                 entry["data"] = self.files[self.pend_name]
@@ -123,7 +135,13 @@ class FakeDrive:
         self._bus_command("CLOSE")
         f = self.open_files.pop(lfn, None)
         if f is not None and f["sa"] == 1:
-            self.files[f["name"]] = bytes(f["data"])
+            if f["failed"]:
+                self.status = b"63,FILE EXISTS,00,00\r"
+            elif self.full:
+                self.status = b"72,DISK FULL,00,00\r"
+            else:
+                self.files[f["name"]] = bytes(f["data"])
+                self.status = b"00, OK,00,00\r"
         if self.dflt_in == lfn:
             self.dflt_in = None
         if self.dflt_out == lfn:
@@ -291,8 +309,9 @@ class Machine:
         assert self.mem[SRC_DEPTH] == 0, "source frame stack not empty"
 
 
-def assemble(source, files=None):
+def assemble(source, files=None, full=False):
     m = Machine(source, files or {})
+    m.drive.full = full
     m.run()
     m.check_clean_finish()
     return m
@@ -499,6 +518,35 @@ def main():
     m = assemble("        *= $C000\nBACK:   RTS\n" + nops(130) + "        BNE BACK\n")
     expect_error(m, "BRANCH RANGE", "BNE -133", line=133)
     print("ok: relative branch range (lo-byte sign checked)")
+
+    # 15. Symbol table past one 256-entry page of the hash index: forward
+    #     and backward references on both sides of the boundary resolve,
+    #     a duplicate of a first-page label defined in the second page is
+    #     caught, and the 401st label overflows the table (SYM_MAX = 400).
+    n = 300
+    src = "        *= $1000\n" + "".join(
+        f"S{i}:\n        JMP S{(i * 97 + 13) % n}\n" for i in range(n)
+    )
+    expected = bytearray(b"\x00\x10")
+    for i in range(n):
+        target = 0x1000 + 3 * ((i * 97 + 13) % n)
+        expected += bytes([0x4C, target & 0xFF, target >> 8])
+    expect_output(assemble(src), bytes(expected), "300 symbols")
+    src = "        *= $1000\n" + "".join(f"S{i}:\n" for i in range(270)) + "S5:\n"
+    expect_error(assemble(src), "SYMBOL ERROR", "duplicate on page 2", line=272)
+    src = "        *= $1000\n" + "".join(f"S{i}:\n" for i in range(401))
+    expect_error(assemble(src), "SYMBOL ERROR", "401 symbols", line=402)
+    print("ok: symbol table beyond 256 entries, duplicate, overflow")
+
+    # 16. Output errors only the drive's error channel reports: a full
+    #     disk must fail the assembly, and an existing output file must be
+    #     replaced rather than silently kept.
+    src = "        *= $C000\n        RTS\n"
+    m = assemble(src, full=True)
+    expect_error(m, "I/O ERROR", "disk full")
+    m = assemble(src, {"OUT": b"stale"})
+    expect_output(m, bytes.fromhex("00c060"), "replace existing output")
+    print("ok: disk full reported, existing output replaced")
 
     print("\nall include tests passed")
 

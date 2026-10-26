@@ -12,6 +12,7 @@ MOD_BUF_LO       = $0214
 MOD_BUF_HI       = $0215
 MOD_BUF_END_LO   = $021A
 MOD_BUF_END_HI   = $021B
+MOD_SFR_EDITED   = $021F           ; out: nonzero if a replace edited the buffer
 
 ; Editor ZP — borrowed for pointer dereferences while module runs.
 ; These are offsets into the editor's .zeropage block (editor.asm), whose
@@ -143,6 +144,7 @@ sfr_main:
     sta sfr_repl_buf
     sta sfr_have_match
     sta sfr_did_move
+    sta sfr_did_edit
     sta sfr_cur_field
     lda #$FF
     sta sfr_case_mode
@@ -203,6 +205,8 @@ sfr_loop:
     jmp sfr_loop
 
 sfr_exit:
+    lda sfr_did_edit
+    sta MOD_SFR_EDITED
     lda sfr_did_move
     beq @nomove
     lda sfr_gs_lo
@@ -296,38 +300,15 @@ sfr_do_return:
     beq @done
     lda sfr_have_match
     beq @find
-    ; Replace then find next
-    lda sfr_repl_len
-    bne @do_repl
-    ; Empty replacement: skip match by advancing GAP_END
-    lda sfr_ge_lo
-    clc
-    adc sfr_find_len
-    sta sfr_ge_lo
-    sta ZP_GAP_END
-    sta MOD_GAP_END_LO
-    lda sfr_ge_hi
-    adc #0
-    sta sfr_ge_hi
-    sta ZP_GAP_END+1
-    sta MOD_GAP_END_HI
-    ; Deleting the match shrinks the document — keep sfr_total in sync,
-    ; or later searches scan find_len bytes past the real content and can
-    ; act on phantom matches beyond the buffer.
-    lda sfr_total_lo
-    sec
-    sbc sfr_find_len
-    sta sfr_total_lo
-    lda sfr_total_hi
-    sbc #0
-    sta sfr_total_hi
-    lda #$FF
-    sta sfr_did_move
-    jmp @after_repl
-@do_repl:
+    ; RETURN in the FIND field steps to the next match (srch already points
+    ; past this one); only RETURN in the REPLACE field edits the buffer. An
+    ; empty replacement deletes the match.
+    lda sfr_cur_field
+    beq @find
     jsr sfr_replace_at_match
     bcs @done                   ; no room in gap — replace aborted
-@after_repl:
+    lda #$FF
+    sta sfr_did_edit
     lda #0
     sta sfr_have_match
     lda sfr_gs_lo
@@ -360,58 +341,70 @@ sfr_find_next:
     bcs @len_ok
     jmp @nf
 @len_ok:
+    ; Fold the pattern once per search (into sfr_pat_buf) rather than on
+    ; every comparison: fold(buf) == fold(pat) compares the same either way.
+    ldx #0
+@pf:
+    lda sfr_find_buf,x
+    ldy sfr_case_mode
+    beq :+
+    jsr sfr_fold
+:   sta sfr_pat_buf,x
+    inx
+    cpx sfr_find_len
+    bne @pf
+    ; limit = total - find_len: the last offset a match can start at.
+    ; Computed once — sfr_vbyte clobbers sfr_tmp, so it gets its own home.
+    lda sfr_total_lo
+    sec
+    sbc sfr_find_len
+    sta sfr_lim_lo
+    lda sfr_total_hi
+    sbc #0
+    sta sfr_lim_hi
     lda sfr_srch_lo
     sta sfr_i_lo
     lda sfr_srch_hi
     sta sfr_i_hi
 @outer:
-    ; limit = total - find_len
-    lda sfr_total_lo
-    sec
-    sbc sfr_find_len
-    sta sfr_tmp_lo
-    lda sfr_total_hi
-    sbc #0
-    sta sfr_tmp_hi
     ; i > limit → not found
+    lda sfr_lim_lo
+    cmp sfr_i_lo
+    lda sfr_lim_hi
+    sbc sfr_i_hi
+    bcc @nf
+    ; First character: most positions miss here, so test it without the
+    ; inner loop's index bookkeeping.
+    lda sfr_i_lo
+    sta sfr_voff_lo
     lda sfr_i_hi
-    cmp sfr_tmp_hi
-    bcc @try
-    bne @nf
-    lda sfr_i_lo
-    cmp sfr_tmp_lo
-    bcc @try
-    beq @try
-    bcs @nf
-@try:
-    lda #0
-    sta sfr_j
+    sta sfr_voff_hi
+    jsr sfr_vbyte
+    ldx sfr_case_mode
+    beq :+
+    jsr sfr_fold
+:   cmp sfr_pat_buf
+    bne @miss
+    ldx #1
 @inner:
-    lda sfr_j
-    cmp sfr_find_len
+    cpx sfr_find_len
     beq @found
-    lda sfr_i_lo
+    stx sfr_j
+    txa
     clc
-    adc sfr_j
+    adc sfr_i_lo
     sta sfr_voff_lo
     lda sfr_i_hi
     adc #0
     sta sfr_voff_hi
     jsr sfr_vbyte
     ldx sfr_case_mode
-    beq @nf_buf
+    beq :+
     jsr sfr_fold
-@nf_buf:
-    sta sfr_tmp_val
-    ldx sfr_j
-    lda sfr_find_buf,x
-    ldx sfr_case_mode
-    beq @nf_pat
-    jsr sfr_fold
-@nf_pat:
-    cmp sfr_tmp_val
+:   ldx sfr_j
+    cmp sfr_pat_buf,x
     bne @miss
-    inc sfr_j
+    inx
     bne @inner
 @miss:
     inc sfr_i_lo
@@ -421,9 +414,9 @@ sfr_find_next:
 @nf:
     lda #0
     sta sfr_have_match
-    jsr sfr_flash_not_found
-@ret:
-    rts
+    ldx #sfr_msg_nf - sfr_msgs
+    lda #COL_NOT_FOUND
+    jmp sfr_flash               ; tail call
 
 @found:
     lda sfr_i_lo
@@ -442,8 +435,9 @@ sfr_find_next:
     sta sfr_srch_hi
     ; Flash "FOUND" in status bar — editor renders viewport on module exit.
     ; Do NOT call back into the editor here: the addresses shift every recompile.
-    jsr sfr_flash_found
-    rts
+    ldx #sfr_msg_found - sfr_msgs
+    lda #COL_FOUND
+    jmp sfr_flash               ; tail call
 
 ; =============================================================================
 ; sfr_move_gap — reposition gap to virtual offset sfr_match_lo/hi
@@ -547,6 +541,14 @@ sfr_move_gap:
     lda sfr_buf_hi
     adc sfr_match_hi
     sta sfr_gs_hi
+    ; The moved block now sits just below the old GAP_END: pull it down.
+    lda sfr_ge_lo
+    sec
+    sbc sfr_mv_sz_lo
+    sta sfr_ge_lo
+    lda sfr_ge_hi
+    sbc sfr_mv_sz_hi
+    sta sfr_ge_hi
     lda sfr_match_lo
     sta sfr_pre_lo
     lda sfr_match_hi
@@ -586,7 +588,9 @@ sfr_replace_at_match:
     lda sfr_tmp_lo
     cmp sfr_repl_len
     bcs @fits
-    jsr sfr_flash_full          ; "BUFFER FULL" — nothing was changed
+    ldx #sfr_msg_full - sfr_msgs
+    lda #COL_NOT_FOUND
+    jsr sfr_flash               ; "BUFFER FULL" — nothing was changed
     sec
     rts
 @fits:
@@ -790,20 +794,19 @@ sfr_fold:
     ; (SHIFT+letter as stored by the editor — the normal way uppercase
     ; glyphs appear in the lowercase charset).  The old fold handled only
     ; $61-$7A, so case-insensitive search never matched shifted text.
+    cmp #$C1
+    bcs @try_shifted        ; test $C1-$DA first: they are >= $7B, which the
+                            ; lowercase test below would pass through unfolded
     cmp #$61
-    bcc @try_shifted
+    bcc @done
     cmp #$7B
     bcs @done
-    sec
-    sbc #$20                ; $61-$7A → $41-$5A
+    sbc #$1F                ; C=0 here: $61-$7A - $20 → $41-$5A
     rts
 @try_shifted:
-    cmp #$C1
-    bcc @done
     cmp #$DB
     bcs @done
-    sec
-    sbc #$80                ; $C1-$DA → $41-$5A
+    sbc #$7F                ; C=0 here: $C1-$DA - $80 → $41-$5A
 @done:
     rts
 
@@ -999,14 +1002,20 @@ sfr_draw_repl_field:
 @done:
     rts
 
-sfr_flash_found:
+; sfr_flash — show a status message on row 0 and hold it ~3/4 s.
+; X = offset of the 0-terminated message from sfr_msgs, A = its color.
+; The text stays until the module exits — the editor restores the status
+; bar then.
+sfr_flash:
+    sta sfr_jtmp
     ldy #0
 @wr:
-    lda sfr_msg_found,y
+    lda sfr_msgs,x
     beq @wait
     sta ROW0_SCR,y
-    lda #COL_FOUND
+    lda sfr_jtmp
     sta ROW0_COL,y
+    inx
     iny
     bne @wr
 @wait:
@@ -1018,53 +1027,9 @@ sfr_flash_found:
     lda JIFFY_LO
     cmp sfr_jtmp
     bne @sp
-    ; Status bar stays "FOUND" until module exits — editor restores it then.
     rts
 
-sfr_flash_not_found:
-    ldy #0
-@wr:
-    lda sfr_msg_nf,y
-    beq @wait
-    sta ROW0_SCR,y
-    lda #COL_NOT_FOUND
-    sta ROW0_COL,y
-    iny
-    bne @wr
-@wait:
-    lda JIFFY_LO
-    clc
-    adc #45
-    sta sfr_jtmp
-@sp:
-    lda JIFFY_LO
-    cmp sfr_jtmp
-    bne @sp
-    ; Status bar stays "NOT FOUND" until module exits — editor restores it then.
-    rts
-
-sfr_flash_full:
-    ldy #0
-@wr:
-    lda sfr_msg_full,y
-    beq @wait
-    sta ROW0_SCR,y
-    lda #COL_NOT_FOUND
-    sta ROW0_COL,y
-    iny
-    bne @wr
-@wait:
-    lda JIFFY_LO
-    clc
-    adc #45
-    sta sfr_jtmp
-@sp:
-    lda JIFFY_LO
-    cmp sfr_jtmp
-    bne @sp
-    ; Status bar stays "BUFFER FULL" until module exits — editor restores it.
-    rts
-
+sfr_msgs:
 sfr_msg_found:
     .byte $06,$0F,$15,$0E,$04,$20,$20,$20,$20,$20,$20, 0   ; FOUND
 sfr_msg_nf:
@@ -1097,6 +1062,7 @@ sfr_case_mode:  .res 1
 sfr_cur_field:  .res 1
 sfr_have_match: .res 1
 sfr_did_move:   .res 1
+sfr_did_edit:   .res 1
 
 sfr_match_lo:   .res 1
 sfr_match_hi:   .res 1
@@ -1110,7 +1076,9 @@ sfr_voff_lo:    .res 1
 sfr_voff_hi:    .res 1
 sfr_tmp_lo:     .res 1
 sfr_tmp_hi:     .res 1
-sfr_tmp_val:    .res 1
+sfr_lim_lo:     .res 1
+sfr_lim_hi:     .res 1
+sfr_pat_buf:    .res FIND_MAXLEN    ; sfr_find_buf, folded if case-insensitive
 
 sfr_src_lo:     .res 1
 sfr_src_hi:     .res 1

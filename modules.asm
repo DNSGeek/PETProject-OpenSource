@@ -51,13 +51,9 @@
 ;   After .include "loadsave.asm": .include "modules.asm"
 ;
 ;   .segment "BSS":
-;     MOD_LOADED:            .res 1
-;     SETTING_TOKENIZE_SAVE: .res 1
 ;     MOD_SEL_ROW:           .res 1
 ;     MOD_ITEM_TMP:          .res 1   ; item index scratch (distinct from MOD_TMP)
 ;     MOD_TMP:               .res 1   ; general popup scratch
-;
-;   init_settings: lda #$FF / sta MOD_LOADED / lda #0 / sta SETTING_TOKENIZE_SAVE
 ; ============================================================================
 
 MOD_MAGIC        = $0212
@@ -75,6 +71,7 @@ MOD_DIALECT      = $021D
 MOD_STATUS       = $021E
 MOD_NEW_END_LO   = $021F
 MOD_NEW_END_HI   = $0220
+MOD_SFR_EDITED   = MOD_NEW_END_LO    ; MODSFR's $04 return: nonzero = buffer edited
 MOD_LOAD_LO      = $0221             ; load address for this module (lo)
 MOD_LOAD_HI      = $0222             ; load address for this module (hi)
 MOD_SAVED_SP     = $0227             ; SP saved across module call (avoids stack overflow)
@@ -218,6 +215,15 @@ do_search_replace:
     ldx #6                      ; MODSFR is index 6 in the module tables
     jsr run_module_by_index
     ; run_module_by_index already handled $04 (gap updated from param block).
+    ; MODSFR flags whether a replace actually edited the buffer.
+    lda MOD_STATUS
+    cmp #$04
+    bne @clean
+    lda MOD_SFR_EDITED
+    beq @clean
+    lda #$FF
+    sta IS_DIRTY
+@clean:
     ; Now ensure the cursor is on screen and redraw.
     jsr ensure_cursor_visible
     jsr render_status
@@ -588,24 +594,40 @@ run_selected_module:
     ; modules — MODDSK sets FNAME_BUF/LEN), and error reporting.
     lda MOD_STATUS
     cmp #$02
-    beq @done                   ; buffer replace fully handled downstream
+    bne @not_replaced
+    ; The module rewrote the buffer (renumber, disassemble...): the text no
+    ; longer matches what is on disk, so the new/load/quit prompts must fire.
+    lda #$FF
+    sta IS_DIRTY
+    rts
+@not_replaced:
 
     cmp #$04
     bne @check_err
-    ; $04 — MODDSK set FNAME_BUF/LEN: ask editor to load the file
+    ; $04 — MODDSK set DSK_PEND_FNAME/LEN: ask editor to load the file. The
+    ; load replaces the buffer, so ask about unsaved changes first, as F3
+    ; does, then adopt the chosen name.
+    jsr load_dirty_check            ; C=1 → cancelled
+    bcs @done
+    jsr prompt_stash_fname          ; a failed load restores the old name
+    ldy #15
+:   lda DSK_PEND_FNAME,y
+    sta FNAME_BUF,y
+    dey
+    bpl :-
+    lda DSK_PEND_LEN
+    sta FNAME_LEN
     jsr do_load_file_from_fname
     rts
 
 @check_err:
+    ; $01 was already reported by run_module_by_index; only a module that
+    ; never set a status ($FF) is still unreported here.
     lda MOD_STATUS
-    cmp #$FF                ; module never set status
-    beq @show_err
-    cmp #$01
-    beq @show_err
-@done:
-    rts
-@show_err:
+    cmp #$FF
+    bne @done
     jsr mpop_show_error
+@done:
     rts
 
 ; ============================================================================
@@ -643,13 +665,15 @@ run_module_by_index:
 
     ; MODDSK shim parameters at $0223-$0226: where MODDSK should write
     ; the chosen filename when it returns MOD_STATUS=$04.
-    lda #<FNAME_BUF
+    ; It writes to a pending buffer, not FNAME_BUF: the unsaved-changes
+    ; prompt before the load may save the document under its current name.
+    lda #<DSK_PEND_FNAME
     sta $0223                   ; DSK_FNAME_BUF_LO
-    lda #>FNAME_BUF
+    lda #>DSK_PEND_FNAME
     sta $0224                   ; DSK_FNAME_BUF_HI
-    lda #<FNAME_LEN
+    lda #<DSK_PEND_LEN
     sta $0225                   ; DSK_FNAME_LEN_LO
-    lda #>FNAME_LEN
+    lda #>DSK_PEND_LEN
     sta $0226                   ; DSK_FNAME_LEN_HI
 
     ; ---- Module load via Kernal LOAD ($FFD5) ----
@@ -837,10 +861,10 @@ run_sel_loaded:
     sta CURSOR_ROW
     sta CURSOR_COL
     jsr ensure_cursor_visible   ; scroll/compute so display agrees with the gap
-    ; The module rewrote the buffer (renumber, tokenize...): the text no
-    ; longer matches what is on disk, so the new/load/quit prompts must fire.
-    lda #$FF
-    sta IS_DIRTY
+    ; IS_DIRTY is left alone: load and save run MODDET/MODTOK/MODDIS through
+    ; here and must not leave a freshly loaded or saved file marked unsaved.
+    ; The user-invoked paths (run_selected_module, do_search_replace) mark
+    ; the buffer dirty themselves.
     rts
 
 @check_reposition:
@@ -860,10 +884,6 @@ run_sel_loaded:
     sta GAP_END+1
     ; TOP_LINE intentionally not reset — ensure_cursor_visible (called by
     ; do_search_replace after we return) will scroll as needed.
-    ; MODSFR reports $04 after a replace as well as after a plain find, and
-    ; does not say which; a replace edits the buffer, so mark it dirty.
-    lda #$FF
-    sta IS_DIRTY
     rts
 
 @check_err:

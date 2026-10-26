@@ -38,8 +38,6 @@ RPTFLG       = $028A               ; KERNAL key-repeat control: $80 = all keys
                                    ; repeat, $40 = none, $00 = cursor/space/del
                                    ; only (the power-on default)
 RPTFLG_ALL   = $80                 ; value that makes every key auto-repeat
-NMI_VEC      = $0318               ; NMI indirect vector (lo)
-NMI_VEC_HI   = $0319               ; NMI indirect vector (hi)
 
 ; Warm-boot communication block. Lives at $0200 (start of page 2).
 ; On cold boot this area is uninitialised. On IDE-triggered warm boot
@@ -271,8 +269,6 @@ c128_entry:
     lda #RPTFLG_ALL
     sta RPTFLG
 
-    jsr load_settings
-
     ; Check for warm-boot magic written by the NMI/exit stub.
     lda BOOT_MAGIC
     cmp #RESUME_MAGIC
@@ -295,6 +291,7 @@ c128_entry:
     ; ------------------------------------------------------------------
 cold_start:
     jsr init_settings              ; write defaults into SETTING_* bytes
+    jsr load_settings              ; then let a config file overlay them
     jsr setup_screen               ; clear display, init gap buffer
     jmp editor_ready
 
@@ -307,17 +304,19 @@ warm_start:
     lda #0
     sta BOOT_MAGIC                 ; consume the magic so next boot is cold
 
-    jsr init_settings              ; apply defaults (config file would overlay
-                                   ; these in load_settings once implemented)
+    jsr init_settings              ; apply defaults...
+    jsr load_settings              ; ...then let a config file overlay them
     jsr setup_screen_blank         ; clear display, empty gap buffer
 
     ; Future: if BOOT_FNAME_LEN > 0, call load_file with BOOT_FNAME/LEN.
-    ; For now, warm boot just opens a blank buffer.
-    lda BOOT_FNAME_LEN
-    beq editor_ready               ; no filename recorded — start blank
-    ; jsr load_source_file         ; (file I/O not yet implemented)
+    ; For now, warm boot just opens a blank buffer (falls into editor_ready).
 
 editor_ready:
+    ; BSS is not cleared at load, so the completion state starts as whatever
+    ; was in RAM; a stale "cycling" flag made the first CTRL+I rewind the gap
+    ; by a garbage length, below the start of the buffer.
+    lda #0
+    sta COMPL_ACTIVE
     jsr apply_colors               ; push SETTING_* values to VIC + color RAM
     jsr render_status
     jsr ensure_cursor_visible
@@ -671,14 +670,9 @@ do_new_file:
     bcs @done
 @clear:
     ; Reset gap buffer to empty
-    lda #<work_buf
-    sta GAP_START
+    ldx #<work_buf
     lda #>work_buf
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
+    jsr gap_at_xa
     ; Reset viewport and cursor
     lda #<work_buf
     sta TOP_LINE
@@ -696,10 +690,9 @@ do_new_file:
     sta IS_NEW_FILE
     sta IS_BASIC
     jsr ensure_cursor_visible
-    jsr render_status
     jsr render_viewport
     jsr draw_cursor
-    jsr modal_exit              ; restore idle status bar before returning
+    jsr modal_exit              ; restore idle status bar (render_status)
 @done:
     rts
 
@@ -800,12 +793,10 @@ init_settings:
     sta SETTING_DRIVE
     lda #0
     sta FNAME_LEN
-    lda #0
     sta IS_BASIC
+    sta IS_DIRTY
     lda #$FF
     sta IS_NEW_FILE   ; new editor session starts with a new file
-    lda #0
-    sta IS_DIRTY
     rts
 
 ; ============================================================================
@@ -868,22 +859,8 @@ apply_colors:
 ; ============================================================================
 
 setup_screen:
-    ; Clear screen RAM
-    ldx #0
-    lda #SCR_SPACE
-@clr:
-    sta SCREEN+$000,x
-    sta SCREEN+$100,x
-    sta SCREEN+$200,x
-    sta SCREEN+$300,x
-    inx
-    bne @clr
-
-    ; GAP_END = work_buf_end (entire buffer is gap to start with)
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
+    ; Clear screen, empty gap, TOP_LINE/LEFT_COL/IS_BASIC — same as blank
+    jsr setup_screen_blank
 
     ; Copy test content into work_buf.
     lda #<test_buffer
@@ -913,20 +890,7 @@ setup_screen:
     inc BUF_PTR+1
     jmp @copy
 @copy_done:
-    lda BUF_PTR
-    sta GAP_START
-    lda BUF_PTR+1
-    sta GAP_START+1
-
-    lda #<work_buf
-    sta TOP_LINE
-    lda #>work_buf
-    sta TOP_LINE+1
-    lda #0
-    sta LEFT_COL
-    lda #$FF
-    sta IS_BASIC
-    rts
+    jmp gap_at_buf_ptr      ; GAP_START = BUF_PTR (tail call)
 
 ; ============================================================================
 ; setup_screen_blank — like setup_screen but initialises an empty gap buffer.
@@ -944,14 +908,9 @@ setup_screen_blank:
     inx
     bne @clr
 
-    lda #<work_buf
-    sta GAP_START
+    ldx #<work_buf
     lda #>work_buf
-    sta GAP_START+1
-    lda #<work_buf_end
-    sta GAP_END
-    lda #>work_buf_end
-    sta GAP_END+1
+    jsr gap_at_xa
 
     lda #<work_buf
     sta TOP_LINE
@@ -1013,9 +972,7 @@ modal_draw_text:
 ; Single choke point so the restore (and any future cursor un-park) lives in
 ; one place. Clobbers A, X (via render_status).
 ; ============================================================================
-modal_exit:
-    jmp render_status             ; tail-call: repaints the whole status row
-
+modal_exit:                       ; same routine: repaints the whole status row
 render_status:
     ldx #0
 @loop:
@@ -1602,15 +1559,12 @@ settings_draw_row:
 ; SCREEN_PTR must already point to the screen row start.
 ; ============================================================================
 settings_write_label:
-    stx SAVED_X                    ; preserve row index
-
-    ; Load label pointer for row X (sequential tables, index directly)
+    ; Load label pointer for row X (sequential tables, index directly).
+    ; X is not touched, so the row index survives for the caller.
     lda pop_label_lo,x
     sta TMP
     lda pop_label_hi,x
     sta TMP+1
-
-    ldx SAVED_X                    ; restore row index into X
 
     ldy #0
     sty POP_LBL_IDX                ; label byte index starts at 0
@@ -1618,9 +1572,6 @@ settings_write_label:
     ldy POP_LBL_IDX
     lda (TMP),y                    ; read next label byte
     beq @lbl_done                  ; zero terminator = done
-    ldy POP_LBL_IDX
-    clc
-    adc #0                         ; no-op, keep A
     pha                            ; save char
     lda POP_LBL_IDX
     clc
@@ -1878,132 +1829,8 @@ rv_row_loop:
     jmp @scan_loop
 @past_cr:
     jsr advance_buf
-    jmp rv_next_row          ; advance SCREEN_PTR and loop for next row
+                             ; fall through: advance SCREEN_PTR, loop for next row
 
-
-; ============================================================================
-; expand_token — expand a BASIC token byte to screen chars in render_viewport.
-;
-; On entry: A = token byte ($80-$CA), Y = current screen column (0-39)
-; On exit:  Y = updated screen column (advanced by keyword length)
-;           BUF_PTR advanced by 1 (past the token byte)
-; Clobbers: A, X, TXT_PTR, CLR_TMP
-;
-; Uses the C64 BASIC 2.0 ROM keyword table at $A09E (visible with $01=$37).
-; Each entry: PETSCII chars, last char has bit 7 set. Token $80 = entry 0.
-; ============================================================================
-expand_token:
-    ; Save screen col (Y) to TMP, use Y=0 for ROM reads
-    sty TMP
-    ; Compute entry offset: token - $80
-    sec
-    sbc #$80
-    sta SAVED_X                 ; SAVED_X = entries to skip (not clobbered by lookup_screen)
-
-    lda #<$A09E
-    sta TXT_PTR
-    lda #>$A09E
-    sta TXT_PTR+1
-
-    ; Skip SAVED_X entries
-@et_skip:
-    lda SAVED_X
-    beq @et_found
-@et_skip_char:
-    ldy #0
-    lda (TXT_PTR),y
-    inc TXT_PTR
-    bne :+
-    inc TXT_PTR+1
-:   asl a                       ; old bit7 → carry (INC clobbered N, not A)
-    bcc @et_skip_char           ; carry=0 → bit7 was 0 (non-last char) → loop
-    dec SAVED_X
-    jmp @et_skip
-
-@et_found:
-    ; Output chars from TXT_PTR to (SCREEN_PTR)+col
-    ; TMP = screen col
-@et_char:
-    ldy #0
-    lda (TXT_PTR),y
-    sta CLR_TMP                 ; save with bit7
-    and #$7F                    ; strip bit7 → PETSCII
-    jsr lookup_screen           ; → screen code in A; X unchanged; SAVED_X clobbered (ok)
-    ldy TMP                     ; screen col
-    cpy #COLS
-    bcs @et_done
-    sta (SCREEN_PTR),y
-    inc TMP                     ; advance screen col
-    inc TXT_PTR
-    bne :+
-    inc TXT_PTR+1
-:   lda CLR_TMP
-    bpl @et_char                ; bit7 clear = more chars
-
-@et_done:
-    jsr advance_buf             ; advance BUF_PTR past the 1-byte token
-    ldy TMP                     ; return updated screen col
-    rts
-
-; ============================================================================
-; expand_extended_token — expand a custom token byte ($CC-$D8) to screen chars.
-;
-; Same calling convention as expand_token:
-; On entry: A = token byte ($CC-$D8), Y = current screen column (0-39)
-; On exit:  Y = updated screen column, BUF_PTR advanced past token
-; Clobbers: A, TXT_PTR, CLR_TMP, TMP, SAVED_X
-; Uses kw_strtab/kw_len_tab from colorize.asm (included below).
-; ============================================================================
-expand_extended_token:
-    stx EXT_X_SAVE      ; save X without touching A
-    sty TMP
-    sec
-    sbc #$80                    ; 0-based index into kw_strtab/kw_len_tab
-    sta SAVED_X
-
-    lda #<kw_strtab
-    sta TXT_PTR
-    lda #>kw_strtab
-    sta TXT_PTR+1
-
-    ldx #0
-@ee_skip:
-    cpx SAVED_X
-    beq @ee_emit
-    lda kw_len_tab,x
-    clc
-    adc TXT_PTR
-    sta TXT_PTR
-    bcc :+
-    inc TXT_PTR+1
-:   inx
-    jmp @ee_skip
-
-@ee_emit:
-    ldx SAVED_X
-    lda kw_len_tab,x
-    sta CLR_TMP             ; char count — CLR_TMP is $19 = CLR_KWLEN, a real .res
-    lda #0
-    sta COL_SAVE            ; COL_SAVE ($12) = keyword char index
-@ee_char:
-    ldy COL_SAVE            ; Y = char index
-    lda (TXT_PTR),y        ; read keyword char
-    jsr lookup_screen       ; Y preserved (lookup_screen only touches A, X, SAVED_X)
-    ldy TMP                 ; Y = screen col
-    cpy #COLS
-    bcs @ee_done
-    sta (SCREEN_PTR),y      ; write to screen — (zp),Y is legal
-    inc TMP                 ; advance screen col
-    inc COL_SAVE            ; advance char index
-    dec CLR_TMP             ; decrement count
-    beq @ee_done
-    jmp @ee_char
-@ee_done:
-    jsr advance_buf
-    ldy TMP
-    ldx EXT_X_SAVE      ; restore X
-    rts
- 
 rv_next_row:
     clc
     lda SCREEN_PTR
@@ -3491,8 +3318,6 @@ SETTING_BG:     .res 1             ; background color (C64 color index 0–15)
 SETTING_FG:     .res 1             ; foreground / text color (C64 color index 0–15)
 SETTING_BLINK:  .res 1             ; cursor blink: 0=off, 1=on
 
-MOD_LOADED:           .res 1   ; $FF = none loaded
-SETTING_TOKENIZE_SAVE:.res 1   ; 0=plain text, 1=tokenize on save
 MOD_SEL_ROW:          .res 1   ; currently selected row in picker
 MOD_ITEM_TMP:         .res 1
 MOD_TMP:              .res 1   ; scratch byte for module popup
@@ -3503,11 +3328,13 @@ SETTINGS_ROW_TMP: .res 1          ; loop counter in settings_draw_all
 POP_ROW_CTR:      .res 1          ; row counter in settings_draw_box side loop
 POP_ROW_TMP:      .res 1          ; screen row number of current settings row being drawn
 POP_LBL_IDX:      .res 1          ; byte index into current label string
-POP_CHAR_TMP:     .res 1          ; single-char scratch for settings renderer
 
 ; ---- File I/O scratch ----
 FNAME_BUF:       .res 16            ; filename entered by user (PETSCII, not NUL-term)
-FNAME_LEN:       .res 1             ; length of FNAME_BUF content
+FNAME_LEN:       .res 1             ; length of FNAME_BUF content (must follow it)
+FNAME_STASH:     .res 17            ; FNAME_BUF+FNAME_LEN saved around a load
+DSK_PEND_FNAME:  .res 16            ; MODDSK's chosen file, adopted on load
+DSK_PEND_LEN:    .res 1
 IO_STATUS:       .res 1             ; ST value captured after file operations
 PROMPT_IS_SAVE:  .res 1
 LOAD_AS_SOURCE:  .res 1             ; F6 load: 1 = force SEQ source (",S,R", no
@@ -3520,7 +3347,6 @@ IO_NAME_BUF_LEN: .res 1
 IS_BASIC:        .res 1   ; $FF = BASIC program, $00 = plain text
 IS_NEW_FILE:     .res 1   ; $FF = new unsaved file
 IS_DIRTY:        .res 1   ; $FF = buffer modified since last save/load
-EXT_X_SAVE:      .res 1     ; in BSS — render_viewport row counter save
 FP_TOP_SAVE:     .res 2     ; saved TOP_LINE for fast-path scroll detection
 FP_LEFT_SAVE:    .res 1     ; saved LEFT_COL for fast-path scroll detection
 COL_PEEK:        .res 9     ; gap-aware lookahead buffer for col_match_kw (longest kw = 8)
@@ -3551,252 +3377,3 @@ work_buf:      .res BUF_SIZE
 work_buf_end:                      ; label sits immediately after work_buf
 .endif
 .segment "CODE"
-
-
-
-
-
-; ============================================================================
-; tokenize_line — tokenize the current line in-place in the gap buffer.
-;
-; Called before insert_return to convert typed keyword strings to BASIC
-; token bytes in the content before the cursor (between line start and
-; GAP_START).  Since tokens are 1 byte and keyword strings are 2-7 bytes,
-; the content may shrink; GAP_START is updated accordingly.
-;
-; Algorithm (two-pointer in-place compaction):
-;   SRC (TXT_PTR): scans forward from line start to GAP_START
-;   DST (LPTR):     trails SRC, writes tokenized result
-;   in_string (CLR_TMP): $00=normal, $FF=inside "..."
-;
-; On entry:  GAP_START points one past the last typed char on the line.
-; On exit:   GAP_START = DST (adjusted for any keyword compression).
-; Clobbers:  A, X, Y, TXT_PTR, LPTR, CLR_CTMP, CLR_TMP, KW_TOKEN, CLR_KWLEN
-; ============================================================================
-tokenize_line:
-    ; ── Step 1: find start of current line ─────────────────────────────────
-    ; Scan backwards from GAP_START-1 for a CR (or buffer start).
-    lda GAP_START
-    sta TXT_PTR
-    lda GAP_START+1
-    sta TXT_PTR+1
-    ; Decrement TXT_PTR to GAP_START-1
-    lda TXT_PTR
-    bne @tl_gs_noborrow
-    dec TXT_PTR+1
-@tl_gs_noborrow:
-    dec TXT_PTR
-
-@tl_scan_back:
-    ; Stop if TXT_PTR < work_buf
-    lda TXT_PTR+1
-    cmp #>work_buf
-    bcc @tl_at_buf_start
-    bne @tl_check_cr
-    lda TXT_PTR
-    cmp #<work_buf
-    bcc @tl_at_buf_start
-@tl_check_cr:
-    ldy #0
-    lda (TXT_PTR),y
-    cmp #PET_CR
-    beq @tl_found_cr
-    lda TXT_PTR
-    bne :+
-    dec TXT_PTR+1
-:   dec TXT_PTR
-    jmp @tl_scan_back
-
-@tl_found_cr:
-    ; Step past the CR so TXT_PTR = first char of line
-    inc TXT_PTR
-    bne @tl_start_ok
-    inc TXT_PTR+1
-    jmp @tl_start_ok
-
-@tl_at_buf_start:
-    lda #<work_buf
-    sta TXT_PTR
-    lda #>work_buf
-    sta TXT_PTR+1
-
-@tl_start_ok:
-    ; ── Step 2: init DST = SRC = line start, in_string = 0 ────────────────
-    lda TXT_PTR
-    sta LPTR
-    lda TXT_PTR+1
-    sta LPTR+1
-    lda #0
-    sta CLR_TMP             ; in_string flag
-
-    ; ── Step 3: main tokenize loop ──────────────────────────────────────────
-@tl_loop:
-    ; Done when SRC >= GAP_START
-    lda TXT_PTR+1
-    cmp GAP_START+1
-    bcc @tl_process
-    beq @tl_check_lo
-    jmp @tl_done
-@tl_check_lo:
-    lda TXT_PTR
-    cmp GAP_START
-    bcc @tl_process
-    jmp @tl_done
-
-@tl_process:
-    lda CLR_TMP
-    beq @tl_not_in_str
-    jmp @tl_in_str          ; non-zero = inside string or REM
-@tl_not_in_str:
-
-    ; Normal mode: read next byte
-    ldy #0
-    lda (TXT_PTR),y
-
-    cmp #$22                ; opening quote?
-    bne @tl_not_quote
-    lda #$FF
-    sta CLR_TMP             ; enter string mode
-    jmp @tl_copy
-
-@tl_not_quote:
-    ; Uppercase PETSCII letter? $41-$5A = A-Z
-    cmp #$41
-    bcc @tl_copy            ; < 'A', just copy
-    cmp #$5B
-    bcs @tl_copy            ; > 'Z', just copy
-
-    ; It's a letter — try to match a BASIC keyword
-    jsr tl_match_kw         ; C=1: KW_TOKEN=token, CLR_KWLEN=length
-    bcc @tl_copy            ; no match, copy byte as-is
-
-    ; ── Keyword matched ─────────────────────────────────────────────────────
-    ldy #0
-    sta (LPTR),y            ; write token byte to DST
-    inc LPTR
-    bne :+
-    inc LPTR+1
-:
-    ; Advance SRC by keyword length
-@tl_src_advance:
-    inc TXT_PTR
-    bne :+
-    inc TXT_PTR+1
-:   dec CLR_KWLEN
-    bne @tl_src_advance
-
-    ; REM ($8F): copy rest of line verbatim (comment body must not be tokenized)
-    lda KW_TOKEN
-    cmp #$8F
-    bne @tl_loop
-@tl_rem_body:
-    lda TXT_PTR+1
-    cmp GAP_START+1
-    bcc @tl_rem_do
-    bne @tl_done
-    lda TXT_PTR
-    cmp GAP_START
-    bcs @tl_done
-@tl_rem_do:
-    ldy #0
-    lda (TXT_PTR),y
-    sta (LPTR),y
-    inc TXT_PTR
-    bne :+
-    inc TXT_PTR+1
-:   inc LPTR
-    bne :+
-    inc LPTR+1
-:   jmp @tl_rem_body
-
-@tl_in_str:
-    ; Inside string literal — copy verbatim, watch for closing quote
-    ldy #0
-    lda (TXT_PTR),y
-    cmp #$22
-    bne @tl_copy
-    lda #0
-    sta CLR_TMP             ; closing quote: exit string mode
-    jmp @tl_copy
-
-@tl_copy:
-    ; Copy one byte SRC→DST, advance both pointers
-    ldy #0
-    lda (TXT_PTR),y
-    sta (LPTR),y
-    inc TXT_PTR
-    bne :+
-    inc TXT_PTR+1
-:   inc LPTR
-    bne :+
-    inc LPTR+1
-:   jmp @tl_loop
-
-@tl_done:
-    ; GAP_START = DST (gap may have grown if keywords were compressed)
-    lda LPTR
-    sta GAP_START
-    lda LPTR+1
-    sta GAP_START+1
-    rts
-
-
-; ============================================================================
-; ============================================================================
-; tl_match_kw — match BASIC keyword at TXT_PTR against our own kw_strtab.
-;
-; Walks kw_strtab (token order $80-$CB), comparing each keyword against the
-; buffer at TXT_PTR using kw_len_tab for lengths.  No ROM dependency, no
-; bit-7 terminator tricks, no PHA/PLA stack gymnastics.
-;
-; On entry:  TXT_PTR points to candidate keyword start in buffer.
-; On exit:   C=1 → KW_TOKEN = token byte ($80-$CB), CLR_KWLEN = char count
-;            C=0 → no match
-; Clobbers:  A, X, Y, CLR_CTMP, KW_TOKEN (ZP_SCRATCH+0), CLR_KWLEN
-; ============================================================================
-tl_match_kw:
-    lda #<kw_strtab
-    sta CLR_CTMP            ; $1A/$1B — safe, not used during tokenize_line
-    lda #>kw_strtab
-    sta CLR_CTMP+1
-    lda #$80
-    sta SAVED_X             ; $0F — token counter
-
-@tmk_try:
-    lda SAVED_X
-    cmp #$D9
-    bcs @tmk_no_match
-
-    sec
-    sbc #$80
-    tax
-    lda kw_len_tab,x
-    sta CLR_KWLEN           ; $19 — safe
-
-    ldy #0
-@tmk_cmp:
-    lda (CLR_CTMP),y        ; kwtab pointer — now using $1A/$1B
-    cmp (TXT_PTR),y
-    bne @tmk_miss
-
-    iny
-    cpy CLR_KWLEN
-    bcc @tmk_cmp
-
-    lda SAVED_X
-    sec
-    rts
-
-@tmk_miss:
-    clc
-    lda CLR_CTMP
-    adc CLR_KWLEN
-    sta CLR_CTMP
-    bcc :+
-    inc CLR_CTMP+1
-:   inc SAVED_X
-    jmp @tmk_try
-
-@tmk_no_match:
-    clc
-    rts

@@ -49,7 +49,16 @@ matching handler; otherwise it passes the statement to BASIC unchanged.
 
 **Numeric arguments are single bytes (0–255), except `ONERR`.** `DRIVE` and
 `PAUSE` read their numeric argument with BASIC's GETBYT routine, so values
-above 255 will not work as expected. `ONERR` takes a full 16-bit line number.
+above 255 will not work as expected. `ONERR` takes a full 16-bit line number
+(any numeric expression, 0–65535; a string gives `?TYPE MISMATCH`, a value out
+of range `?ILLEGAL QUANTITY`).
+
+**Extended keywords work after `THEN`.** `IF EX=1 THEN DELETE "DEMO"` runs
+`DELETE` only when the condition is true. (BASIC's `IF` would otherwise hand
+the keyword straight to its own executor, bypassing the hook; the tokenizer
+quietly inserts a `:` after `THEN` so the keyword goes through the hook. The
+inserted `:` changes nothing else — a false `IF` still skips the rest of the
+line.)
 
 **String arguments are quoted.** Disk-name keywords expect a quoted string,
 e.g. `DELETE "OLDFILE"`. Two-name keywords use `TO` between the names, e.g.

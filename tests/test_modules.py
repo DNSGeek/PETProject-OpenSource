@@ -7,8 +7,9 @@ parameter block at $0212, editor gap pointers in zero page $02-$05.
 
 Covers MODTOK/MODDET (tokenize + detokenize round trip, REM/DATA literals,
 overflow restore), MODREN (ON...GOTO lists, a split gap, the in-place
-overtake guard) and MODSFR (find / find next / replace / delete, case
-folding, the gap-full guard), driven by a scripted GETIN key queue.
+overtake guard), MODSFR (find / find next / replace / delete, case
+folding, the gap-full guard), driven by a scripted GETIN key queue, and
+MODSCT (the script tokenizer; REU DMA emulated on writes to $DF01).
 
 Usage:
     bash make_petproject.sh      # produces build/*.prg
@@ -33,13 +34,39 @@ JIFFY_LO = 0xA2
 KEY_STOP = 0x03
 
 
+def reu_dma(mem, reu):
+    """Perform the transfer just started by a write to the REU command
+    register $DF01 (stash/fetch only, both addresses incrementing)."""
+    cmd = mem[0xDF01]
+    c64 = mem[0xDF02] | (mem[0xDF03] << 8)
+    ext = mem[0xDF04] | (mem[0xDF05] << 8) | (mem[0xDF06] << 16)
+    n = (mem[0xDF07] | (mem[0xDF08] << 8)) or 0x10000
+    for i in range(n):
+        a, r = (c64 + i) & 0xFFFF, (ext + i) % len(reu)
+        if cmd & 3 == 0:
+            reu[r] = mem[a]
+        elif cmd & 3 == 1:
+            mem[a] = reu[r]
+        else:
+            raise AssertionError(f"REU command ${cmd:02x} not emulated")
+    mem[0xDF01] = cmd & 0x7F  # transfer done: execute bit clears
+
+
 def run_module(
-    name, pre, post=b"", buf_end=BUF_END, max_steps=50_000_000, keys=None, fill=None
+    name,
+    pre,
+    post=b"",
+    buf_end=BUF_END,
+    max_steps=50_000_000,
+    keys=None,
+    fill=None,
+    reu=None,
 ):
     """Run module `name` on the gap buffer [pre | gap | post].
 
     With `keys`, GETIN ($FFE4) returns those PETSCII codes one per call,
     then STOP; the jiffy clock at $A2 ticks so timed waits finish. With
+    `reu` (a bytearray), a write to $DF01 runs that DMA against it. With
     `fill`, the module's 4 K region is pre-filled with that byte, standing
     in for whatever a previously loaded module left past the image.
 
@@ -98,6 +125,8 @@ def run_module(
                 m.pc = ret + 1
                 continue
         m.step()
+        if reu is not None and mem[0xDF01] & 0x80:
+            reu_dma(mem, reu)
     else:
         raise AssertionError(f"{name}: runaway at ${m.pc:04x}")
 
@@ -295,6 +324,53 @@ def test_tokenize_page_boundaries():
     print("ok: tokenize/restore across page boundaries")
 
 
+def run_sct(src):
+    """Tokenize script `src` with MODSCT; return the tokenized program
+    from the REU script slot ($000000, length from the metadata block)."""
+    reu = bytearray(0x20000)
+    st, _, _ = run_module("modsct", src, reu=reu)
+    assert st == 0x05, f"modsct status ${st:02x} for {src!r}"
+    meta = reu[0x8100 : 0x8100 + 6]
+    assert meta[:2] == b"SC", f"metadata {bytes(meta)!r}"
+    return bytes(reu[: meta[2] | (meta[3] << 8)])
+
+
+def test_script_then_extended_keyword():
+    # After THEN, BASIC's IF jumps straight to $A7ED, bypassing IGONE, and
+    # $A7ED raises ?SYNTAX ERROR for the extended tokens: MODSCT puts a ':'
+    # in front so NEWSTT dispatches the token through IGONE instead.
+    st_src = b'10 EXISTS "DEMO"\r20 IF EX=1 THEN DELETE "DEMO"\r30 END\r'
+    out = run_sct(st_src)
+    check(b'\xa7 :\xd0 "DEMO"' in out, "THEN <extended keyword> gets a ':'")
+    # line links still chain to the end marker with the extra byte
+    a, n = 0x0801, 0
+    while True:
+        link = out[a - 0x0801] | (out[a - 0x0800] << 8)
+        if link == 0:
+            break
+        a, n = link, n + 1
+    check(n == 3 and a - 0x0801 == len(out) - 2, "link words count the ':'")
+    # modsct keeps spaces and writes no load address: a one-line body is
+    # out[4:-3] (link, line number / terminator, end marker)
+    cases = [
+        (b"10 IF X THEN ONERR 100\r", b"\x8b X \xa7 :\xd5 100"),
+        (b"10 IFXTHENDIR\r", b"\x8bX\xa7:\xd8"),  # no spaces either
+        (b"10 IF X THEN IF Y THEN DIR\r", b"\x8b X \xa7 \x8b Y \xa7 :\xd8"),
+        (b"10 IF X THEN 100\r", b"\x8b X \xa7 100"),  # line number
+        (b"10 IF X GOTO 100\r", b"\x8b X \x89 100"),  # no THEN
+        (b"10 IF X THEN PRINT\r", b"\x8b X \xa7 \x99"),  # stock keyword
+        (b"10 IF X THEN X=1:DIR\r", b"\x8b X \xa7 X\xb21:\xd8"),
+        (b"10 REM THEN DIR\r", b"\x8f THEN DIR"),  # REM stays literal
+        (b'10 PRINT "THEN DIR"\r', b'\x99 "THEN DIR"'),
+        (b"10 DATA THEN DIR\r", b"\x83 THEN DIR"),
+        (b"10 X=1:DIR\r", b"X\xb21:\xd8"),
+    ]
+    for src, want in cases:
+        out = run_sct(src)
+        assert out[4:-3] == want, f"{src!r}: {out!r}"
+    print("ok: only an extended keyword right after THEN gets a ':'")
+
+
 def test_renumber():
     src = b"5 ON X GOTO 7, 9 ,5\r7 GOSUB 9\r9 IF A THEN 5\r"
     expected = b"10 ON X GOTO 20, 30 ,10\r20 GOSUB 30\r30 IF A THEN 10\r"
@@ -395,7 +471,7 @@ def test_search_replace():
 
 
 def main():
-    for name in ("modtok", "moddet", "modren", "modsfr"):
+    for name in ("modtok", "moddet", "modren", "modsfr", "modsct"):
         if not (BUILD / f"{name}.prg").exists():
             sys.exit(f"build/{name}.prg not found — run: bash make_petproject.sh")
     test_tokenize_round_trip()
@@ -403,6 +479,7 @@ def main():
     test_every_keyword()
     test_shifted_abbreviations()
     test_tokenize_page_boundaries()
+    test_script_then_extended_keyword()
     test_renumber()
     test_renumber_overtake_guard()
     test_search_replace()

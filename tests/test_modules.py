@@ -7,8 +7,10 @@ parameter block at $0212, editor gap pointers in zero page $02-$05.
 
 Covers MODTOK/MODDET (tokenize + detokenize round trip, REM/DATA literals,
 overflow restore), MODREN (ON...GOTO lists, a split gap, the in-place
-overtake guard) and MODSFR (find / find next / replace / delete, case
-folding, the gap-full guard), driven by a scripted GETIN key queue.
+overtake guard), MODSFR (find / find next / replace / delete, case
+folding, the gap-full guard), driven by a scripted GETIN key queue, and
+MODDIS (a final instruction cut short by the end of the binary, output
+truncated at a line boundary when it outgrows the buffer).
 
 Usage:
     bash make_petproject.sh      # produces build/*.prg
@@ -394,8 +396,67 @@ def test_search_replace():
     )
 
 
+DIS_NOTICE = b"; *** DISASSEMBLY TRUNCATED ***\r"
+
+
+def test_disassemble_short_tail():
+    # A PRG ending in a lone JSR opcode: its operand bytes would lie past
+    # the end of the binary, where the output text starts.
+    st, out, _ = run_module("moddis", bytes([0x01, 0x08, 0xA9, 0x41, 0x20]))
+    lines = out.split(b"\r")
+    check(
+        st == 0x02
+        and lines[0] == b".ORG $0801"
+        and lines[1].startswith(b"    LDA #$41    ;0801:A9 41")
+        and lines[2].startswith(b"    .BYTE $20   ;0803:20 ")
+        and len(lines[1]) == len(lines[2])
+        and lines[3:] == [b""],
+        "dis: lone final $20 shown as .BYTE $20, not JSR",
+    )
+    # LDA abs with one operand byte left: both leftovers become .BYTE
+    st, out, _ = run_module("moddis", bytes([0x00, 0xC0, 0xEA, 0xAD, 0x34]))
+    lines = out.split(b"\r")
+    check(
+        st == 0x02
+        and lines[1].startswith(b"    NOP         ;C000:EA")
+        and lines[2].startswith(b"    .BYTE $AD   ;C001:AD ")
+        and lines[3].startswith(b"    .BYTE $34   ;C002:34 ")
+        and lines[4:] == [b""],
+        "dis: every byte of a cut-short instruction shown as .BYTE",
+    )
+
+
+def test_disassemble_truncates_at_line():
+    # 4 K of code makes ~150 K of text; the 24 K buffer holds a few hundred
+    # lines, so the listing must stop on a whole line and say so.
+    body = bytes([0xAD, 0x34, 0x12, 0xEA] * 1024)
+    pre = bytes([0x00, 0x10]) + body
+    st, out, mem = run_module("moddis", pre)
+    new_end = mem[0x021F] | (mem[0x0220] << 8)
+    lines = out.split(b"\r")[:-1]
+    check(
+        st == 0x02
+        and out.endswith(DIS_NOTICE)
+        and out.count(DIS_NOTICE) == 1
+        and new_end < BUF_END
+        and len(lines) > 100
+        and all(len(x) == 36 for x in lines[1:-1]),
+        "dis: oversized listing ends on a whole line with the truncation notice",
+    )
+    # the notice is a comment line, so the partial listing still assembles
+    check(lines[-1].startswith(b";"), "dis: truncation notice is a ';' comment")
+    # an end that isn't page-aligned: no bytes lost before it, one byte free
+    for end in (BUF_END - 0x41, BUF_END - 0xC3):
+        st, out, mem = run_module("moddis", pre, buf_end=end)
+        new_end = mem[0x021F] | (mem[0x0220] << 8)
+        room = end - BUF - len(pre)
+        assert st == 0x02 and out.endswith(DIS_NOTICE) and new_end < end
+        assert len(out) + 37 >= room, f"stopped early: {len(out)} of {room}"
+    print("ok: dis: unaligned buffer ends used to the last whole line")
+
+
 def main():
-    for name in ("modtok", "moddet", "modren", "modsfr"):
+    for name in ("modtok", "moddet", "modren", "modsfr", "moddis"):
         if not (BUILD / f"{name}.prg").exists():
             sys.exit(f"build/{name}.prg not found — run: bash make_petproject.sh")
     test_tokenize_round_trip()
@@ -406,6 +467,8 @@ def main():
     test_renumber()
     test_renumber_overtake_guard()
     test_search_replace()
+    test_disassemble_short_tail()
+    test_disassemble_truncates_at_line()
     print("\nall module tests passed")
 
 
